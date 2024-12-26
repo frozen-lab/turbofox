@@ -67,6 +67,10 @@ impl HashItem {
         String::from_utf8_lossy(&value_bytes).trim_end_matches('\0').to_string()
     }
 
+    fn key_from_bytes(key_bytes: [u8; MAX_KEY_SIZE]) -> String {
+        String::from_utf8_lossy(&key_bytes).trim_end_matches('\0').to_string()
+    }
+
     fn empty() -> [u8; MAX_BUCKET_SIZE] {
         vec![b'\0'; MAX_BUCKET_SIZE].try_into().unwrap()
     }
@@ -90,8 +94,9 @@ impl HashTable {
     pub fn set(&mut self, key: &str, value: &str) {
         let load_factor = (self.size as f64 * 0.75) as usize;
 
+        // extend the table upon reaching 75% of capacity
         if self.no_of_taken >= load_factor {
-            // TODO: Extend the kvs
+            self.extend();
         }
 
         match HashItem::new(key, value) {
@@ -205,6 +210,36 @@ impl HashTable {
         }
 
         return None;
+    }
+
+    fn extend(&mut self) {
+        let new_size = self.size * 2;
+
+        let mut new_self = HashTable {
+            kvs: vec![b'\0'; new_size * MAX_BUCKET_SIZE],
+            size: new_size,
+            no_of_taken: 0,
+        };
+
+        for i in 0..self.size {
+            let offset = i * MAX_BUCKET_SIZE;
+
+            if self.kvs[offset] == b'\0' {
+                continue;
+            }
+
+            let stored_key: [u8; MAX_KEY_SIZE] = self.kvs[offset..(offset + MAX_KEY_SIZE)].try_into().unwrap();
+            let stored_value: [u8; MAX_VALUE_SIZE] = self.kvs[(offset + MAX_KEY_SIZE)..(offset + MAX_BUCKET_SIZE)]
+                .try_into()
+                .unwrap();
+
+            let key = HashItem::key_from_bytes(stored_key);
+            let value = HashItem::value_from_bytes(stored_value);
+
+            new_self.set(&key, &value);
+        }
+
+        *self = new_self;
     }
 
     fn get_hash_index(&self, key: &str) -> usize {
