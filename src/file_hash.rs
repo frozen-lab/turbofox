@@ -15,8 +15,8 @@ pub trait Hashable {
 }
 
 impl Hashable for &str {
+    // FNV-1a hash function
     fn hash(&self) -> u64 {
-        // FNV-1a hash function for better distribution
         let mut hash: u64 = 14695981039346656037; // FNV offset basis
         for byte in self.as_bytes() {
             hash ^= *byte as u64;
@@ -158,6 +158,8 @@ impl FileHash {
                 self.file.seek(SeekFrom::Start(offset))?;
                 self.file.write_all(&hash_item.to_bytes())?;
                 self.increment_no_of_taken()?;
+
+                self.file.flush()?;
                 return Ok(());
             }
 
@@ -165,6 +167,8 @@ impl FileHash {
                 // Update existing key
                 self.file.seek(SeekFrom::Start(offset))?;
                 self.file.write_all(&hash_item.to_bytes())?;
+
+                self.file.flush()?;
                 return Ok(());
             }
 
@@ -240,6 +244,7 @@ impl FileHash {
                 self.file.write_all(&vec![0u8; BUCKET_SIZE as usize])?;
                 self.decrement_no_of_taken()?;
 
+                self.file.flush()?;
                 return Ok(Some(value));
             }
 
@@ -308,6 +313,7 @@ impl FileHash {
         self.no_of_taken += 1;
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&self.no_of_taken.to_le_bytes())?;
+
         Ok(())
     }
 
@@ -317,6 +323,122 @@ impl FileHash {
             self.file.seek(SeekFrom::Start(0))?;
             self.file.write_all(&self.no_of_taken.to_le_bytes())?;
         }
+
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn cleanup() {
+        let _ = fs::remove_file(FILE_PATH);
+    }
+
+    #[test]
+    fn test_init() {
+        cleanup();
+        let hash = FileHash::init().unwrap();
+        assert_eq!(hash.size, INITIAL_BUCKETS);
+        assert_eq!(hash.no_of_taken, 0);
+        cleanup();
+    }
+
+    #[test]
+    fn test_basic_set_get() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+        hash.set("key1", "value1").unwrap();
+        assert_eq!(hash.get("key1").unwrap(), Some("value1".to_string()));
+        cleanup();
+    }
+
+    #[test]
+    fn test_update_existing() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+        hash.set("key1", "value1").unwrap();
+        hash.set("key1", "value2").unwrap();
+        assert_eq!(hash.get("key1").unwrap(), Some("value2".to_string()));
+        cleanup();
+    }
+
+    #[test]
+    fn test_delete() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+        hash.set("key1", "value1").unwrap();
+        assert_eq!(hash.del("key1").unwrap(), Some("value1".to_string()));
+        assert_eq!(hash.get("key1").unwrap(), None);
+        cleanup();
+    }
+
+    #[test]
+    fn test_collision_handling() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+        // Force collision by filling specific buckets
+        hash.set("a", "value1").unwrap();
+        hash.set("b", "value2").unwrap();
+        hash.set("c", "value3").unwrap();
+
+        assert_eq!(hash.get("a").unwrap(), Some("value1".to_string()));
+        assert_eq!(hash.get("b").unwrap(), Some("value2".to_string()));
+        assert_eq!(hash.get("c").unwrap(), Some("value3".to_string()));
+        cleanup();
+    }
+
+    #[test]
+    fn test_size_limits() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+
+        // Test key size limit
+        let long_key = "a".repeat(KEY_SIZE + 1);
+        hash.set(&long_key, "value").unwrap();
+        assert_eq!(hash.get(&long_key).unwrap(), None);
+
+        // Test value size limit
+        let long_value = "a".repeat(VALUE_SIZE + 1);
+        hash.set("key", &long_value).unwrap();
+        assert_eq!(hash.get("key").unwrap(), None);
+        cleanup();
+    }
+
+    #[test]
+    fn test_auto_resize() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+        let initial_size = hash.size;
+
+        // Fill up to trigger resize
+        for i in 0..((INITIAL_BUCKETS as f64 * 0.8) as i32) {
+            hash.set(&format!("key{}", i), &format!("value{}", i)).unwrap();
+        }
+
+        assert!(hash.size > initial_size);
+        cleanup();
+    }
+
+    #[test]
+    fn test_delete_nonexistent() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+        assert_eq!(hash.del("nonexistent").unwrap(), None);
+        cleanup();
+    }
+
+    #[test]
+    fn test_unicode_handling() {
+        cleanup();
+        let mut hash = FileHash::init().unwrap();
+        hash.set("🦀", "rust").unwrap();
+        hash.set("키", "값").unwrap();
+
+        assert_eq!(hash.get("🦀").unwrap(), Some("rust".to_string()));
+        assert_eq!(hash.get("키").unwrap(), Some("값".to_string()));
+        cleanup();
     }
 }
