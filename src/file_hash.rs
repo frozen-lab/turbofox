@@ -38,24 +38,38 @@ use std::{
 };
 
 const INITIAL_BUCKETS: u64 = 64;
+
 const KEY_SIZE: usize = 8;
 const VALUE_SIZE: usize = 56;
+
 const BUCKET_SIZE: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
+
 const METADATA_SIZE: u64 = 16; // 8 bytes for size + 8 bytes for no_of_taken
+
 const FILE_PATH: &str = "hash.tc";
 
+///
+/// Trait for types that need to be hashed
+///
 pub trait Hashable {
+    ///
+    /// Computes hash for the type being implemented
+    ///
     fn hash(&self) -> u64;
 }
 
 impl Hashable for &str {
-    // FNV-1a hash function
     fn hash(&self) -> u64 {
-        let mut hash: u64 = 14695981039346656037; // FNV offset basis
+        // FNV offset basis
+        let mut hash: u64 = 14695981039346656037;
+
         for byte in self.as_bytes() {
             hash ^= *byte as u64;
-            hash = hash.wrapping_mul(1099511628211); // FNV prime
+
+            // FNV prime
+            hash = hash.wrapping_mul(1099511628211);
         }
+
         hash
     }
 }
@@ -116,6 +130,9 @@ impl HashItem {
     }
 }
 
+///
+/// A persistent KV store
+///
 pub struct FileHash {
     file: File,
     size: u64,
@@ -123,10 +140,18 @@ pub struct FileHash {
 }
 
 impl FileHash {
+    ///
+    /// Creates an instance of [FileHash]
+    ///
+    /// # Errors
+    ///
+    /// * `io::Error` -> If file operations fail.
+    ///
     pub fn init() -> io::Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).create(true).open(FILE_PATH)?;
 
         let file_size = file.metadata()?.len();
+
         let (size, no_of_taken) = if file_size == 0 {
             // Initialize new file
             let size = INITIAL_BUCKETS;
@@ -138,9 +163,11 @@ impl FileHash {
 
             // Initialize buckets
             let empty_bucket = vec![0u8; BUCKET_SIZE as usize];
+
             for _ in 0..size {
                 file.write_all(&empty_bucket)?;
             }
+
             file.flush()?;
 
             (size, no_of_taken)
@@ -148,11 +175,16 @@ impl FileHash {
             // Read existing metadata
             let mut buffer = [0u8; 8];
 
+            // No of taken
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut buffer)?;
+
             let no_of_taken = u64::from_le_bytes(buffer);
 
+            // Size
+            file.seek(SeekFrom::Start(8))?;
             file.read_exact(&mut buffer)?;
+
             let size = u64::from_le_bytes(buffer);
 
             (size, no_of_taken)
@@ -165,6 +197,18 @@ impl FileHash {
         })
     }
 
+    ///
+    /// Inserts or updates a key-value pair in the hash table.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` -> String key, must not exceed 8 bytes when UTF-8 encoded
+    /// * `value` -> String value, must not exceed 56 bytes when UTF-8 encoded
+    ///
+    /// # Errors
+    ///
+    /// * `io::Error` -> If file operations fail.
+    ///
     pub fn set(&mut self, key: &str, value: &str) -> io::Result<()> {
         // Check load factor and extend if necessary
         if (self.no_of_taken as f64 / self.size as f64) >= 0.75 {
@@ -207,12 +251,26 @@ impl FileHash {
             }
 
             index = (index + 1) % self.size;
+            
             if index == start_index {
                 return Err(io::Error::new(io::ErrorKind::Other, "Hash table is full"));
             }
         }
     }
 
+    ///
+    /// Retrieves the value associated with a key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` -> The key to look up
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(String))` -> Value if key exists
+    /// * `Ok(None)` -> If key doesn't exist or exceeds size limit
+    /// * `Err(io::Error)` -> If file operations fail
+    ///
     pub fn get(&mut self, key: &str) -> io::Result<Option<String>> {
         if key.as_bytes().len() > KEY_SIZE {
             return Ok(None);
@@ -247,6 +305,19 @@ impl FileHash {
         }
     }
 
+    /// 
+    /// Removes a key-value pair from the hash table.
+    ///
+    /// # Arguments
+    /// 
+    /// * `key` -> The key to remove
+    ///
+    /// # Returns
+    /// 
+    /// * `Ok(Some(String))` -> Removed value if key existed
+    /// * `Ok(None)` -> If key doesn't exist or exceeds size limit
+    /// * `Err(io::Error)` -> If file operations fail
+    /// 
     pub fn del(&mut self, key: &str) -> io::Result<Option<String>> {
         if key.as_bytes().len() > KEY_SIZE {
             return Ok(None);
