@@ -1,3 +1,37 @@
+//!
+//! A persistent hash table implementation that stores fixed sized KV pairs in a file.
+//!
+//! # Features
+//!
+//! - File-based storage with linear probing for collision resolution
+//! - Automatic table resizing when load factor exceeds 75%
+//! - Fixed-size keys (8 bytes) and values (56 bytes)
+//! - FNV-1a hash function implementation
+//!
+//! # Example Usage
+//!
+//! ```rust
+//! use turbo_cache::file_hash::FileHash;
+//!
+//! fn main() -> std::io::Result<()> {
+//!     let mut turbo_cache = FileHash::init()?;
+//!     
+//!     // Store Entries
+//!     turbo_cache.set("user_1", "John Doe")?;
+//!     turbo_cache.set("user_2", "Jane Smith")?;
+//!     
+//!     // Fetch Entries
+//!     assert_eq!(turbo_cache.get("user_1")?, Some("John Doe".to_string()));
+//!     
+//!     // Delete Entries
+//!     assert_eq!(turbo_cache.del("user_2")?, Some("Jane Smith".to_string()));
+//!     assert_eq!(turbo_cache.get("user_2")?, None);
+//!     
+//!     Ok(())
+//! }
+//! ```
+//!
+
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
