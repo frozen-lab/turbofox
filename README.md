@@ -1,15 +1,51 @@
 # TurboCache 🚀📦
 
-Benchmarks for Table (In Memory Bucket Based HashTable)
+A persistent, file-based Key-Value store implementation in Rust. 
 
-```txt
-Time taken for inserting 100K items: 175.97484ms
-Time taken for retrieval of 100K items: 16.315443ms
+It supports fixed-size KV storage with automatic resizing.
+
+## Features
+
+- File-based storage with linear probing for collision resolution
+- Automatic table resizing when load factor exceeds 75%
+- Fixed-size keys (8 bytes) and values (56 bytes)
+- FNV-1a hash function implementation
+
+## Usage
+
+```rust
+use turbo_cache::file_hash::FileHash;
+
+fn main() -> std::io::Result<()> {
+    let mut turbo_cache = FileHash::init()?;
+
+    // Store Entries
+    turbo_cache.set("user_1", "John Doe")?;
+    turbo_cache.set("user_2", "Jane Smith")?;
+
+    // Fetch Entries
+    assert_eq!(turbo_cache.get("user_1")?, Some("John Doe".to_string()));
+
+    // Delete Entries
+    assert_eq!(turbo_cache.del("user_2")?, Some("Jane Smith".to_string()));
+    assert_eq!(turbo_cache.get("user_2")?, None);
+
+    Ok(())
+}
 ```
 
-Benchmarks for FileHash (On Disk Bucket Based HashTable)
+## API
 
-```txt
-Time taken for inserting 100K items: 1.262989688s
-Time taken for retrieval of 100K items: 75.149364ms
-```
+### `FileHash::init() -> io::Result<FileHash>`
+Creates or opens hash table stored in `hash.tc`.
+
+### `set(&mut self, key: &str, value: &str) -> io::Result<()>`
+Inserts or updates a key-value pair.
+
+### `get(&mut self, key: &str) -> io::Result<Option<String>>`
+Retrieves value for given key.
+
+### `del(&mut self, key: &str) -> io::Result<Option<String>>`
+Removes key-value pair and returns removed value.
+
+

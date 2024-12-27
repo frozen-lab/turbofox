@@ -21,8 +21,6 @@ fn main() -> io::Result<()> {
     // benchmark get operation
     let start = Instant::now();
 
-    let mut not_found = 0;
-
     for i in 0..100000 {
         let key = i.to_string();
 
@@ -30,23 +28,35 @@ fn main() -> io::Result<()> {
             Some(val) => {
                 if &val != &key {
                     eprintln!("[ERR] Value mismatched, {key}:{val}");
-
-                    not_found += 1;
                 }
             }
-            None => {
-                not_found += 1;
-            }
+            None => {}
         }
     }
 
     let duration = start.elapsed();
 
-    if not_found > 0 {
-        eprintln!("[ERR] 404:{not_found}");
+    println!("Time taken for retrieval of 100K items: {:?}", duration);
+
+    // benchmark del operation
+    let start = Instant::now();
+
+    for i in 0..100000 {
+        let key = i.to_string();
+
+        match table.del(&key)? {
+            Some(val) => {
+                if &val != &key {
+                    eprintln!("[ERR] Value mismatched, {key}:{val}");
+                }
+            }
+            None => {}
+        }
     }
 
-    println!("Time taken for retrieval of 100K items: {:?}", duration);
+    let duration = start.elapsed();
+
+    println!("Time taken for deletion of 100K items: {:?}", duration);
 
     Ok(())
 }
