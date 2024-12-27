@@ -48,4 +48,16 @@ Retrieves value for given key.
 ### `del(&mut self, key: &str) -> io::Result<Option<String>>`
 Removes key-value pair and returns removed value.
 
+## Performance
 
+Benchmarks conducted on:
+
+- CPU: Intel Core i5-10300H @ 2.50GHz
+- RAM: 16GB
+- OS: Windows 64-bit (WSL2 Ubuntu 24.04.1 LTS)
+
+| Operation       | Time      |
+| --------------- | --------- |
+| 100K insertions | ~174.79ms |
+| 100K retrievals | ~70.21ms  |
+| 100K deletions  | ~161.62ms |
