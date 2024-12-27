@@ -36,17 +36,21 @@ fn main() -> std::io::Result<()> {
 
 ## API
 
-### `FileHash::init() -> io::Result<FileHash>`
-Creates or opens hash table stored in `hash.tc`.
+- `FileHash::init() -> io::Result<FileHash>`
 
-### `set(&mut self, key: &str, value: &str) -> io::Result<()>`
-Inserts or updates a key-value pair.
+    Creates or opens hash table stored in `hash.tc`.
 
-### `get(&mut self, key: &str) -> io::Result<Option<String>>`
-Retrieves value for given key.
+- `set(&mut self, key: &str, value: &str) -> io::Result<()>`
+    
+    Inserts or updates a key-value pair.
 
-### `del(&mut self, key: &str) -> io::Result<Option<String>>`
-Removes key-value pair and returns removed value.
+- `get(&mut self, key: &str) -> io::Result<Option<String>>`
+    
+    Retrieves value for given key.
+
+- `del(&mut self, key: &str) -> io::Result<Option<String>>`
+    
+    Removes key-value pair and returns removed value.
 
 ## Performance
 
