@@ -1,8 +1,9 @@
-use std::time::Instant;
-use turbo_cache::table::HashTable;
+use std::{io, time::Instant};
 
-fn main() {
-    let mut table = HashTable::new();
+use turbo_cache::file_hash::FileHash;
+
+fn main() -> io::Result<()> {
+    let mut table = FileHash::init()?;
 
     // benchmark set operation
     let start = Instant::now();
@@ -10,7 +11,7 @@ fn main() {
     for i in 0..100000 {
         let key = i.to_string();
 
-        table.set(&key, &key);
+        table.set(&key, &key)?;
     }
 
     let duration = start.elapsed();
@@ -25,7 +26,7 @@ fn main() {
     for i in 0..100000 {
         let key = i.to_string();
 
-        match table.get(&key) {
+        match table.get(&key)? {
             Some(val) => {
                 if &val != &key {
                     eprintln!("[ERR] Value mismatched, {key}:{val}");
@@ -46,4 +47,6 @@ fn main() {
     }
 
     println!("Time taken for retrieval of 100K items: {:?}", duration);
+
+    Ok(())
 }
