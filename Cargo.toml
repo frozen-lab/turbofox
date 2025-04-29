@@ -1,13 +1,9 @@
 [package]
-name = "turbo_cache"
-version = "0.1.0"
+name = "turbocache"
+version = "0.0.1"
 edition = "2021"
 
 [lib]
 path = "src/lib.rs"
-
-[[bin]]
-path = "src/main.rs"
-name = "turbo_cache"
 
 [dependencies]
