@@ -57,7 +57,7 @@ impl Table {
             file.set_len((new_capacity * SLOT_SIZE) as u64)?;
             new_capacity
         } else {
-            (metadata.len() as usize / SLOT_SIZE).max(INITIAL_SIZE)
+            metadata.len() as usize / SLOT_SIZE
         };
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
