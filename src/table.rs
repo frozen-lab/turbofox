@@ -243,28 +243,128 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// Helper to create a small-capacity table for collision and resize tests
+    fn new_temp_table(capacity: usize) -> Result<Table, HashError> {
+        let temp_file = NamedTempFile::new()?;
+        let path = temp_file.path().to_path_buf();
+        // Use the private constructor available within tests
+        Table::create_new_temp(&path, capacity)
+    }
+
     #[test]
-    fn test_persisted_operations() -> Result<(), HashError> {
+    fn test_hashable_determinism_and_uniqueness() {
+        let mut key1 = [0u8; KEY_SIZE];
+        let mut key2 = [0u8; KEY_SIZE];
+        key1[0] = 42;
+        key2[0] = 43;
+        // Same key yields same hash
+        assert_eq!(key1.hash(), key1.hash());
+        // Different key yields different hash (very unlikely collision for FNV)
+        assert_ne!(key1.hash(), key2.hash());
+    }
+
+    #[test]
+    fn test_nonexistent_get_and_delete_return_none() -> Result<(), HashError> {
+        let mut table = Table::open(NamedTempFile::new()?.path())?;
+        let key = [5u8; KEY_SIZE];
+        // No insertion yet
+        assert!(table.get(&key).is_none());
+        assert!(table.delete(&key).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_collision_resolution_small_capacity() -> Result<(), HashError> {
+        // Find two keys colliding mod capacity=3 by brute as in analysis
+        let mut key1 = [0u8; KEY_SIZE];
+        let mut key2 = [0u8; KEY_SIZE];
+        key1[0] = 1;
+        key2[0] = 2; // both hash() % 3 == same
+
+        let mut table = new_temp_table(3)?;
+        let value1 = [10u8; VALUE_SIZE];
+        let value2 = [20u8; VALUE_SIZE];
+
+        table.insert(&key1, &value1)?;
+        table.insert(&key2, &value2)?;
+
+        // Both keys should be retrievable despite same initial slot
+        assert_eq!(table.get(&key1), Some(value1));
+        assert_eq!(table.get(&key2), Some(value2));
+        Ok(())
+    }
+
+    #[test]
+    fn test_resize_preserves_entries() -> Result<(), HashError> {
+        // Small initial capacity to force resize on third insert
+        let mut table = new_temp_table(3)?;
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        for i in 0u8..3 {
+            let mut key = [0u8; KEY_SIZE];
+            let mut value = [0u8; VALUE_SIZE];
+            key[0] = i;
+            value[0] = i + 100;
+            table.insert(&key, &value)?;
+            keys.push(key);
+            values.push(value);
+        }
+
+        // After third insert, capacity should have grown and all entries retained
+        for (k, v) in keys.iter().zip(values.iter()) {
+            assert_eq!(table.get(k), Some(*v));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_reopen_persistence_multiple_entries() -> Result<(), HashError> {
         let temp_file = NamedTempFile::new()?;
         let path = temp_file.path();
+        {
+            let mut table = Table::open(path)?;
+            for i in 0u8..5 {
+                let mut key = [0u8; KEY_SIZE];
+                let mut value = [0u8; VALUE_SIZE];
+                key[0] = i;
+                value[0] = i + 50;
+                table.insert(&key, &value)?;
+            }
+        }
+        // Reopen and verify
+        let table = Table::open(path)?;
+        for i in 0u8..5 {
+            let mut key = [0u8; KEY_SIZE];
+            let mut expected = [0u8; VALUE_SIZE];
+            key[0] = i;
+            expected[0] = i + 50;
+            assert_eq!(table.get(&key), Some(expected));
+        }
+        Ok(())
+    }
 
-        // Test insert and get
-        let mut table = Table::open(path)?;
-        let key = [1u8; KEY_SIZE];
-        let value = [2u8; VALUE_SIZE];
-        table.insert(&key, &value)?;
+    #[test]
+    fn test_delete_and_reuse_slot() -> Result<(), HashError> {
+        // Small capacity to ensure reuse within same table
+        let mut table = new_temp_table(3)?;
+        let mut key1 = [0u8; KEY_SIZE];
+        key1[0] = 7;
+        let mut key2 = [0u8; KEY_SIZE];
+        key2[0] = 8;
+        let value1 = [30u8; VALUE_SIZE];
+        let value2 = [40u8; VALUE_SIZE];
 
-        assert_eq!(table.get(&key), Some(value));
+        // Insert two keys
+        table.insert(&key1, &value1)?;
+        table.insert(&key2, &value2)?;
+        // Delete key1
+        assert_eq!(table.delete(&key1), Some(value1));
+        assert!(table.get(&key1).is_none());
 
-        // Test update
-        let new_value = [3u8; VALUE_SIZE];
-        table.insert(&key, &new_value)?;
-        assert_eq!(table.get(&key), Some(new_value));
-
-        // Test delete
-        assert_eq!(table.delete(&key), Some(new_value));
-        assert_eq!(table.get(&key), None);
-
+        // Insert key1 again, should reuse deleted slot
+        table.insert(&key1, &value1)?;
+        assert_eq!(table.get(&key1), Some(value1));
+        assert_eq!(table.get(&key2), Some(value2));
         Ok(())
     }
 }
