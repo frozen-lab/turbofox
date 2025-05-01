@@ -242,7 +242,7 @@ impl Table {
         None
     }
 
-    pub fn delete(&mut self, key: &[u8; KEY_SIZE]) -> Option<Vec<u8>> {
+    pub fn delete(&mut self, key: &[u8; KEY_SIZE]) -> Result<Option<Vec<u8>>, HashError> {
         let hash = key.hash();
         let mut index = hash % self.capacity;
 
@@ -250,7 +250,7 @@ impl Table {
             let (status, existing_key, value_data) = self.read_slot(index);
 
             match status {
-                0 => return None,
+                0 => return Ok(None),
                 2 if &existing_key == key => {
                     let value = if value_data[0] == 0 {
                         let len = value_data[1] as usize;
@@ -259,27 +259,27 @@ impl Table {
                         let offset = u64::from_le_bytes(value_data[1..9].try_into().unwrap());
                         let length = u64::from_le_bytes(value_data[9..17].try_into().unwrap());
                         let mut data = vec![0u8; length as usize];
-                        self.read_overflow(offset, &mut data).ok()?;
+                        self.read_overflow(offset, &mut data)?;
                         data
                     };
 
                     // Free overflow if present
                     if value_data[0] == 1 {
                         let offset = u64::from_le_bytes(value_data[1..9].try_into().unwrap());
-                        self.free_overflow(offset).ok()?;
+                        self.free_overflow(offset)?;
                     }
 
                     // Mark slot as deleted
-                    self.write_slot(index, 1, &existing_key, &value_data).ok()?;
+                    self.write_slot(index, 1, &existing_key, &value_data)?;
                     self.curr_size -= 1;
 
-                    return Some(value);
+                    return Ok(Some(value));
                 }
                 _ => index = (index + 1) % self.capacity,
             }
         }
 
-        None
+        Ok(None)
     }
 
     fn resize(&mut self) -> Result<(), HashError> {
@@ -506,7 +506,7 @@ mod tests {
         let value = vec![123u8; 500];
 
         table.insert(&key, &value)?;
-        assert!(table.delete(&key).is_some());
+        assert!(table.delete(&key).unwrap().is_some());
         assert!(table.get(&key).is_none());
         Ok(())
     }
