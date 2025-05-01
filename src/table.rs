@@ -358,7 +358,9 @@ impl Table {
         let mut prev_offset = 0;
         let mut found_block = None;
 
+        // 1) Search the free list as before...
         while current_head != 0 {
+            // read header: [size, next_free]
             let mut header_buf = [0u8; 16];
             self.overflow_file.seek(SeekFrom::Start(current_head))?;
             self.overflow_file.read_exact(&mut header_buf)?;
@@ -375,33 +377,52 @@ impl Table {
         }
 
         if let Some((block_offset, block_size, next_free)) = found_block {
+            // 2) Remove this block from the free list:
             if prev_offset == 0 {
+                // we removed the head of the free list
                 self.free_list_head = next_free;
             } else {
+                // patch previous block’s “next” pointer
                 self.overflow_file.seek(SeekFrom::Start(prev_offset + 8))?;
                 self.overflow_file.write_all(&next_free.to_le_bytes())?;
             }
 
-            // Split block if possible
+            // **PERSIST THE UPDATED HEAD RIGHT AWAY**
+            self.overflow_file.seek(SeekFrom::Start(0))?;
+            self.overflow_file.write_all(&self.free_list_head.to_le_bytes())?;
+            self.overflow_file.flush()?;
+
+            // 3) (Optional) split the block if it’s big enough
             if block_size > required_size + 16 {
                 let remaining_size = block_size - required_size - 16;
                 let new_free_offset = block_offset + 16 + required_size;
-                let new_header = [remaining_size.to_le_bytes(), self.free_list_head.to_le_bytes()].concat();
+                let mut new_header = Vec::with_capacity(16);
+                new_header.extend_from_slice(&remaining_size.to_le_bytes());
+                new_header.extend_from_slice(&self.free_list_head.to_le_bytes());
+
                 self.overflow_file.seek(SeekFrom::Start(new_free_offset))?;
                 self.overflow_file.write_all(&new_header)?;
+
+                // update in-memory head to point at the new fragment
                 self.free_list_head = new_free_offset;
+
+                // **PERSIST AGAIN** after splitting!
+                self.overflow_file.seek(SeekFrom::Start(0))?;
+                self.overflow_file.write_all(&self.free_list_head.to_le_bytes())?;
+                self.overflow_file.flush()?;
             }
 
-            // Write data
+            // 4) write out your data chunk
             self.overflow_file.seek(SeekFrom::Start(block_offset + 16))?;
             self.overflow_file.write_all(data)?;
             self.overflow_file.flush()?;
 
             Ok(block_offset + 16)
         } else {
-            // Append new block
+            // no fit in free list: append at end
             let block_offset = self.overflow_file.seek(SeekFrom::End(0))?;
-            let header = [required_size.to_le_bytes(), 0u64.to_le_bytes()].concat();
+            let header = [&required_size.to_le_bytes()[..], &0u64.to_le_bytes()[..]].concat();
+
             self.overflow_file.write_all(&header)?;
             self.overflow_file.write_all(data)?;
             self.overflow_file.flush()?;
