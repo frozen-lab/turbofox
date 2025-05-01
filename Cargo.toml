@@ -1,7 +1,13 @@
 [package]
 name = "turbocache"
 version = "0.0.1"
+authors = ["Aditya Motale <adityamotale.22@gmail.com>"]
 edition = "2021"
+description = "Persistent, high-performance, disk-backed Key-Value store"
+license = "MIT"
+repository = "https://github.com/frozen-lab/turbocache"
+keywords = ["key-value", "database", "persistent"]
+categories = ["database", "caching"]
 
 [lib]
 path = "src/lib.rs"
