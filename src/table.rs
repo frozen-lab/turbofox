@@ -130,7 +130,7 @@ impl Table {
         self.mmap[offset + 1..offset + 1 + KEY_SIZE].copy_from_slice(key);
         self.mmap[offset + 1 + KEY_SIZE..offset + SLOT_SIZE].copy_from_slice(value);
 
-        self.mmap.flush_async_range(offset, offset + SLOT_SIZE)?;
+        self.mmap.flush_async_range(offset, SLOT_SIZE)?;
 
         Ok(())
     }
