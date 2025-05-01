@@ -285,35 +285,36 @@ impl Table {
     fn resize(&mut self) -> Result<(), HashError> {
         let new_capacity = (self.capacity * 2) + 1;
         let temp_path = self.path.with_extension("temp");
-        let temp_overflow = temp_path.with_extension("temp.overflow");
+        let temp_overflow = temp_path.with_extension("overflow"); // fixed extension
 
+        // Create a new temporary table (and its overflow) at the right paths
         let mut new_table = Table::create_new_temp(&temp_path, new_capacity)?;
 
-        // Rehash all entries
+        // Rehash all entries from the old table into the new one
         for i in 0..self.capacity {
             let (status, key, value_data) = self.read_slot(i);
             if status == 2 {
+                // Extract actual value (inline or overflow)
                 let value = if value_data[0] == 0 {
                     let len = value_data[1] as usize;
                     value_data[2..2 + len].to_vec()
                 } else {
                     let offset = u64::from_le_bytes(value_data[1..9].try_into().unwrap());
                     let length = u64::from_le_bytes(value_data[9..17].try_into().unwrap());
-                    let mut data = vec![0u8; length as usize];
-                    self.read_overflow(offset, &mut data)?;
-                    data
+                    let mut buf = vec![0u8; length as usize];
+                    self.read_overflow(offset, &mut buf)?;
+                    buf
                 };
                 new_table.insert(&key, &value)?;
             }
         }
 
-        // Replace old files with new
+        // Replace on-disk files: main table and overflow
         std::fs::rename(&temp_path, &self.path)?;
         std::fs::rename(&temp_overflow, self.overflow_path())?;
 
-        // Reopen the new table
+        // Re-open ourselves pointing at the new files
         *self = Table::open(&self.path)?;
-
         Ok(())
     }
 
