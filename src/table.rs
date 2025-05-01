@@ -319,7 +319,7 @@ impl Table {
         Ok(())
     }
 
-    fn create_new_temp<P: AsRef<Path>>(path: P, capacity: usize) -> Result<Self, HashError> {
+    pub fn create_new_temp<P: AsRef<Path>>(path: P, capacity: usize) -> Result<Self, HashError> {
         let path = path.as_ref();
         let file = OpenOptions::new()
             .read(true)

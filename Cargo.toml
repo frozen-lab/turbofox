@@ -11,4 +11,10 @@ memmap2 = "0.9.5"
 thiserror = "2.0.12"
 
 [dev-dependencies]
+criterion = "0.5.1"
 tempfile = "3.19.1"
+
+[[bench]]
+name = "bench"
+path = "benches/bench.rs"
+harness = false
