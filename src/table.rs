@@ -77,6 +77,7 @@ impl Table {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&overflow_path)?;
 
         // Read free list head from overflow file
