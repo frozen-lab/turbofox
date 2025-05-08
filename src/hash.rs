@@ -16,3 +16,27 @@ impl Hashable for &str {
         hash
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn hash_empty_string() {
+        assert_eq!("".hash(), FNV1A_64_OFFSET_BASIS);
+    }
+
+    #[test]
+    fn deterministic_behaviour() {
+        let words = vec!["Hello", "World", "Rust"];
+
+        for word in words {
+            assert_eq!(word.hash(), word.hash());
+        }
+    }
+
+    #[test]
+    fn unique_hashes_unique_strings() {
+        assert_ne!("Hello".hash(), "World".hash());
+    }
+}
