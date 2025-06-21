@@ -112,3 +112,94 @@ impl TurboCache {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_open_and_empty_get() {
+        let dir = tempdir().unwrap();
+        let cache = TurboCache::open(dir.path()).unwrap();
+
+        assert!(
+            cache.get(b"missing").unwrap().is_none(),
+            "`get()` should be `None` for newly created store",
+        );
+    }
+
+    #[test]
+    fn test_set_and_get() {
+        let dir = tempdir().unwrap();
+        let mut cache = TurboCache::open(dir.path()).unwrap();
+
+        assert!(
+            cache.set(b"foo", b"bar").unwrap(),
+            "`set()` operation should work correctly for newly created store",
+        );
+
+        let v = cache.get(b"foo").unwrap().unwrap();
+        assert_eq!(v, b"bar".to_vec(), "`get()` operation should fetch correct value");
+
+        assert!(
+            cache.set(b"foo", b"baz").unwrap(),
+            "`set()` should be able to update value of pre-existing keys",
+        );
+
+        let v2 = cache.get(b"foo").unwrap().unwrap();
+        assert_eq!(
+            v2,
+            b"baz".to_vec(),
+            "`get()` should fetch correct value for update KV pair",
+        );
+    }
+
+    #[test]
+    fn test_remove() {
+        let dir = tempdir().unwrap();
+        let mut cache = TurboCache::open(dir.path()).unwrap();
+
+        assert!(
+            cache.set(b"key", b"value").unwrap(),
+            "`set()` should work correctly for a new value",
+        );
+        assert_eq!(
+            cache.get(b"key").unwrap(),
+            Some(b"value".to_vec()),
+            "`get()` should fetch correct value for existing key",
+        );
+
+        assert!(
+            cache.remove(b"key").unwrap(),
+            "`remove()` should correctly delete KV pair",
+        );
+        assert!(
+            cache.get(b"key").unwrap().is_none(),
+            "`get()` should return `None` for deleted KV pair",
+        );
+        assert!(
+            !cache.remove(b"key").unwrap(),
+            "`remove()` should be `false` if referenced key is not found",
+        );
+    }
+
+    #[test]
+    fn test_iter_over_entries() {
+        let dir = tempdir().unwrap();
+        let mut cache = TurboCache::open(dir.path()).unwrap();
+
+        let entries = vec![(b"a", b"1"), (b"b", b"2"), (b"c", b"3")];
+        for (k, v) in &entries {
+            assert!(cache.set(*k, *v).unwrap());
+        }
+
+        let mut all: Vec<_> = cache.iter().map(|r| r.unwrap()).collect();
+        let mut expected: Vec<_> = entries.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+
+        all.sort();
+        expected.sort();
+
+        assert_eq!(all, expected, "`iter()` should correctly return KV pairs");
+    }
+}
