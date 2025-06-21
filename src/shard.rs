@@ -8,10 +8,7 @@ use std::{
 
 use memmap::{MmapMut, MmapOptions};
 
-use crate::{hash::SimHash, Res, ROWS, WIDTH};
-
-type Buf = Vec<u8>;
-type KV = (Buf, Buf);
+use crate::{hash::SimHash, Buf, Res, KV, ROWS, WIDTH};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
