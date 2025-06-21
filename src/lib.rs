@@ -202,4 +202,31 @@ mod tests {
 
         assert_eq!(all, expected, "`iter()` should correctly return KV pairs");
     }
+
+    #[test]
+    fn test_persistence_across_reopen() {
+        let dir = tempdir().unwrap();
+
+        // Open and set the value
+        {
+            let mut cache = TurboCache::open(dir.path()).unwrap();
+
+            assert!(
+                cache.set(b"persist", b"yes").unwrap(),
+                "`set()` should work correctly for a newly created store",
+            );
+        }
+
+        // Open and read the value
+        {
+            let cache2 = TurboCache::open(dir.path()).unwrap();
+            let v = cache2.get(b"persist").unwrap();
+
+            assert_eq!(
+                v,
+                Some(b"yes".to_vec()),
+                "`get()` should fetch values correctly accross persisted sessions",
+            );
+        }
+    }
 }

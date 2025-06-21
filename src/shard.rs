@@ -45,14 +45,14 @@ impl Shard {
 
     pub fn open(dirpath: impl AsRef<Path>, start: u32, end: u32) -> Res<Self> {
         let filepath = dirpath.as_ref().join(format!("{start}-{end}"));
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(filepath)?;
+        let mut file = OpenOptions::new().create(true).read(true).write(true).open(filepath)?;
 
-        file.set_len(Self::HEADER_SIZE)?;
+        // create header space only if shard is new
+        let current_len = file.metadata()?.len();
+        if current_len < Self::HEADER_SIZE {
+            file.set_len(Self::HEADER_SIZE)?;
+        }
+
         file.seek(std::io::SeekFrom::End(0))?;
 
         let mmap = unsafe { MmapOptions::new().len(Self::HEADER_SIZE as usize).map_mut(&file) }?;
