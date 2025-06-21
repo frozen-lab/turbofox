@@ -15,10 +15,6 @@ path = "src/lib.rs"
 memmap = "0.7.0"
 siphasher = "1.0.1"
 
-[dev-dependencies]
-criterion = "0.5.1"
-tempfile = "3.19.1"
-
 [[bench]]
 name = "bench"
 path = "benches/bench.rs"

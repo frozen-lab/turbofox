@@ -1,1 +1,1 @@
-pub mod table;
+mod hash;
