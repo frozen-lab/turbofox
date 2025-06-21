@@ -5,7 +5,7 @@ pub struct SimHash(u64);
 
 #[allow(dead_code)]
 impl SimHash {
-    const INVALID_SIGN: u32 = 0u32;
+    pub const INVALID_SIGN: u32 = 0u32;
 
     pub fn new(buf: &[u8]) -> Self {
         Self(SipHasher24::new().hash(buf))
