@@ -1,4 +1,3 @@
-use core::hash;
 use std::{
     cell::RefCell,
     fs::{File, OpenOptions},
@@ -87,7 +86,7 @@ impl Shard {
     }
 
     pub fn set(&self, hash: SimHash, kbuf: &[u8], vbuf: &[u8]) -> Res<bool> {
-        let row = self.header_row_mut(ROWS);
+        let row = self.header_row_mut(hash.row(ROWS));
 
         for (i, sign) in row.signs.iter().enumerate() {
             if hash.sign() == *sign {
@@ -178,5 +177,59 @@ impl Shard {
             klen: kbuf.len() as u16,
             vlen: vbuf.len() as u16,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_operations() {
+        let dir = tempdir().unwrap();
+        let shard = Shard::open(dir.path(), 0, 1).unwrap();
+
+        let hash = SimHash::default();
+        let key = b"key1";
+        let val1 = b"value1";
+        let val2 = b"value2";
+
+        assert!(
+            shard.get(hash, key).unwrap().is_none(),
+            "`get()` should return `None` for non existant key",
+        );
+
+        assert!(
+            shard.set(hash, key, val1).unwrap(),
+            "`set()` operation should work correctly",
+        );
+        assert_eq!(
+            shard.get(hash, key).unwrap(),
+            Some(val1.to_vec()),
+            "`get()` should return correct value for the key",
+        );
+
+        assert!(
+            shard.set(hash, key, val2).unwrap(),
+            "`set()` should correctly update value for pre-existing key",
+        );
+        assert_eq!(
+            shard.get(hash, key).unwrap(),
+            Some(val2.to_vec()),
+            "`get()` should work correctly after updateing pre-existing value",
+        );
+
+        assert!(
+            shard.remove(hash, key).unwrap(),
+            "`remove()` operation should work correctly",
+        );
+        assert!(
+            shard.get(hash, key).unwrap().is_none(),
+            "`get()` should work correctly for a deleted kv pair",
+        );
+
+        let items: Vec<_> = shard.iter().map(|r| r.unwrap()).collect();
+        assert!(items.is_empty(), "`iter()` should return `None` for an empty shard");
     }
 }
