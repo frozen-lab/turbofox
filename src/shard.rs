@@ -31,7 +31,6 @@ struct ShardHeader {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct Shard {
     pub start: u32,
     pub end: u32,
@@ -39,7 +38,6 @@ pub struct Shard {
     mmap: MmapMut,
 }
 
-#[allow(dead_code)]
 impl Shard {
     const HEADER_SIZE: u64 = size_of::<ShardHeader>() as u64;
 

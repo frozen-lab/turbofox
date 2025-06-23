@@ -1,3 +1,38 @@
+//! A persistent, high-performance, disk-backed Key-Value store w/ a noval sharding algorithm.
+//!
+//! Example
+//! ```rs
+//! use core::str;
+//! use tempfile::tempdir;
+//! use turbocache::TurboCache;
+//!
+//! fn main() -> std::io::Result<()> {
+//!     let dir = tempdir().unwrap();
+//!     let mut db = TurboCache::open(dir.path())?;
+//!
+//!     println!("{:?}", db.get(b"mykey")?); // None
+//!
+//!     db.set(b"mykey", b"myval")?;
+//!     println!("{:?}", db.get(b"mykey")?); // Some([109, 121, 118, 97, 108])
+//!
+//!     println!("{:?}", db.remove(b"mykey")?); // Some([109, 121, 118, 97, 108])
+//!     println!("{:?}", db.remove(b"mykey")?); // None
+//!
+//!     println!("{:?}", db.get(b"mykey")?); // None
+//!
+//!     for i in 0..10 {
+//!         db.set(&format!("mykey{i}").into_bytes(), &format!("myval{i}").into_bytes())?;
+//!     }
+//!
+//!     for res in db.iter() {
+//!         let (k, v) = res?;
+//!         println!("{} = {}", str::from_utf8(&k).unwrap(), str::from_utf8(&v).unwrap());
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
+
 use std::path::{Path, PathBuf};
 
 use hash::SimHash;
@@ -13,6 +48,7 @@ pub(crate) type Res<T> = std::io::Result<T>;
 pub(crate) type Buf = Vec<u8>;
 pub(crate) type KV = (Buf, Buf);
 
+/// The TurboCache object to create an instance of the db
 pub struct TurboCache {
     dirpath: PathBuf,
     shards: Vec<Shard>,
@@ -21,6 +57,7 @@ pub struct TurboCache {
 impl TurboCache {
     const MAX_SHARD: u32 = u16::MAX as u32 + 1;
 
+    /// Opens or creates a new candystore
     pub fn open(dirpath: impl AsRef<Path>) -> Res<Self> {
         let dir = dirpath.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
@@ -33,6 +70,10 @@ impl TurboCache {
         })
     }
 
+    /// Gets the value of a key from the store.
+    ///
+    /// If the key does not exist, `None` will be return. The data is fully-owned,
+    /// no references are returned.
     pub fn get(&self, key: &[u8]) -> Res<Option<Buf>> {
         let sh = SimHash::new(key);
 
@@ -45,6 +86,7 @@ impl TurboCache {
         unreachable!()
     }
 
+    /// Inserts a key-value pair, creating it or replacing an existing pair.
     pub fn set(&mut self, key: &[u8], val: &[u8]) -> Res<bool> {
         let ph = SimHash::new(key);
 
@@ -65,6 +107,7 @@ impl TurboCache {
         }
     }
 
+    /// Remove a key-value pair.
     pub fn remove(&mut self, key: &[u8]) -> Res<bool> {
         let sh = SimHash::new(key);
 
@@ -77,6 +120,7 @@ impl TurboCache {
         unreachable!()
     }
 
+    /// Iterate over all key-value pairs
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = Res<KV>> + 'a {
         self.shards.iter().flat_map(|shard| shard.iter())
     }

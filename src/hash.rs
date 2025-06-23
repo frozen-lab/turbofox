@@ -3,7 +3,6 @@ use siphasher::sip::SipHasher24;
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub struct SimHash(u64);
 
-#[allow(dead_code)]
 impl SimHash {
     pub const INVALID_SIGN: u32 = 0u32;
 
