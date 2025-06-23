@@ -1,24 +1,35 @@
 # TurboCache
 
-A persistent, high-performance, disk-backed Key-Value store in Rust.
+A persistent, high-performance, disk-backed Key-Value store w/ a noval sharding algorithm.
 
 ## Usage
 
 ```rust
-use turbocache::table::Table;
-use std::path::Path;
+use core::str;
+use tempfile::tempdir;
+use turbocache::TurboCache;
 
 fn main() -> std::io::Result<()> {
-    let mut table = Table::open(Path::new("data.tbl"))?;
+    let dir = tempdir().unwrap();
+    let mut db = TurboCache::open(dir.path())?;
 
-    let key = [42u8; KEY_SIZE];
-    let value = vec![1, 2, 3];
+    println!("{:?}", db.get(b"mykey")?); // None
 
-    table.insert(&key, &value)?;
+    db.set(b"mykey", b"myval")?;
+    println!("{:?}", db.get(b"mykey")?); // Some([109, 121, 118, 97, 108])
 
-    let retrieved = table.get(&key).unwrap();
-    
-    assert_eq!(retrieved, value);
+    println!("{:?}", db.remove(b"mykey")?); // Some([109, 121, 118, 97, 108])
+    println!("{:?}", db.remove(b"mykey")?); // None
+
+    println!("{:?}", db.get(b"mykey")?); // None
+
+    for i in 0..10 {
+        db.set(&format!("mykey{i}").into_bytes(), &format!("myval{i}").into_bytes())?;
+    }
+    for res in db.iter() {
+        let (k, v) = res?;
+        println!("{} = {}", str::from_utf8(&k).unwrap(), str::from_utf8(&v).unwrap());
+    }
 
     Ok(())
 }
