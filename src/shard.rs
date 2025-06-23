@@ -105,9 +105,7 @@ impl Shard {
             }
         }
 
-        // QUESTION: Can this be reached somehow, if so then how the error
-        // should be handled?
-        unreachable!()
+        Ok(false)
     }
 
     pub fn remove(&self, hash: SimHash, kbuf: &[u8]) -> Res<bool> {

@@ -131,7 +131,6 @@ impl TurboCache {
         let start = removed_shard.start;
         let end = removed_shard.end;
         let mid = (start + end) / 2;
-        println!("splitting [{start}, {end}) to [{start}, {mid}) and [{mid}, {end})");
 
         let top = Shard::open(&self.dirpath, start, mid)?;
         let bottom = Shard::open(&self.dirpath, mid, end)?;
