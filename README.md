@@ -1,6 +1,6 @@
 # TurboCache
 
-A persistent, high-performance, disk-backed Key-Value store w/ a noval sharding algorithm.
+A persistent, high-performance, disk-backed Key-Value store w/ a novel sharding algorithm.
 
 ## Usage
 
@@ -34,4 +34,17 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 ```
+
+## Benchmarks
+
+- **OS**: Windows 64-bit (`WSL2 Ubuntu 24.04.1 LTS`)
+- **CPU**: Intel Core i5-10300H @ 2.50GHz
+- **Architecture**: x86/64
+- **Pool Size**: 1000000
+
+| Command | Avg Time (µs)   |
+|:-------:|:---------------:|
+| `SET`   | 20              |
+| `GET`   | 2000            |
+| `DEL`   | 15              |
 

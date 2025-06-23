@@ -1,4 +1,4 @@
-//! A persistent, high-performance, disk-backed Key-Value store w/ a noval sharding algorithm.
+//! A persistent, high-performance, disk-backed Key-Value store w/ a novel sharding algorithm.
 //!
 //! Example
 //! ```rs
