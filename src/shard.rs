@@ -10,12 +10,11 @@ use std::{
 
 use memmap::{MmapMut, MmapOptions};
 
-use crate::{
-    hash::{TurboHash, INVALID_HASH},
-    NUM_ROWS, ROW_WIDTH,
-};
+use crate::hash::{TurboHash, INVALID_HASH};
 
-pub(crate) type Result<T> = anyhow::Result<T>;
+pub(crate) const NUM_ROWS: usize = 64;
+pub(crate) const ROW_WIDTH: usize = 512;
+pub type Result<T> = anyhow::Result<T>;
 pub(crate) type Buf = Vec<u8>;
 pub(crate) type KVPair = (Buf, Buf);
 pub(crate) const HEADER_SIZE: u64 = size_of::<ShardHeader>() as u64;
@@ -32,10 +31,10 @@ struct ShardHeader {
 }
 
 pub struct Shard {
-    start: u32,
-    end: u32,
-    file: RefCell<File>,
-    mmap: MmapMut,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) file: RefCell<File>,
+    pub(crate) mmap: MmapMut,
 }
 
 impl Shard {
@@ -120,6 +119,18 @@ impl Shard {
         }
 
         Ok(None)
+    }
+
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = Result<KVPair>> + 'a {
+        (0..NUM_ROWS).map(|r| self.header_row(r)).flat_map(|row| {
+            row.signs.iter().enumerate().filter_map(|(i, sign)| {
+                if *sign == INVALID_HASH {
+                    return None;
+                }
+
+                Some(self.read(row.offsets[i]))
+            })
+        })
     }
 
     fn read(&self, desc: u64) -> Result<KVPair> {

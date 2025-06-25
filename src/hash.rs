@@ -1,6 +1,6 @@
 use siphasher::sip::SipHasher24;
 
-use crate::NUM_ROWS;
+use crate::shard::NUM_ROWS;
 
 pub(crate) const INVALID_HASH: u32 = 0;
 
