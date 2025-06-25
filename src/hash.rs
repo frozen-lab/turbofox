@@ -4,6 +4,7 @@ use crate::NUM_ROWS;
 
 pub(crate) const INVALID_HASH: u32 = 0;
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TurboHash(u64);
 
 #[allow(dead_code)]
@@ -30,6 +31,10 @@ impl TurboHash {
     #[inline]
     pub fn shard(&self) -> u32 {
         ((self.0 >> 48) & 0xffff) as u32
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
     }
 
     fn from_hash(hash: u64) -> Self {
@@ -81,5 +86,68 @@ mod tests {
             h2.row(),
             "Equal row should be fetched for the same key each time"
         );
+    }
+
+    #[test]
+    fn fallback_to_high_bits_when_low_bits_zero() {
+        // hash with low 32 bits zero, high 32 bits non-zero
+        let high: u64 = 0xDEADBEEF;
+        let hash = (high << 32) | 0;
+        let h = TurboHash::from_hash(hash);
+
+        assert_eq!(
+            h.sign(),
+            high as u32,
+            "Sign should fallback to high bits when low bits are zero"
+        );
+    }
+
+    #[test]
+    fn fallback_to_default_when_both_bits_zero() {
+        let hash = 0;
+        let h = TurboHash::from_hash(hash);
+
+        assert_eq!(
+            h.sign(),
+            0x1234_5678,
+            "Sign should default when both low and high bits are zero"
+        );
+    }
+
+    #[test]
+    fn shard_and_row_extraction() {
+        let shard: u64 = 0xABCD;
+        let row: u64 = 0x1234;
+        let sign: u32 = 0x87654321;
+
+        let hash = (shard << 48) | (row << 32) | (sign as u64);
+        let h = TurboHash::from_hash(hash);
+
+        assert_eq!(h.shard(), shard as u32, "Shard should match bits 48-63");
+        assert_eq!(
+            h.row(),
+            (row as usize) % NUM_ROWS,
+            "Row should match bits 32-47 mod NUM_ROWS"
+        );
+        assert_eq!(h.sign(), sign, "Sign should match low 32 bits");
+    }
+
+    #[test]
+    fn is_valid_always_true_after_from_hash() {
+        let hash = 0;
+        let h = TurboHash::from_hash(hash);
+
+        assert!(h.is_valid(), "TurboHash created via from_hash should always be valid");
+    }
+
+    #[test]
+    fn sign_never_zero_for_various_hashes() {
+        let inputs = [0u64, (1u64 << 32), u64::MAX];
+
+        for &hash in &inputs {
+            let h = TurboHash::from_hash(hash);
+
+            assert_ne!(h.sign(), INVALID_HASH, "Sign should never be zero for any input hash");
+        }
     }
 }
