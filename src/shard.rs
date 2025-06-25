@@ -15,7 +15,7 @@ use crate::{
     NUM_ROWS, ROW_WIDTH,
 };
 
-pub(crate) type Result<T> = std::io::Result<T>;
+pub(crate) type Result<T> = anyhow::Result<T>;
 pub(crate) type Buf = Vec<u8>;
 pub(crate) type KVPair = (Buf, Buf);
 pub(crate) const HEADER_SIZE: u64 = size_of::<ShardHeader>() as u64;
@@ -168,6 +168,11 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn open_shard() -> Shard {
+        let dir = tempdir().unwrap();
+        Shard::open(dir.path(), 0, 1).unwrap()
+    }
+
     #[test]
     fn test_operations() {
         let dir = tempdir().unwrap();
@@ -213,5 +218,83 @@ mod tests {
             shard.get(hash, key).unwrap().is_none(),
             "`get()` should work correctly for a deleted kv pair",
         );
+    }
+
+    #[test]
+    fn remove_and_reinsert() {
+        let shard = open_shard();
+        let key = b"temp";
+        let hash = TurboHash::new(key);
+
+        assert!(shard.set(hash, key, b"v1").unwrap(), "`set()` should work correctly");
+        assert_eq!(
+            shard.remove(hash, key).unwrap(),
+            Some(b"v1".to_vec()),
+            "`remove()` should work correctly",
+        );
+        assert!(
+            shard.set(hash, key, b"v2").unwrap(),
+            "`set()` should work correctly for previously deleted key",
+        );
+        assert_eq!(
+            shard.get(hash, key).unwrap(),
+            Some(b"v2".to_vec()),
+            "`get()` should work correctly for re-inserted key after previous deletion",
+        );
+    }
+
+    #[test]
+    fn persistence_across_reopen() {
+        let dir = tempdir().unwrap();
+        {
+            let shard = Shard::open(dir.path(), 0, 1).unwrap();
+            let key = b"persistent";
+            let val = b"data";
+
+            assert!(
+                shard.set(TurboHash::new(key), key, val).unwrap(),
+                "`set()` should work correctly",
+            );
+        }
+
+        let shard = Shard::open(dir.path(), 0, 1).unwrap();
+
+        assert_eq!(
+            shard.get(TurboHash::new(b"persistent"), b"persistent").unwrap(),
+            Some(b"data".to_vec()),
+            "`get()` should work correctly on re-opened shard",
+        );
+    }
+
+    #[test]
+    fn large_key_and_value() {
+        let shard = open_shard();
+
+        let key = vec![b'a'; 1024 * 10]; // 10KB key
+        let val = vec![b'b'; 1024 * 50]; // 50KB value
+        let hash = TurboHash::new(&key);
+
+        assert!(
+            shard.set(hash, &key, &val).unwrap(),
+            "`set()` should work correctly for large KV pairs",
+        );
+        assert_eq!(
+            shard.get(hash, &key).unwrap().unwrap(),
+            val,
+            "`get()` should work correctly for large KV pairs",
+        );
+    }
+
+    #[test]
+    fn header_initialization() {
+        let dir = tempdir().unwrap();
+        let filepath = dir.path().join("0-1");
+
+        assert!(!filepath.exists(), "filepath should not exists before shard creation");
+
+        let _shard = Shard::open(dir.path(), 0, 1).unwrap();
+        let meta = std::fs::metadata(&filepath).unwrap();
+
+        assert_eq!(meta.len(), HEADER_SIZE, "header should be properly initialised");
     }
 }

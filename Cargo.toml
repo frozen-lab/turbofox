@@ -12,6 +12,7 @@ categories = ["database", "caching"]
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = "1.0.98"
 memmap = "0.7.0"
 siphasher = "1.0.1"
 
