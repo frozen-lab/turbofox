@@ -4,7 +4,7 @@ use crate::NUM_ROWS;
 
 pub(crate) const INVALID_HASH: u32 = 0;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) struct TurboHash(u64);
 
 #[allow(dead_code)]
