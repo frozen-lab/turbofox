@@ -17,7 +17,7 @@ memmap = "0.7.0"
 siphasher = "1.0.1"
 
 [dev-dependencies]
-criterion = "0.6.0"
+divan = "0.1.21"
 tempfile = "3.20.0"
 
 [[bench]]

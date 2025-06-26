@@ -5,11 +5,10 @@ A persistent, high-performance, disk-backed Key-Value store w/ a novel sharding 
 ## Usage
 
 ```rust
-use core::str;
 use tempfile::tempdir;
-use turbocache::TurboCache;
+use turbocache::{Result, TurboCache};
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<()> {
     let dir = tempdir().unwrap();
     let mut db = TurboCache::open(dir.path())?;
 
@@ -26,10 +25,6 @@ fn main() -> std::io::Result<()> {
     for i in 0..10 {
         db.set(&format!("mykey{i}").into_bytes(), &format!("myval{i}").into_bytes())?;
     }
-    for res in db.iter() {
-        let (k, v) = res?;
-        println!("{} = {}", str::from_utf8(&k).unwrap(), str::from_utf8(&v).unwrap());
-    }
 
     Ok(())
 }
@@ -37,14 +32,15 @@ fn main() -> std::io::Result<()> {
 
 ## Benchmarks
 
-- **OS**: Windows 64-bit (`WSL2 Ubuntu 24.04.1 LTS`)
+- **OS**: Windows 64-bit (`WSL2 NixOS 24.11 (Vicuna)`)
+- **Kernel**: Linux 6.6.87.2-microsoft-standard-WSL2
 - **CPU**: Intel Core i5-10300H @ 2.50GHz
 - **Architecture**: x86/64
-- **Pool Size**: 1000000
+- **Pool Size**: 100000
 
-| Command | Avg Time (µs)   |
-|:-------:|:---------------:|
-| `SET`   | 20              |
-| `GET`   | 2000            |
-| `DEL`   | 15              |
+| Operation      | Fastest   | Slowest   | Median    | Samples | Iterations |
+|----------------|-----------|-----------|-----------|---------|------------|
+| `bench_get`    | 226 µs    | 443.6 µs  | 234 µs    | 100     | 100000     |
+| `bench_remove` | 225.7 µs  | 255.7 µs  | 230.3 µs  | 100     | 100000     |
+| `bench_set`    | 224.9 µs  | 246.8 µs  | 229.8 µs  | 100     | 100000     |
 
