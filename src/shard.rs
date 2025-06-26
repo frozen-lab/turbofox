@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use std::{
-    cell::RefCell,
     fs::{File, OpenOptions},
     io::{Seek, Write},
     os::unix::fs::FileExt,
     path::Path,
+    sync::Mutex,
 };
 
 use memmap::{MmapMut, MmapOptions};
@@ -33,7 +33,7 @@ struct ShardHeader {
 pub struct Shard {
     pub(crate) start: u32,
     pub(crate) end: u32,
-    pub(crate) file: RefCell<File>,
+    pub(crate) file: Mutex<File>,
     pub(crate) mmap: MmapMut,
 }
 
@@ -54,7 +54,7 @@ impl Shard {
             start,
             end,
             mmap,
-            file: RefCell::new(file),
+            file: Mutex::new(file),
         })
     }
 
@@ -140,7 +140,7 @@ impl Shard {
 
         let mut buf = vec![0u8; klen + vlen];
 
-        let file = self.file.borrow();
+        let file = self.file.lock().unwrap();
 
         file.read_exact_at(&mut buf, offset)?;
 
@@ -151,7 +151,7 @@ impl Shard {
     }
 
     fn write(&self, kbuf: &[u8], vbuf: &[u8]) -> Result<u64> {
-        let mut file = self.file.borrow_mut();
+        let mut file = self.file.lock().unwrap();
 
         let offset = file.stream_position()?;
         let entry_size = kbuf.len() + vbuf.len();

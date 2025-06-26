@@ -5,10 +5,11 @@ use crate::{
     shard::{Buf, Result, Shard},
 };
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 pub struct TurboCache {
     dir: PathBuf,
-    shards: Vec<Shard>,
+    shards: Arc<RwLock<Vec<Shard>>>,
 }
 
 impl TurboCache {
@@ -31,14 +32,15 @@ impl TurboCache {
 
         Ok(Self {
             dir,
-            shards: vec![base_shard],
+            shards: Arc::new(RwLock::new(vec![base_shard])),
         })
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Buf>> {
         let th = TurboHash::new(key);
+        let shards = self.shards.read().unwrap();
 
-        for shard in self.shards.iter() {
+        for shard in shards.iter() {
             if th.shard() < shard.end {
                 return shard.get(th, key);
             }
@@ -47,13 +49,14 @@ impl TurboCache {
         Ok(None)
     }
 
-    pub fn set(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+    pub fn set(&self, key: &[u8], value: &[u8]) -> Result<bool> {
         let th = TurboHash::new(&key);
 
         loop {
+            let mut shards = self.shards.write().unwrap();
             let mut split_index: usize = 0;
 
-            for (i, shard) in self.shards.iter().enumerate() {
+            for (i, shard) in shards.iter().enumerate() {
                 if th.shard() < shard.end {
                     if shard.set(th, &key, &value)? {
                         return Ok(true);
@@ -64,14 +67,15 @@ impl TurboCache {
                 }
             }
 
-            self.split_shard(split_index)?;
+            self.split_shard(&mut shards, split_index)?;
         }
     }
 
-    pub fn remove(&mut self, key: &[u8]) -> Result<Option<Buf>> {
+    pub fn remove(&self, key: &[u8]) -> Result<Option<Buf>> {
         let th = TurboHash::new(key);
+        let mut shards = self.shards.write().unwrap();
 
-        for shard in self.shards.iter_mut() {
+        for shard in shards.iter_mut() {
             if th.shard() < shard.end {
                 return shard.remove(th, key);
             }
@@ -80,8 +84,8 @@ impl TurboCache {
         Ok(None)
     }
 
-    fn split_shard(&mut self, idx: usize) -> Result<()> {
-        let removed_shard = self.shards.remove(idx);
+    fn split_shard(&self, shards: &mut Vec<Shard>, idx: usize) -> Result<()> {
+        let removed_shard = shards.remove(idx);
 
         let start = removed_shard.start;
         let end = removed_shard.end;
@@ -104,11 +108,11 @@ impl TurboCache {
         // delete current shard
         std::fs::remove_file(self.dir.join(format!("{start}-{end}")))?;
 
-        self.shards.push(shard1);
-        self.shards.push(shard2);
+        shards.push(shard1);
+        shards.push(shard2);
 
         // sort shards for faster access
-        self.shards.sort_by(|x, y| x.end.cmp(&y.end));
+        shards.sort_by(|x, y| x.end.cmp(&y.end));
 
         Ok(())
     }
@@ -133,7 +137,7 @@ mod tests {
     #[test]
     fn test_set_and_get() {
         let dir = tempdir().unwrap();
-        let mut cache = TurboCache::open(dir.path()).unwrap();
+        let cache = TurboCache::open(dir.path()).unwrap();
 
         assert!(
             cache.set(b"foo", b"bar").unwrap(),
@@ -159,7 +163,7 @@ mod tests {
     #[test]
     fn test_remove() {
         let dir = tempdir().unwrap();
-        let mut cache = TurboCache::open(dir.path()).unwrap();
+        let cache = TurboCache::open(dir.path()).unwrap();
 
         assert!(
             cache.set(b"key", b"value").unwrap(),
@@ -192,7 +196,7 @@ mod tests {
 
         // Open and set the value
         {
-            let mut cache = TurboCache::open(dir.path()).unwrap();
+            let cache = TurboCache::open(dir.path()).unwrap();
 
             assert!(
                 cache.set(b"persist", b"yes").unwrap(),
