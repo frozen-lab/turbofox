@@ -12,25 +12,25 @@ fn make_db() -> TurboCache {
 }
 
 #[divan::bench_group(sample_count = 100, sample_size = 1000)]
-mod kv_ops {
+mod db_ops {
     use super::*;
 
     #[divan::bench]
     fn bench_set() {
-        let mut db = make_db();
+        let db = make_db();
         black_box(db.set(b"mykey", b"myval").unwrap());
     }
 
     #[divan::bench]
     fn bench_get() {
-        let mut db = make_db();
+        let db = make_db();
         db.set(b"mykey", b"myval").unwrap();
         black_box(db.get(b"mykey").unwrap());
     }
 
     #[divan::bench]
     fn bench_remove() {
-        let mut db = make_db();
+        let db = make_db();
         db.set(b"mykey", b"myval").unwrap();
         black_box(db.remove(b"mykey").unwrap());
     }

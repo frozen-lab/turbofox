@@ -3,7 +3,7 @@ use turbocache::{Result, TurboCache};
 
 fn main() -> Result<()> {
     let dir = tempdir().unwrap();
-    let mut db = TurboCache::open(dir.path())?;
+    let db = TurboCache::open(dir.path())?;
 
     println!("{:?}", db.get(b"mykey")?); // None
 
