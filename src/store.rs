@@ -28,7 +28,7 @@ impl TurboCache {
             std::fs::create_dir_all(&dir)?;
         }
 
-        let base_shard = Shard::open(dirpath, 0, u16::MAX as u32 + 1)?;
+        let base_shard = Shard::open(dirpath, 0..(u16::MAX as u32 + 1))?;
 
         Ok(Self {
             dir,
@@ -41,7 +41,7 @@ impl TurboCache {
         let shards = self.shards.read().unwrap();
 
         for shard in shards.iter() {
-            if th.shard() < shard.end {
+            if th.shard() < shard.span.end {
                 return shard.get(th, key);
             }
         }
@@ -57,7 +57,7 @@ impl TurboCache {
             let mut split_index: usize = 0;
 
             for (i, shard) in shards.iter().enumerate() {
-                if th.shard() < shard.end {
+                if th.shard() < shard.span.end {
                     if shard.set(th, &key, &value)? {
                         return Ok(true);
                     }
@@ -76,7 +76,7 @@ impl TurboCache {
         let mut shards = self.shards.write().unwrap();
 
         for shard in shards.iter_mut() {
-            if th.shard() < shard.end {
+            if th.shard() < shard.span.end {
                 return shard.remove(th, key);
             }
         }
@@ -87,12 +87,12 @@ impl TurboCache {
     fn split_shard(&self, shards: &mut Vec<Shard>, idx: usize) -> Result<()> {
         let removed_shard = shards.remove(idx);
 
-        let start = removed_shard.start;
-        let end = removed_shard.end;
+        let start = removed_shard.span.start;
+        let end = removed_shard.span.end;
         let mid = end - start;
 
-        let shard1 = Shard::open(&self.dir, start, mid)?;
-        let shard2 = Shard::open(&self.dir, mid, end)?;
+        let shard1 = Shard::open(&self.dir, start..mid)?;
+        let shard2 = Shard::open(&self.dir, mid..end)?;
 
         for pair in removed_shard.iter() {
             let (key, value) = pair?;
@@ -112,7 +112,7 @@ impl TurboCache {
         shards.push(shard2);
 
         // sort shards for faster access
-        shards.sort_by(|x, y| x.end.cmp(&y.end));
+        shards.sort_by(|x, y| x.span.end.cmp(&y.span.end));
 
         Ok(())
     }

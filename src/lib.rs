@@ -1,4 +1,5 @@
 mod hash;
+mod router;
 mod shard;
 mod store;
 

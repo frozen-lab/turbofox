@@ -3,6 +3,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Seek, Write},
+    ops::Range,
     os::unix::fs::FileExt,
     path::Path,
     sync::Mutex,
@@ -46,15 +47,19 @@ struct ShardHeader {
 }
 
 pub struct Shard {
-    pub(crate) start: u32,
-    pub(crate) end: u32,
+    pub(crate) span: Range<u32>,
     pub(crate) file: Mutex<File>,
     pub(crate) mmap: MmapMut,
 }
 
 impl Shard {
-    pub fn open(dirpath: impl AsRef<Path>, start: u32, end: u32) -> Result<Self> {
-        let filepath = dirpath.as_ref().join(format!("{start}-{end}"));
+    pub const EXPECTED_CAPACITY: usize = (NUM_ROWS * ROW_WIDTH * 9) / 10;
+
+    pub fn open(dirpath: impl AsRef<Path>, span: Range<u32>) -> Result<Self> {
+        let filepath = dirpath
+            .as_ref()
+            .join(format!("shard_{:04x}-{:04x}", span.start, span.end));
+
         let mut file = OpenOptions::new().read(true).write(true).create(true).open(filepath)?;
 
         // create headerspace iif shard is new
@@ -66,8 +71,7 @@ impl Shard {
         let mmap = unsafe { MmapOptions::new().len(HEADER_SIZE as usize).map_mut(&file) }?;
 
         Ok(Self {
-            start,
-            end,
+            span,
             mmap,
             file: Mutex::new(file),
         })
@@ -200,13 +204,13 @@ mod tests {
 
     fn open_shard() -> Shard {
         let dir = tempdir().unwrap();
-        Shard::open(dir.path(), 0, 1).unwrap()
+        Shard::open(dir.path(), 0..1).unwrap()
     }
 
     #[test]
     fn test_operations() {
         let dir = tempdir().unwrap();
-        let shard = Shard::open(dir.path(), 0, 1).unwrap();
+        let shard = Shard::open(dir.path(), 0..1).unwrap();
 
         let key = b"key1";
         let hash = TurboHash::new(key);
@@ -277,7 +281,7 @@ mod tests {
     fn persistence_across_reopen() {
         let dir = tempdir().unwrap();
         {
-            let shard = Shard::open(dir.path(), 0, 1).unwrap();
+            let shard = Shard::open(dir.path(), 0..1).unwrap();
             let key = b"persistent";
             let val = b"data";
 
@@ -287,7 +291,7 @@ mod tests {
             );
         }
 
-        let shard = Shard::open(dir.path(), 0, 1).unwrap();
+        let shard = Shard::open(dir.path(), 0..1).unwrap();
 
         assert_eq!(
             shard.get(TurboHash::new(b"persistent"), b"persistent").unwrap(),
@@ -318,11 +322,11 @@ mod tests {
     #[test]
     fn header_initialization() {
         let dir = tempdir().unwrap();
-        let filepath = dir.path().join("0-1");
+        let filepath = dir.as_ref().join(format!("shard_{:04x}-{:04x}", 0, 1));
 
         assert!(!filepath.exists(), "filepath should not exists before shard creation");
 
-        let _shard = Shard::open(dir.path(), 0, 1).unwrap();
+        let _shard = Shard::open(dir.path(), 0..1).unwrap();
         let meta = std::fs::metadata(&filepath).unwrap();
 
         assert_eq!(meta.len(), HEADER_SIZE, "header should be properly initialised");
