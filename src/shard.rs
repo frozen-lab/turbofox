@@ -25,6 +25,21 @@ struct ShardRow {
     offsets: [u64; ROW_WIDTH],
 }
 
+impl ShardRow {
+    #[inline]
+    fn lookup(&self, sig: u32, start_idx: &mut usize) -> Option<usize> {
+        use simd_itertools::PositionSimd;
+
+        if let Some(rel_idx) = self.signs[*start_idx..].iter().position_simd(|x| *x == sig) {
+            let abs_idx = rel_idx + *start_idx;
+            *start_idx = abs_idx + 1;
+            Some(abs_idx)
+        } else {
+            None
+        }
+    }
+}
+
 #[repr(C)]
 struct ShardHeader {
     rows: [ShardRow; NUM_ROWS],
@@ -61,15 +76,15 @@ impl Shard {
     pub fn get(&self, hash: TurboHash, kbuf: &[u8]) -> Result<Option<Buf>> {
         let row = self.header_row(hash.row());
 
-        for (i, sign) in row.signs.iter().enumerate() {
-            if hash.sign() == *sign {
-                let desc = row.offsets[i];
+        let mut start: usize = 0;
 
-                let (k, v) = self.read(desc)?;
+        while let Some(i) = row.lookup(hash.sign(), &mut start) {
+            let desc = row.offsets[i];
 
-                if k == kbuf {
-                    return Ok(Some(v));
-                }
+            let (k, v) = self.read(desc)?;
+
+            if k == kbuf {
+                return Ok(Some(v));
             }
         }
 
@@ -79,23 +94,27 @@ impl Shard {
     pub fn set(&self, hash: TurboHash, kbuf: &[u8], vbuf: &[u8]) -> Result<bool> {
         let row = self.header_row_mut(hash.row());
 
-        for (i, sign) in row.signs.iter_mut().enumerate() {
-            if hash.sign() == *sign {
-                let desc = row.offsets[i];
+        let mut start: usize = 0;
 
-                let (k, _) = self.read(desc)?;
+        while let Some(i) = row.lookup(hash.sign(), &mut start) {
+            let desc = row.offsets[i];
 
-                if k == kbuf {
-                    row.offsets[i] = self.write(kbuf, vbuf)?;
+            let (k, _) = self.read(desc)?;
 
-                    return Ok(true);
-                }
-            } else if *sign == INVALID_HASH {
-                *sign = hash.sign();
+            if k == kbuf {
                 row.offsets[i] = self.write(kbuf, vbuf)?;
 
                 return Ok(true);
             }
+        }
+
+        start = 0;
+
+        while let Some(i) = row.lookup(INVALID_HASH, &mut start) {
+            row.signs[i] = hash.sign();
+            row.offsets[i] = self.write(kbuf, vbuf)?;
+
+            return Ok(true);
         }
 
         Ok(false)
@@ -104,17 +123,17 @@ impl Shard {
     pub fn remove(&self, hash: TurboHash, kbuf: &[u8]) -> Result<Option<Buf>> {
         let row = self.header_row_mut(hash.row());
 
-        for (i, sign) in row.signs.iter_mut().enumerate() {
-            if hash.sign() == *sign {
-                let desc = row.offsets[i];
+        let mut start: usize = 0;
 
-                let (k, v) = self.read(desc)?;
+        while let Some(i) = row.lookup(hash.sign(), &mut start) {
+            let desc = row.offsets[i];
 
-                if k == kbuf {
-                    *sign = INVALID_HASH;
+            let (k, v) = self.read(desc)?;
 
-                    return Ok(Some(v));
-                }
+            if k == kbuf {
+                row.signs[i] = INVALID_HASH;
+
+                return Ok(Some(v));
             }
         }
 
