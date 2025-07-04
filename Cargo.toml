@@ -12,10 +12,7 @@ categories = ["database", "caching"]
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0.98"
 memmap = "0.7.0"
-simd-itertools = "0.3.0"
-siphasher = "1.0.1"
 
 [dev-dependencies]
 divan = "0.1.21"
