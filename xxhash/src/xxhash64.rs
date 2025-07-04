@@ -1,5 +1,5 @@
 use crate::IntoU64;
-use std::{fmt, mem};
+use std::{fmt, hash::BuildHasher, mem};
 
 const PRIME64_1: u64 = 0x9E3779B185EBCA87;
 const PRIME64_2: u64 = 0xC2B2AE3D27D4EB4F;
@@ -22,6 +22,15 @@ struct BufferedData(Lanes);
 impl BufferedData {
     const fn new() -> Self {
         Self([0; 4])
+    }
+
+    const fn bytes(&self) -> &Bytes {
+        const _: () = assert!(mem::align_of::<u8>() <= mem::align_of::<Lane>());
+        unsafe { &*self.0.as_ptr().cast() }
+    }
+
+    fn bytes_mut(&mut self) -> &mut Bytes {
+        unsafe { &mut *self.0.as_mut_ptr().cast() }
     }
 }
 
@@ -65,6 +74,57 @@ impl Buffer {
             offset: 0,
             data: BufferedData::new(),
         }
+    }
+
+    #[inline]
+    fn extend<'d>(&mut self, data: &'d [u8]) -> (Option<&Lanes>, &'d [u8]) {
+        if self.offset == 0 {
+            return (None, data);
+        };
+
+        let bytes = self.data.bytes_mut();
+        debug_assert!(self.offset <= bytes.len());
+
+        let empty = &mut bytes[self.offset..];
+        let n_to_copy = usize::min(empty.len(), data.len());
+
+        let dst = &mut empty[..n_to_copy];
+
+        let (src, rest) = data.split_at(n_to_copy);
+
+        dst.copy_from_slice(src);
+        self.offset += n_to_copy;
+
+        debug_assert!(self.offset <= bytes.len());
+
+        if self.offset == bytes.len() {
+            self.offset = 0;
+            (Some(&self.data.0), rest)
+        } else {
+            (None, rest)
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        debug_assert_eq!(self.offset, 0);
+
+        let n_to_copy = data.len();
+
+        let bytes = self.data.bytes_mut();
+        debug_assert!(n_to_copy < bytes.len());
+
+        bytes[..n_to_copy].copy_from_slice(data);
+        self.offset = data.len();
+    }
+
+    #[inline]
+    fn remaining(&self) -> &[u8] {
+        &self.data.bytes()[..self.offset]
     }
 }
 
@@ -310,5 +370,142 @@ impl Hasher {
         acc ^= acc >> 32;
 
         acc
+    }
+}
+
+impl std::hash::Hasher for Hasher {
+    #[inline]
+    fn write(&mut self, data: &[u8]) {
+        let len = data.len();
+
+        let (buffered_lanes, data) = self.buffer.extend(data);
+
+        if let Some(&lanes) = buffered_lanes {
+            self.accumulators.write(lanes);
+        }
+
+        let data = self.accumulators.write_many(data);
+
+        self.buffer.set(data);
+
+        self.length += len.into_u64();
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        Self::finish_with(
+            self.seed,
+            self.length,
+            &self.accumulators,
+            self.buffer.remaining(),
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct State(u64);
+
+impl State {
+    pub fn with_seed(seed: u64) -> Self {
+        Self(seed)
+    }
+}
+
+impl BuildHasher for State {
+    type Hasher = Hasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        Hasher::with_seed(self.0)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use core::{array, hash::Hasher as _};
+
+    const _TRAITS: () = {
+        const fn is_clone<T: Clone>() {}
+        is_clone::<Hasher>();
+        is_clone::<State>();
+    };
+
+    const EMPTY_BYTES: [u8; 0] = [];
+
+    #[test]
+    fn ingesting_byte_by_byte_is_equivalent_to_large_chunks() {
+        let bytes = [0x9c; 32];
+
+        let mut byte_by_byte = Hasher::with_seed(0);
+        for byte in bytes.chunks(1) {
+            byte_by_byte.write(byte);
+        }
+        let byte_by_byte = byte_by_byte.finish();
+
+        let mut one_chunk = Hasher::with_seed(0);
+        one_chunk.write(&bytes);
+        let one_chunk = one_chunk.finish();
+
+        assert_eq!(byte_by_byte, one_chunk);
+    }
+
+    #[test]
+    fn hash_of_nothing_matches_c_implementation() {
+        let mut hasher = Hasher::with_seed(0);
+        hasher.write(&EMPTY_BYTES);
+        assert_eq!(hasher.finish(), 0xef46_db37_51d8_e999);
+    }
+
+    #[test]
+    fn hash_of_single_byte_matches_c_implementation() {
+        let mut hasher = Hasher::with_seed(0);
+        hasher.write(&[42]);
+        assert_eq!(hasher.finish(), 0x0a9e_dece_beb0_3ae4);
+    }
+
+    #[test]
+    fn hash_of_multiple_bytes_matches_c_implementation() {
+        let mut hasher = Hasher::with_seed(0);
+        hasher.write(b"Hello, world!\0");
+        assert_eq!(hasher.finish(), 0x7b06_c531_ea43_e89f);
+    }
+
+    #[test]
+    fn hash_of_multiple_chunks_matches_c_implementation() {
+        let bytes: [u8; 100] = array::from_fn(|i| i as u8);
+        let mut hasher = Hasher::with_seed(0);
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 0x6ac1_e580_3216_6597);
+    }
+
+    #[test]
+    fn hash_with_different_seed_matches_c_implementation() {
+        let mut hasher = Hasher::with_seed(0xae05_4331_1b70_2d91);
+        hasher.write(&EMPTY_BYTES);
+        assert_eq!(hasher.finish(), 0x4b6a_04fc_df7a_4672);
+    }
+
+    #[test]
+    fn hash_with_different_seed_and_multiple_chunks_matches_c_implementation() {
+        let bytes: [u8; 100] = array::from_fn(|i| i as u8);
+        let mut hasher = Hasher::with_seed(0xae05_4331_1b70_2d91);
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 0x567e_355e_0682_e1f1);
+    }
+
+    #[test]
+    fn hashes_with_different_offsets_are_the_same() {
+        let bytes = [0x7c; 4096];
+        let expected = Hasher::oneshot(0, &[0x7c; 64]);
+
+        let the_same = bytes
+            .windows(64)
+            .map(|w| {
+                let mut hasher = Hasher::with_seed(0);
+                hasher.write(w);
+                hasher.finish()
+            })
+            .all(|h| h == expected);
+        assert!(the_same);
     }
 }
