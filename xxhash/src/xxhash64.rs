@@ -39,7 +39,7 @@ mod buffer_data_tests {
     #[test]
     fn test_buffered_data_size_and_alignment() {
         assert_eq!(mem::size_of::<BufferedData>(), mem::size_of::<Lanes>());
-        assert_eq!(mem::size_of::<Bytes>(), 16);
+        assert_eq!(mem::size_of::<Bytes>(), 32);
         assert!(mem::align_of::<u8>() <= mem::align_of::<u32>());
     }
 
@@ -174,7 +174,7 @@ mod accumulator_tests {
     fn test_round_consistency() {
         let acc = Accumulators::round(1, 2);
         let mut exp = 1u64.wrapping_add(2u64.wrapping_mul(PRIME64_2));
-        exp = exp.rotate_left(13).wrapping_mul(PRIME64_1);
+        exp = exp.rotate_left(31).wrapping_mul(PRIME64_1);
 
         assert_eq!(acc, exp);
     }
