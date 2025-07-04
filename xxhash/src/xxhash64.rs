@@ -1,3 +1,17 @@
+//! Implementation of the `XXH64` (64-bit hash).
+//!
+//! ### Example
+//!
+//! ```rust
+//! use std::hash::Hasher;
+//! use xxhash::XxHash64;
+//!
+//! let mut hasher = XxHash64::with_seed(0);
+//! hasher.write(b"hello world");
+//! let hash = hasher.finish();
+//!
+//! assert_eq!(hash, 0x45AB6734B21E6968);
+//! ```
 use crate::IntoU64;
 use std::{fmt, hash::BuildHasher, mem};
 
@@ -59,6 +73,22 @@ mod buffer_data_tests {
         let debug_str = format!("{:?}", buf);
 
         assert_eq!(debug_str, "[1, 2, 3, 4]");
+    }
+
+    #[test]
+    fn new_is_zeroed() {
+        let buf = BufferedData::new();
+        assert_eq!(buf.0, [0; 4]);
+        assert_eq!(buf.bytes(), &[0; 32]);
+    }
+
+    #[test]
+    fn bytes_mut_allows_modification() {
+        let mut buf = BufferedData::new();
+        buf.bytes_mut()[0] = 1;
+        buf.bytes_mut()[31] = 2;
+        assert_eq!(buf.bytes()[0], 1);
+        assert_eq!(buf.bytes()[31], 2);
     }
 }
 
@@ -125,6 +155,119 @@ impl Buffer {
     #[inline]
     fn remaining(&self) -> &[u8] {
         &self.data.bytes()[..self.offset]
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    #[test]
+    fn new_buffer_is_empty() {
+        let buffer = Buffer::new();
+        assert_eq!(buffer.offset, 0);
+        assert!(buffer.remaining().is_empty());
+    }
+
+    #[test]
+    fn set_stores_data_and_updates_offset() {
+        let mut buffer = Buffer::new();
+        let data = &[1, 2, 3];
+        buffer.set(data);
+
+        assert_eq!(buffer.offset, 3);
+        assert_eq!(buffer.remaining(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn set_with_empty_data_does_nothing() {
+        let mut buffer = Buffer::new();
+        buffer.set(&[]);
+
+        assert_eq!(buffer.offset, 0);
+        assert!(buffer.remaining().is_empty());
+    }
+
+    #[test]
+    fn extend_with_empty_initial_buffer() {
+        let mut buffer = Buffer::new();
+        let data = &[1, 2, 3];
+        let (lanes, rest) = buffer.extend(data);
+
+        assert!(lanes.is_none());
+        assert_eq!(rest, data);
+        assert_eq!(buffer.offset, 0); // extend shouldn't change buffer if it starts empty
+    }
+
+    #[test]
+    fn extend_partially_fills_buffer() {
+        let mut buffer = Buffer::new();
+        buffer.set(&[1, 2, 3]); // pre-fill
+
+        let data_to_extend = &[4, 5];
+        let (lanes, rest) = buffer.extend(data_to_extend);
+
+        assert!(lanes.is_none());
+        assert!(rest.is_empty());
+        assert_eq!(buffer.offset, 5);
+        assert_eq!(buffer.remaining(), &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn extend_exactly_fills_buffer() {
+        let mut buffer = Buffer::new();
+        let initial_data = &vec![1u8; 30];
+        buffer.set(initial_data);
+
+        let data_to_extend = &[2u8, 2u8];
+        let (lanes, rest) = buffer.extend(data_to_extend);
+
+        assert!(lanes.is_some());
+        assert!(rest.is_empty());
+
+        let mut expected_bytes = vec![1u8; 30];
+        expected_bytes.extend_from_slice(&[2u8, 2u8]);
+        let expected_lanes = unsafe { &*(expected_bytes.as_ptr() as *const Lanes) };
+        assert_eq!(lanes.unwrap(), expected_lanes);
+    }
+
+    #[test]
+    fn extend_over_fills_buffer() {
+        let mut buffer = Buffer::new();
+        let initial_data = &vec![1u8; 30];
+        buffer.set(initial_data);
+
+        let data_to_extend = &[2u8, 2u8, 3u8, 3u8, 3u8];
+        let (lanes, rest) = buffer.extend(data_to_extend);
+
+        assert!(lanes.is_some());
+        assert_eq!(rest, &[3u8, 3u8, 3u8]);
+
+        let mut expected_bytes = vec![1u8; 30];
+        expected_bytes.extend_from_slice(&[2u8, 2u8]);
+        let expected_lanes = unsafe { &*(expected_bytes.as_ptr() as *const Lanes) };
+        assert_eq!(lanes.unwrap(), expected_lanes);
+    }
+
+    #[test]
+    fn extend_with_empty_data_does_nothing() {
+        let mut buffer = Buffer::new();
+        buffer.set(&[1, 2, 3]);
+
+        let (lanes, rest) = buffer.extend(&[]);
+        assert!(lanes.is_none());
+        assert!(rest.is_empty());
+        assert_eq!(buffer.offset, 3);
+        assert_eq!(buffer.remaining(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn remaining_shows_correct_slice() {
+        let mut buffer = Buffer::new();
+        buffer.set(&[1, 2, 3, 4, 5]);
+        assert_eq!(buffer.remaining(), &[1, 2, 3, 4, 5]);
+        buffer.data.bytes_mut()[5] = 99; // should not be in remaining
+        assert_eq!(buffer.remaining(), &[1, 2, 3, 4, 5]);
     }
 }
 
@@ -287,12 +430,32 @@ pub struct Hasher {
 }
 
 impl Default for Hasher {
+    /// Creates a new hasher with a seed of 0.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// use xxhash::XxHash64;
+    ///
+    /// let hasher = XxHash64::default();
+    /// assert_eq!(hasher.seed(), 0);
+    /// ```
     fn default() -> Self {
         Self::with_seed(0)
     }
 }
 
 impl Hasher {
+    /// Hashes a byte slice into 64-byte in a single shot.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// use xxhash::XxHash64;
+    ///
+    /// let hash = XxHash64::oneshot(0, b"hello world");
+    /// assert_eq!(hash, 0x45AB6734B21E6968);
+    /// ```
     #[must_use]
     #[inline]
     pub fn oneshot(seed: u64, data: &[u8]) -> u64 {
@@ -306,6 +469,15 @@ impl Hasher {
     }
 
     /// Constructs the hasher with an initial seed.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// use xxhash::XxHash64;
+    ///
+    /// let hasher = XxHash64::with_seed(123);
+    /// assert_eq!(hasher.seed(), 123);
+    /// ```
     #[must_use]
     pub const fn with_seed(seed: u64) -> Self {
         Self {
@@ -316,12 +488,36 @@ impl Hasher {
         }
     }
 
-    /// The seed this hasher was created with.
+    /// Get the seed the hasher was created with.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// use xxhash::XxHash64;
+    ///
+    /// let hasher = XxHash64::with_seed(123);
+    /// assert_eq!(hasher.seed(), 123);
+    /// ```
     pub const fn seed(&self) -> u64 {
         self.seed
     }
 
     /// The total number of bytes hashed.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// use std::hash::Hasher;
+    /// use xxhash::XxHash64;
+    ///
+    /// let mut hasher = XxHash64::with_seed(0);
+    ///
+    /// hasher.write(b"hello");
+    /// assert_eq!(hasher.total_len(), 5);
+    /// hasher.write(b" world");
+    ///
+    /// assert_eq!(hasher.total_len(), 11);
+    /// ```
     pub const fn total_len(&self) -> u64 {
         self.length
     }
@@ -402,10 +598,30 @@ impl std::hash::Hasher for Hasher {
     }
 }
 
+/// A `BuildHasher` for creating `xxhash64::XxHash64` instances.
+///
+/// ### Example
+///
+/// ```rust
+/// use std::hash::BuildHasher;
+/// use xxhash::xxhash64::State;
+///
+/// let state = State::with_seed(0);
+/// let hasher = state.build_hasher();
+/// ```
 #[derive(Clone)]
 pub struct State(u64);
 
 impl State {
+    /// Creates a new `State` with the provided seed.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// use xxhash::xxhash64::State;
+    ///
+    /// let state = State::with_seed(123);
+    /// ```
     pub fn with_seed(seed: u64) -> Self {
         Self(seed)
     }
@@ -414,6 +630,19 @@ impl State {
 impl BuildHasher for State {
     type Hasher = Hasher;
 
+    /// Creates a new `xxhash64::XxHash64` with the seed from this `State`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::hash::BuildHasher;
+    /// use xxhash::xxhash64::State;
+    ///
+    /// let state = State::with_seed(0);
+    /// let hasher = state.build_hasher();
+    ///
+    /// assert_eq!(hasher.seed(), 0);
+    /// ```
     fn build_hasher(&self) -> Self::Hasher {
         Hasher::with_seed(self.0)
     }
@@ -466,7 +695,7 @@ mod test {
     #[test]
     fn hash_of_multiple_bytes_matches_c_implementation() {
         let mut hasher = Hasher::with_seed(0);
-        hasher.write(b"Hello, world!\0");
+        hasher.write(b"Hello, world! ");
         assert_eq!(hasher.finish(), 0x7b06_c531_ea43_e89f);
     }
 
