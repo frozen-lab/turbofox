@@ -1,7 +1,11 @@
-mod hash;
-mod router;
-mod shard;
-mod store;
+pub struct TurboCache;
 
-pub use shard::Result;
-pub use store::TurboCache;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanity_check() {
+        assert_eq!(std::mem::size_of_val(&TurboCache), 0);
+    }
+}
