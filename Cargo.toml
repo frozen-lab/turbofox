@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 memmap = "0.7.0"
+xxhash ={ path = "./xxhash"}
 
 [dev-dependencies]
 divan = "0.1.21"

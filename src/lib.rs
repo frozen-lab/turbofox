@@ -1,3 +1,5 @@
+mod hasher;
+
 pub struct TurboCache;
 
 #[cfg(test)]
