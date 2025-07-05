@@ -69,7 +69,7 @@ impl Default for ShardSigns {
 }
 
 impl ShardSigns {
-    ///
+    /// lookup a given sign from the given index
     fn lookup(&self, sign: u32, start_idx: &mut usize) -> Option<usize> {
         if let Some(rel_idx) = self.0[*start_idx..].iter().position(|x| *x == sign) {
             let abs_idx = *start_idx + rel_idx;
@@ -79,6 +79,73 @@ impl ShardSigns {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod shard_signs_tests {
+    use super::*;
+
+    #[test]
+    fn default_initializations() {
+        let signs = ShardSigns::default();
+
+        for &slot in signs.0.iter() {
+            assert_eq!(slot, INVALID_SIGN);
+        }
+    }
+
+    #[test]
+    fn lookup_returns_none_if_not_found() {
+        let signs = ShardSigns::default();
+
+        let missing = INVALID_SIGN.wrapping_add(1);
+        let mut start = 0;
+
+        assert!(signs.lookup(missing, &mut start).is_none());
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn lookup_finds_first_occurrence_and_updates_start_idx() {
+        let test_value = 0xDEAD_BEEF;
+        let mut data = [INVALID_SIGN; ROW_WIDTH];
+
+        data[3] = test_value;
+        data[7] = test_value;
+
+        let signs = ShardSigns(data);
+
+        let mut start = 0;
+        let first = signs.lookup(test_value, &mut start);
+
+        assert_eq!(first, Some(3));
+        assert_eq!(start, 4);
+
+        let second = signs.lookup(test_value, &mut start);
+
+        assert_eq!(second, Some(7));
+        assert_eq!(start, 8);
+
+        let third = signs.lookup(test_value, &mut start);
+
+        assert!(third.is_none());
+        assert_eq!(start, 8);
+    }
+
+    #[test]
+    fn lookup_respects_start_idx_offset() {
+        let mut data = [INVALID_SIGN; ROW_WIDTH];
+        data[0] = 1;
+        data[1] = 2;
+        data[2] = 1;
+
+        let signs = ShardSigns(data);
+
+        let mut start = 1;
+
+        assert_eq!(signs.lookup(1, &mut start), Some(2));
+        assert_eq!(start, 3);
     }
 }
 
