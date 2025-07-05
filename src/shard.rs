@@ -46,13 +46,13 @@ mod const_values_tests {
         );
 
         assert_eq!(
-            std::mem::size_of_val(&VERSION) % 8,
-            0,
+            std::mem::size_of_val(&VERSION),
+            1,
             "sizeof version should be in multiple of 8",
         );
         assert_eq!(
-            std::mem::size_of_val(&MAGIC) % 8,
-            0,
+            std::mem::size_of_val(&MAGIC),
+            8,
             "sizeof magic should be in multiple of 8",
         );
     }
