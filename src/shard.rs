@@ -97,7 +97,7 @@ struct ShardFile {
 }
 
 impl ShardFile {
-    fn open(path: PathBuf, truncate: bool) -> TResult<Self> {
+    fn open(path: &PathBuf, truncate: bool) -> TResult<Self> {
         let file = {
             if truncate {
                 Self::new(path)?
@@ -111,14 +111,14 @@ impl ShardFile {
         Ok(Self { file, mmap })
     }
 
-    fn new(path: PathBuf) -> TResult<File> {
+    fn new(path: &PathBuf) -> TResult<File> {
         let file = Self::file(path, true)?;
         file.set_len(HEADER_SIZE)?;
 
         Ok(file)
     }
 
-    fn file(path: PathBuf, truncate: bool) -> TResult<File> {
+    fn file(path: &PathBuf, truncate: bool) -> TResult<File> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -223,21 +223,16 @@ impl ShardFile {
 
 pub(crate) struct Shard {
     pub(crate) span: Range<u32>,
-    dirpath: PathBuf,
     file: ShardFile,
 }
 
 impl Shard {
-    pub fn open(dirpath: PathBuf, span: Range<u32>, truncate: bool) -> TResult<Self> {
+    pub fn open(dirpath: &PathBuf, span: Range<u32>, truncate: bool) -> TResult<Self> {
         let filepath = dirpath.join(format!("shard_{:04x}-{:04x}", span.start, span.end));
 
-        let file = ShardFile::open(filepath, truncate)?;
+        let file = ShardFile::open(&filepath, truncate)?;
 
-        Ok(Self {
-            span,
-            dirpath,
-            file,
-        })
+        Ok(Self { span, file })
     }
 
     pub fn set(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
@@ -347,7 +342,7 @@ mod tests {
         let dir = tmp.path().to_path_buf();
 
         std::fs::create_dir_all(&dir)?;
-        let s = Shard::open(dir.clone(), span, true)?;
+        let s = Shard::open(&dir, span, true)?;
 
         Ok((s, tmp))
     }

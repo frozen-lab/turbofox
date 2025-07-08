@@ -1,4 +1,5 @@
 mod hasher;
+mod router;
 mod shard;
 
 pub struct TurboCache;
