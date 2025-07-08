@@ -5,9 +5,9 @@ use xxhash::XxHash64;
 const SEED: u64 = 0;
 pub(crate) const INVALID_SIGN: u32 = 0;
 
-pub(crate) struct Hasher(u64);
+pub(crate) struct TurboHasher(u64);
 
-impl Hasher {
+impl TurboHasher {
     pub fn new(buf: &[u8]) -> Self {
         Self::from_hash(XxHash64::oneshot(SEED, buf))
     }

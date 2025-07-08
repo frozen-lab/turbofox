@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::hasher::TurboHasher;
 use memmap::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
@@ -16,8 +17,8 @@ pub(crate) const VERSION: u8 = 0;
 /// Versioned MAGIC value to help identify shards specific to TurboCache
 pub(crate) const MAGIC: [u8; 8] = *b"TURBOv0\0";
 
-pub(crate) const TABLE_SIZE: usize = 512 * 64;
-pub(crate) const TABLE_THRESHOLD: usize = (TABLE_SIZE as f64 * 0.9) as usize;
+pub(crate) const ROWS_NUM: usize = 1024;
+pub(crate) const ROWS_WIDTH: usize = 32;
 pub(crate) const HEADER_SIZE: u64 = size_of::<ShardHeader>() as u64;
 
 pub type TResult<T> = io::Result<T>;
@@ -27,18 +28,32 @@ struct PageAligned<T>(T);
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct IndexSlot {
+struct IndexFp([u32; ROWS_WIDTH]);
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct ShardSlot {
     offset: u32,
     klen: u16,
     vlen: u16,
 }
 
-impl Default for IndexSlot {
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct ShardIndex {
+    fp: IndexFp,
+    slots: ShardSlot,
+}
+
+impl Default for ShardIndex {
     fn default() -> Self {
         Self {
-            offset: 0,
-            vlen: 0,
-            klen: 0,
+            fp: IndexFp([0u32; ROWS_WIDTH]),
+            slots: ShardSlot {
+                offset: 0,
+                klen: 0,
+                vlen: 0,
+            },
         }
     }
 }
@@ -60,8 +75,7 @@ struct ShardStats {
 struct ShardHeader {
     meta: ShardMeta,
     stats: ShardStats,
-    fp: PageAligned<[u16; TABLE_SIZE]>,
-    slots: PageAligned<[IndexSlot; TABLE_SIZE]>,
+    index: PageAligned<[ShardIndex; ROWS_NUM]>,
 }
 
 impl Default for ShardHeader {
@@ -76,8 +90,7 @@ impl Default for ShardHeader {
                 n_deleted: AtomicU16::new(0),
                 write_offset: AtomicU32::new(0),
             },
-            fp: PageAligned([0u16; TABLE_SIZE]),
-            slots: PageAligned([IndexSlot::default(); TABLE_SIZE]),
+            index: PageAligned([ShardIndex::default(); ROWS_NUM]),
         }
     }
 }
@@ -130,7 +143,7 @@ impl ShardFile {
         unsafe { &mut *(self.mmap.as_ptr() as *mut ShardHeader) }
     }
 
-    fn write_slot(&self, kbuf: &[u8], vbuf: &[u8]) -> TResult<IndexSlot> {
+    fn write_slot(&self, kbuf: &[u8], vbuf: &[u8]) -> TResult<ShardSlot> {
         let vlen = vbuf.len();
         let klen = kbuf.len();
         let blen = klen + vlen;
@@ -143,14 +156,14 @@ impl ShardFile {
 
         Self::write_all_at(&self.file, vbuf, write_offset as u64 + HEADER_SIZE)?;
 
-        Ok(IndexSlot {
+        Ok(ShardSlot {
             offset: write_offset,
             vlen: vlen as u16,
             klen: klen as u16,
         })
     }
 
-    fn read_slot(&self, slot: &IndexSlot) -> TResult<(Vec<u8>, Vec<u8>)> {
+    fn read_slot(&self, slot: &ShardSlot) -> TResult<(Vec<u8>, Vec<u8>)> {
         let vlen = slot.vlen as usize;
         let klen = slot.klen as usize;
         let mut buf = vec![0u8; vlen + klen];
@@ -163,7 +176,7 @@ impl ShardFile {
         Ok((buf, vbuf))
     }
 
-    fn read_kbuf(&self, slot: &IndexSlot) -> TResult<Vec<u8>> {
+    fn read_kbuf(&self, slot: &ShardSlot) -> TResult<Vec<u8>> {
         let klen = slot.klen as usize;
         let mut buf = vec![0u8; klen];
 
@@ -172,7 +185,7 @@ impl ShardFile {
         Ok(buf)
     }
 
-    fn read_vbuf(&self, slot: &IndexSlot) -> TResult<Vec<u8>> {
+    fn read_vbuf(&self, slot: &ShardSlot) -> TResult<Vec<u8>> {
         let klen = slot.klen as usize;
         let vlen = slot.vlen as usize;
 
