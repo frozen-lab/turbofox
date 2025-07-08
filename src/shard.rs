@@ -5,6 +5,7 @@ use std::{
     fs::{File, OpenOptions},
     io,
     mem::size_of,
+    ops::Range,
     path::PathBuf,
     sync::atomic::{AtomicU16, AtomicU32, Ordering},
 };
@@ -87,17 +88,25 @@ struct ShardFile {
 }
 
 impl ShardFile {
-    fn open(file: File) -> TResult<Self> {
+    fn open(path: PathBuf, truncate: bool) -> TResult<Self> {
+        let file = {
+            if truncate {
+                Self::new(path)?
+            } else {
+                Self::file(path, truncate)?
+            }
+        };
+
         let mmap = unsafe { MmapOptions::new().len(HEADER_SIZE as usize).map_mut(&file) }?;
 
         Ok(Self { file, mmap })
     }
 
-    fn new(path: PathBuf) -> TResult<Self> {
+    fn new(path: PathBuf) -> TResult<File> {
         let file = Self::file(path, true)?;
         file.set_len(HEADER_SIZE)?;
 
-        Self::open(file)
+        Ok(file)
     }
 
     fn file(path: PathBuf, truncate: bool) -> TResult<File> {
@@ -182,5 +191,25 @@ impl ShardFile {
     #[cfg(unix)]
     fn write_all_at(f: &File, buf: &[u8], offset: u64) -> TResult<()> {
         std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
+    }
+}
+
+pub(crate) struct Shard {
+    pub(crate) span: Range<u32>,
+    dirpath: PathBuf,
+    file: ShardFile,
+}
+
+impl Shard {
+    pub fn open(dirpath: PathBuf, span: Range<u32>, truncate: bool) -> TResult<Self> {
+        let filepath = dirpath.join(format!("shard_{:04x}-{:04x}", span.start, span.end));
+
+        let file = ShardFile::open(filepath, truncate)?;
+
+        Ok(Self {
+            span,
+            dirpath,
+            file,
+        })
     }
 }
