@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::hasher::TurboHasher;
+use crate::hasher::{TurboHasher, INVALID_FP};
 use memmap::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
@@ -28,10 +28,6 @@ struct PageAligned<T>(T);
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct IndexFp([u32; ROWS_WIDTH]);
-
-#[derive(Clone, Copy)]
-#[repr(C)]
 struct ShardSlot {
     offset: u32,
     klen: u16,
@@ -40,15 +36,15 @@ struct ShardSlot {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct ShardIndex {
-    fp: IndexFp,
-    slots: ShardSlot,
+struct IndexRow {
+    fp: [u32; ROWS_WIDTH],
+    slots: [ShardSlot; ROWS_WIDTH],
 }
 
-impl Default for ShardIndex {
+impl Default for IndexRow {
     fn default() -> Self {
         Self {
-            fp: IndexFp([0u32; ROWS_WIDTH]),
+            fp: [0u32; ROWS_WIDTH],
             slots: ShardSlot {
                 offset: 0,
                 klen: 0,
@@ -75,7 +71,7 @@ struct ShardStats {
 struct ShardHeader {
     meta: ShardMeta,
     stats: ShardStats,
-    index: PageAligned<[ShardIndex; ROWS_NUM]>,
+    index: PageAligned<[IndexRow; ROWS_NUM]>,
 }
 
 impl Default for ShardHeader {
@@ -90,7 +86,7 @@ impl Default for ShardHeader {
                 n_deleted: AtomicU16::new(0),
                 write_offset: AtomicU32::new(0),
             },
-            index: PageAligned([ShardIndex::default(); ROWS_NUM]),
+            index: PageAligned([IndexRow::default(); ROWS_NUM]),
         }
     }
 }
@@ -141,6 +137,16 @@ impl ShardFile {
     #[inline(always)]
     fn header_mut(&self) -> &mut ShardHeader {
         unsafe { &mut *(self.mmap.as_ptr() as *mut ShardHeader) }
+    }
+
+    #[inline(always)]
+    fn row(&self, row_idx: usize) -> &IndexRow {
+        &self.header().index.0[row_idx]
+    }
+
+    #[inline(always)]
+    fn row_mut(&self, row_idx: usize) -> &mut IndexRow {
+        &mut self.header_mut().index.0[row_idx]
     }
 
     fn write_slot(&self, kbuf: &[u8], vbuf: &[u8]) -> TResult<ShardSlot> {
@@ -224,5 +230,45 @@ impl Shard {
             dirpath,
             file,
         })
+    }
+
+    pub fn insert(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
+        let (kbuf, vbuf) = buf;
+        let row_idx = hash.row_selector() as usize;
+        let fp = hash.fingerprint();
+
+        let row = self.file.row_mut(row_idx);
+
+        // incase the fingerprint already exists
+        for idx in 0..ROWS_WIDTH {
+            if row.fp[idx] == fp {
+                let slot = row.slots[idx];
+                let key = self.file.read_kbuf(&slot)?;
+
+                if key == kbuf {
+                    let new_slot = self.file.write_slot(kbuf, vbuf)?;
+                    row.slots[idx] = new_slot;
+                }
+
+                return Ok(());
+            }
+        }
+
+        // otherwise find the first free slot (fp == 0) to insert
+        for idx in 0..ROWS_WIDTH {
+            if row.fp[idx] == INVALID_FP {
+                let slot = self.file.write_slot(kbuf, vbuf)?;
+
+                row.fp[idx] = fp;
+                row.slots[idx] = slot;
+
+                let header = self.file.header_mut();
+                header.stats.n_occupied.fetch_add(1, Ordering::SeqCst);
+
+                return Ok(());
+            }
+        }
+
+        Ok(())
     }
 }
