@@ -164,7 +164,7 @@ impl ShardFile {
             .write_offset
             .fetch_add(blen as u32, Ordering::SeqCst) as u32;
 
-        Self::write_all_at(&self.file, vbuf, write_offset as u64 + HEADER_SIZE)?;
+        Self::write_all_at(&self.file, &buf, write_offset as u64 + HEADER_SIZE)?;
 
         Ok(ShardSlot {
             offset: write_offset,
@@ -178,7 +178,7 @@ impl ShardFile {
         let klen = slot.klen as usize;
         let mut buf = vec![0u8; vlen + klen];
 
-        Self::read_exact_at(&self.file, &mut buf, slot.offset as u64)?;
+        Self::read_exact_at(&self.file, &mut buf, slot.offset as u64 + HEADER_SIZE)?;
 
         let vbuf = buf[klen..klen + vlen].to_owned();
         buf.truncate(klen);
@@ -190,7 +190,7 @@ impl ShardFile {
         let klen = slot.klen as usize;
         let mut buf = vec![0u8; klen];
 
-        Self::read_exact_at(&self.file, &mut buf, slot.offset as u64)?;
+        Self::read_exact_at(&self.file, &mut buf, slot.offset as u64 + HEADER_SIZE)?;
 
         Ok(buf)
     }
@@ -201,7 +201,11 @@ impl ShardFile {
 
         let mut buf = vec![0u8; vlen];
 
-        Self::read_exact_at(&self.file, &mut buf, (slot.offset + klen as u32) as u64)?;
+        Self::read_exact_at(
+            &self.file,
+            &mut buf,
+            slot.offset as u64 + HEADER_SIZE + klen as u64,
+        )?;
 
         Ok(buf)
     }
@@ -236,7 +240,7 @@ impl Shard {
         })
     }
 
-    pub fn insert(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
+    pub fn set(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
         let (kbuf, vbuf) = buf;
         let row_idx = hash.row_selector() as usize;
         let fp = hash.fingerprint();
@@ -278,5 +282,57 @@ impl Shard {
             io::ErrorKind::Other,
             format!("row {} is full", row_idx),
         ))
+    }
+
+    pub fn get(&self, kbuf: &[u8], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
+        let row_idx = hash.row_selector() as usize;
+        let fp = hash.fingerprint();
+        let row = self.file.row(row_idx);
+
+        for idx in 0..ROWS_WIDTH {
+            if row.fp[idx] == fp {
+                let slot = row.slots[idx];
+                let existing_key = self.file.read_kbuf(&slot)?;
+
+                if existing_key == kbuf {
+                    let vbuf = self.file.read_vbuf(&slot)?;
+
+                    return Ok(Some(vbuf));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn remove(&self, kbuf: &[u8], hash: TurboHasher) -> TResult<bool> {
+        let row_idx = hash.row_selector() as usize;
+        let fp = hash.fingerprint();
+        let row = self.file.row_mut(row_idx);
+
+        for idx in 0..ROWS_WIDTH {
+            if row.fp[idx] == fp {
+                let slot = row.slots[idx];
+                let existing_key = self.file.read_kbuf(&slot)?;
+
+                if existing_key == kbuf {
+                    row.fp[idx] = INVALID_FP;
+                    row.slots[idx] = ShardSlot {
+                        offset: 0,
+                        klen: 0,
+                        vlen: 0,
+                    };
+
+                    let hdr = self.file.header_mut();
+
+                    hdr.stats.n_deleted.fetch_add(1, Ordering::SeqCst);
+                    hdr.stats.n_occupied.fetch_sub(1, Ordering::SeqCst);
+
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
