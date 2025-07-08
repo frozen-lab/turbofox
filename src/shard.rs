@@ -336,3 +336,92 @@ impl Shard {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn new_shard(span: Range<u32>) -> TResult<(Shard, TempDir)> {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+
+        std::fs::create_dir_all(&dir)?;
+        let s = Shard::open(dir.clone(), span, true)?;
+
+        Ok((s, tmp))
+    }
+
+    #[test]
+    fn set_get_remove_roundtrip() {
+        let (shard, _tmp) = new_shard(0..0x1000).unwrap();
+        let key = b"hello";
+        let val: Vec<u8> = b"world".to_vec();
+        let h = TurboHasher::new(key);
+
+        // initially not present
+        assert_eq!(shard.get(key, h).unwrap(), None);
+
+        // set then get
+        shard.set((key, &val), h).unwrap();
+
+        assert_eq!(shard.get(key, h).unwrap(), Some(val));
+
+        // remove => true, then gone
+        assert!(shard.remove(key, h).unwrap());
+        assert_eq!(shard.get(key, h).unwrap(), None);
+
+        // removing again returns false
+        assert!(!shard.remove(key, h).unwrap());
+    }
+
+    #[test]
+    fn overwrite_existing_value() {
+        let (shard, _tmp) = new_shard(0..0x1000).unwrap();
+        let key = b"dup";
+        let v1 = b"first".to_vec();
+        let v2 = b"second".to_vec();
+        let h = TurboHasher::new(key);
+
+        shard.set((key, &v1), h).unwrap();
+
+        assert_eq!(shard.get(key, h).unwrap(), Some(v1));
+
+        // overwrite
+        shard.set((key, &v2), h).unwrap();
+
+        assert_eq!(shard.get(key, h).unwrap(), Some(v2));
+    }
+
+    #[test]
+    fn stats_n_occupied_and_n_deleted() {
+        let (shard, _tmp) = new_shard(0..0x1000).unwrap();
+        let header = shard.file.header();
+        let load = |f: &AtomicU16| f.load(Ordering::SeqCst);
+
+        assert_eq!(load(&header.stats.n_occupied), 0);
+        assert_eq!(load(&header.stats.n_deleted), 0);
+
+        // insert two distinct keys
+        let k1 = b"k1";
+        let k2 = b"k2";
+        let h1 = TurboHasher::new(k1);
+        let h2 = TurboHasher::new(k2);
+
+        shard.set((k1, b"v1"), h1).unwrap();
+        shard.set((k2, b"v2"), h2).unwrap();
+
+        assert_eq!(load(&header.stats.n_occupied), 2);
+        assert_eq!(load(&header.stats.n_deleted), 0);
+
+        // remove one
+        assert!(shard.remove(k1, h1).unwrap());
+        assert_eq!(load(&header.stats.n_occupied), 1);
+        assert_eq!(load(&header.stats.n_deleted), 1);
+
+        // remove non‐existent does nothing
+        assert!(!shard.remove(b"nope", TurboHasher::new(b"nope")).unwrap());
+        assert_eq!(load(&header.stats.n_occupied), 1);
+        assert_eq!(load(&header.stats.n_deleted), 1);
+    }
+}

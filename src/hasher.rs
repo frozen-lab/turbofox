@@ -6,6 +6,7 @@ use xxhash::XxHash64;
 const SEED: u64 = 0;
 pub(crate) const INVALID_FP: u32 = 0;
 
+#[derive(Clone, Copy)]
 pub(crate) struct TurboHasher(u64);
 
 impl TurboHasher {
@@ -44,5 +45,68 @@ impl TurboHasher {
         let value = shard | row | (sign as u64);
 
         Self(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw_hash(buf: &[u8]) -> u64 {
+        XxHash64::oneshot(SEED, buf)
+    }
+
+    #[test]
+    fn deterministic_fp_shard_row() {
+        let data = b"some test data";
+        let h1 = TurboHasher::new(data);
+        let h2 = TurboHasher::new(data);
+
+        assert_eq!(h1.fingerprint(), h2.fingerprint(), "fingerprints differ");
+        assert_eq!(h1.row_selector(), h2.row_selector(), "row_selector differs");
+        assert_eq!(
+            h1.shard_selector(),
+            h2.shard_selector(),
+            "shard_selector differs"
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_never_invalid_fp() {
+        for i in 0..10 {
+            let buf = format!("collision test {}", i).into_bytes();
+            let h = TurboHasher::new(&buf);
+
+            assert_ne!(h.fingerprint(), INVALID_FP, "got INVALID_FP for {:?}", buf);
+        }
+    }
+
+    #[test]
+    fn row_selector_in_bounds() {
+        let data = b"row bounds";
+
+        for _ in 0..100 {
+            let h = TurboHasher::new(data);
+            let row = h.row_selector();
+
+            assert!(row < ROWS_NUM, "row_selector {} out of bounds", row);
+        }
+    }
+
+    #[test]
+    fn different_inputs_produce_different() {
+        let a = TurboHasher::new(b"a");
+        let b = TurboHasher::new(b"b");
+
+        assert_ne!(
+            a.fingerprint(),
+            b.fingerprint(),
+            "fingerprint collision a vs b"
+        );
+        assert_ne!(
+            a.shard_selector(),
+            b.shard_selector(),
+            "shard collision a vs b"
+        );
     }
 }
