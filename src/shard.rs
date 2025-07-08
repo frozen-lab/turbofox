@@ -44,12 +44,12 @@ struct IndexRow {
 impl Default for IndexRow {
     fn default() -> Self {
         Self {
-            fp: [0u32; ROWS_WIDTH],
-            slots: ShardSlot {
+            fp: [INVALID_FP; ROWS_WIDTH],
+            slots: [ShardSlot {
                 offset: 0,
                 klen: 0,
                 vlen: 0,
-            },
+            }; ROWS_WIDTH],
         }
     }
 }
@@ -154,6 +154,10 @@ impl ShardFile {
         let klen = kbuf.len();
         let blen = klen + vlen;
 
+        let mut buf = vec![0u8; blen];
+        buf[..klen].copy_from_slice(kbuf);
+        buf[klen..].copy_from_slice(vbuf);
+
         let write_offset: u32 = self
             .header()
             .stats
@@ -248,9 +252,9 @@ impl Shard {
                 if key == kbuf {
                     let new_slot = self.file.write_slot(kbuf, vbuf)?;
                     row.slots[idx] = new_slot;
-                }
 
-                return Ok(());
+                    return Ok(());
+                }
             }
         }
 
@@ -269,6 +273,10 @@ impl Shard {
             }
         }
 
-        Ok(())
+        // if we ran out of room in this row
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("row {} is full", row_idx),
+        ))
     }
 }
