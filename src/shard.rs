@@ -28,12 +28,17 @@ struct PageAligned<T>(T);
 #[repr(C)]
 struct IndexSlot {
     offset: u32,
-    vlen: u32,
+    klen: u16,
+    vlen: u16,
 }
 
 impl Default for IndexSlot {
     fn default() -> Self {
-        Self { offset: 0, vlen: 0 }
+        Self {
+            offset: 0,
+            vlen: 0,
+            klen: 0,
+        }
     }
 }
 
@@ -116,28 +121,55 @@ impl ShardFile {
         unsafe { &mut *(self.mmap.as_ptr() as *mut ShardHeader) }
     }
 
-    fn write_slot(&self, vbuf: &[u8]) -> TResult<IndexSlot> {
+    fn write_slot(&self, kbuf: &[u8], vbuf: &[u8]) -> TResult<IndexSlot> {
         let vlen = vbuf.len();
+        let klen = kbuf.len();
+        let blen = klen + vlen;
 
         let write_offset: u32 = self
             .header()
             .stats
             .write_offset
-            .fetch_add(vlen as u32, Ordering::SeqCst) as u32;
+            .fetch_add(blen as u32, Ordering::SeqCst) as u32;
 
         Self::write_all_at(&self.file, vbuf, write_offset as u64 + HEADER_SIZE)?;
 
         Ok(IndexSlot {
             offset: write_offset,
-            vlen: vlen as u32,
+            vlen: vlen as u16,
+            klen: klen as u16,
         })
     }
 
-    fn read_slot(&self, slot: IndexSlot) -> TResult<Vec<u8>> {
+    fn read_slot(&self, slot: &IndexSlot) -> TResult<(Vec<u8>, Vec<u8>)> {
         let vlen = slot.vlen as usize;
-        let mut buf = vec![0u8; vlen];
+        let klen = slot.klen as usize;
+        let mut buf = vec![0u8; vlen + klen];
 
         Self::read_exact_at(&self.file, &mut buf, slot.offset as u64)?;
+
+        let vbuf = buf[klen..klen + vlen].to_owned();
+        buf.truncate(klen);
+
+        Ok((buf, vbuf))
+    }
+
+    fn read_kbuf(&self, slot: &IndexSlot) -> TResult<Vec<u8>> {
+        let klen = slot.klen as usize;
+        let mut buf = vec![0u8; klen];
+
+        Self::read_exact_at(&self.file, &mut buf, slot.offset as u64)?;
+
+        Ok(buf)
+    }
+
+    fn read_vbuf(&self, slot: &IndexSlot) -> TResult<Vec<u8>> {
+        let klen = slot.klen as usize;
+        let vlen = slot.vlen as usize;
+
+        let mut buf = vec![0u8; vlen];
+
+        Self::read_exact_at(&self.file, &mut buf, (slot.offset + klen as u32) as u64)?;
 
         Ok(buf)
     }
