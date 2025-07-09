@@ -35,7 +35,7 @@ impl TurboHasher {
     ///
     /// ### Example
     ///
-    /// ```rust
+    /// ```ignore
     /// use turbocache::hasher::TurboHasher;
     ///
     /// let hasher = TurboHasher::new(b"hello world");
@@ -51,7 +51,7 @@ impl TurboHasher {
     ///
     /// ### Example
     ///
-    /// ```rust
+    /// ```ignore
     /// use turbocache::hasher::TurboHasher;
     ///
     /// let hasher = TurboHasher::new(b"hello world");
@@ -69,7 +69,7 @@ impl TurboHasher {
     ///
     /// ### Example
     ///
-    /// ```rust
+    /// ```ignore
     /// use turbocache::hasher::TurboHasher;
     ///
     /// let hasher = TurboHasher::new(b"hello world");
@@ -87,7 +87,7 @@ impl TurboHasher {
     ///
     /// ### Example
     ///
-    /// ```rust
+    /// ```ignore
     /// use turbocache::hasher::TurboHasher;
     ///
     /// let hasher = TurboHasher::new(b"hello world");

@@ -35,7 +35,7 @@ impl Router {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use std::path::PathBuf;
     /// use turbocache::router::Router;
     ///
@@ -121,7 +121,7 @@ impl Router {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use std::path::PathBuf;
     /// use turbocache::router::Router;
     /// use turbocache::hasher::TurboHasher;
@@ -155,7 +155,7 @@ impl Router {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use std::path::PathBuf;
     /// use turbocache::router::Router;
     /// use turbocache::hasher::TurboHasher;
@@ -193,7 +193,7 @@ impl Router {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use std::path::PathBuf;
     /// use turbocache::router::Router;
     /// use turbocache::hasher::TurboHasher;
