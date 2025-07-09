@@ -69,7 +69,7 @@ impl Router {
             let end = u32::from_str_radix(end, 16).expect(filename);
             let range = start..end;
 
-            if start < end && end <= Self::END_OF_SHARDS {
+            if start >= end || end > Self::END_OF_SHARDS {
                 // NOTE: Invalid shard
                 continue;
             }
