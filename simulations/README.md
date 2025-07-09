@@ -1,5 +1,8 @@
 # Simulations
 
+Following are the results of the simulations,
+
+```txt
 Trial  1: full after 18341 inserts on row 13; avg k/v len = 34.2/132.0
 Trial  2: full after 17569 inserts on row 553; avg k/v len = 34.1/131.8
 Trial  3: full after 18095 inserts on row 700; avg k/v len = 34.3/132.1
@@ -34,3 +37,4 @@ Trial 30: full after 17311 inserts on row 103; avg k/v len = 34.1/131.5
 Summary:
   Inserts before full: min = 15509, max = 20060, avg = 17758.2
   Avg key len = 34.0, Avg val len = 132.0
+```
