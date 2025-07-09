@@ -1,35 +1,158 @@
-mod hasher;
-mod router;
-mod shard;
+//! # TurboCache
+//!
+//! TurboCache is a high-performance, embedded key-value store for Rust, designed
+//! for scenarios where you need a simple, fast, and persistent cache. It's built
+//! on a sharded, memory-mapped architecture that provides excellent performance
+//! for both reads and writes.
+//!
+//! ## Key Features
+//!
+//! - **Embedded**: TurboCache is a library, not a separate server. You can embed it
+//!   directly into your application.
+//! - **Persistent**: Data is stored on disk and persists across application restarts.
+//! - **Fast**: It uses memory-mapped files and a cuckoo-filter-like index to
+//!   provide fast access to your data.
+//! - **Sharded**: The keyspace is partitioned into shards, allowing for better
+//!   concurrency and scalability.
+//! - **Simple API**: The API is small and easy to use, with just `new`, `set`, `get`,
+//!   and `remove` methods.
+//!
+//! ## Getting Started
+//!
+//! To use TurboCache, simply add it to your `Cargo.toml` and create a new
+//! instance with a directory path. The database will be created in that
+//! directory, and you can start setting and getting values right away.
+//!
+//! ```no_run
+//! use turbocache::TurboCache;
+//! use std::path::PathBuf;
+//!
+//! // Create a new TurboCache instance in a temporary directory.
+//! let dir = PathBuf::from("/tmp/turbocache_docs");
+//! std::fs::create_dir_all(&dir).unwrap();
+//! let cache = TurboCache::new(dir).unwrap();
+//!
+//! // Set a key-value pair.
+//! cache.set(b"hello", b"world").unwrap();
+//!
+//! // Get the value for a key.
+//! let value = cache.get(b"hello").unwrap();
+//! assert_eq!(value, Some(b"world".to_vec()));
+//!
+//! // Remove a key.
+//! let was_removed = cache.remove(b"hello").unwrap();
+//! assert!(was_removed);
+//!
+//! // The key is now gone.
+//! let value = cache.get(b"hello").unwrap();
+//! assert_eq!(value, None);
+//! ```
+
+pub mod hasher;
+pub mod router;
+pub mod shard;
 
 use hasher::TurboHasher;
 use router::Router;
 pub use shard::{Error, TResult};
 use std::path::PathBuf;
 
+/// The main interface to the TurboCache database.
+///
+/// This struct provides the primary API for interacting with the cache, including
+/// methods for setting, getting, and removing key-value pairs.
 pub struct TurboCache {
     router: Router,
 }
 
 impl TurboCache {
+    /// Creates a new `TurboCache` instance at the specified directory.
+    ///
+    /// If the directory does not exist, it will be created. If it already contains
+    /// a TurboCache database, it will be loaded.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use turbocache::TurboCache;
+    /// use std::path::PathBuf;
+    ///
+    /// let dir = PathBuf::from("/tmp/turbocache_docs_new");
+    /// std::fs::create_dir_all(&dir).unwrap();
+    /// let cache = TurboCache::new(dir).unwrap();
+    /// ```
     pub fn new(dirpath: PathBuf) -> TResult<Self> {
         Ok(Self {
             router: Router::open(&dirpath)?,
         })
     }
 
+    /// Sets a key-value pair in the cache.
+    ///
+    /// If the key already exists, its value will be overwritten.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use turbocache::TurboCache;
+    /// use std::path::PathBuf;
+    ///
+    /// let dir = PathBuf::from("/tmp/turbocache_docs_set");
+    /// std::fs::create_dir_all(&dir).unwrap();
+    /// let cache = TurboCache::new(dir).unwrap();
+    ///
+    /// cache.set(b"my_key", b"my_value").unwrap();
+    /// ```
     pub fn set(&self, kbuf: &[u8], vbuf: &[u8]) -> TResult<()> {
         let hash = TurboHasher::new(kbuf);
 
         self.router.set((kbuf, vbuf), hash)
     }
 
+    /// Retrieves a value from the cache by its key.
+    ///
+    /// Returns `Ok(Some(value))` if the key is found, `Ok(None)` if not.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use turbocache::TurboCache;
+    /// use std::path::PathBuf;
+    ///
+    /// let dir = PathBuf::from("/tmp/turbocache_docs_get");
+    /// std::fs::create_dir_all(&dir).unwrap();
+    /// let cache = TurboCache::new(dir).unwrap();
+    ///
+    /// cache.set(b"another_key", b"another_value").unwrap();
+    /// let value = cache.get(b"another_key").unwrap();
+    ///
+    /// assert_eq!(value, Some(b"another_value".to_vec()));
+    /// ```
     pub fn get(&self, kbuf: &[u8]) -> TResult<Option<Vec<u8>>> {
         let hash = TurboHasher::new(kbuf);
 
         self.router.get(kbuf, hash)
     }
 
+    /// Removes a key-value pair from the cache.
+    ///
+    /// Returns `Ok(true)` if the key was found and removed, `Ok(false)` if not.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use turbocache::TurboCache;
+    /// use std::path::PathBuf;
+    ///
+    /// let dir = PathBuf::from("/tmp/turbocache_docs_remove");
+    /// std::fs::create_dir_all(&dir).unwrap();
+    /// let cache = TurboCache::new(dir).unwrap();
+    ///
+    /// cache.set(b"to_be_removed", b"data").unwrap();
+    /// let was_removed = cache.remove(b"to_be_removed").unwrap();
+    ///
+    /// assert!(was_removed);
+    /// ```
     pub fn remove(&self, kbuf: &[u8]) -> TResult<bool> {
         let hash = TurboHasher::new(kbuf);
 
