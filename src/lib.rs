@@ -1,15 +1,39 @@
+use hasher::TurboHasher;
+use router::Router;
+use std::path::PathBuf;
+
 mod hasher;
 mod router;
 mod shard;
 
-pub struct TurboCache;
+pub use shard::TResult;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct TurboCache {
+    router: Router,
+}
 
-    #[test]
-    fn sanity_check() {
-        assert_eq!(std::mem::size_of_val(&TurboCache), 0);
+impl TurboCache {
+    pub fn new(dirpath: PathBuf) -> TResult<Self> {
+        Ok(Self {
+            router: Router::open(&dirpath)?,
+        })
+    }
+
+    pub fn set(&self, kbuf: &[u8], vbuf: &[u8]) -> TResult<()> {
+        let hash = TurboHasher::new(kbuf);
+
+        self.router.set((kbuf, vbuf), hash)
+    }
+
+    pub fn get(&self, kbuf: &[u8]) -> TResult<Option<Vec<u8>>> {
+        let hash = TurboHasher::new(kbuf);
+
+        self.router.get(kbuf, hash)
+    }
+
+    pub fn remove(&self, kbuf: &[u8]) -> TResult<bool> {
+        let hash = TurboHasher::new(kbuf);
+
+        self.router.remove(kbuf, hash)
     }
 }
