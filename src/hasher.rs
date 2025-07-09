@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::shard::ROWS_NUM;
 use xxhash::XxHash64;
 
@@ -51,10 +49,6 @@ impl TurboHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn raw_hash(buf: &[u8]) -> u64 {
-        XxHash64::oneshot(SEED, buf)
-    }
 
     #[test]
     fn deterministic_fp_shard_row() {

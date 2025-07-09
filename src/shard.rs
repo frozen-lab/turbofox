@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::hasher::{TurboHasher, INVALID_FP};
 use memmap::{MmapMut, MmapOptions};
 use std::{
@@ -21,7 +19,32 @@ pub(crate) const ROWS_NUM: usize = 1024;
 pub(crate) const ROWS_WIDTH: usize = 32;
 pub(crate) const HEADER_SIZE: u64 = size_of::<ShardHeader>() as u64;
 
-pub type TResult<T> = io::Result<T>;
+#[derive(Debug)]
+pub enum Error {
+    Io(io::Error),
+    RowFull(usize),
+    ShardOutOfRange(u32),
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::Io(err)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Io(err) => write!(f, "I/O error: {}", err),
+            Error::RowFull(row) => write!(f, "row {} is full", row),
+            Error::ShardOutOfRange(shard) => write!(f, "out of range of {}", shard),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type TResult<T> = Result<T, Error>;
 
 #[repr(C, align(4096))]
 struct PageAligned<T>(T);
@@ -173,19 +196,6 @@ impl ShardFile {
         })
     }
 
-    fn read_slot(&self, slot: &ShardSlot) -> TResult<(Vec<u8>, Vec<u8>)> {
-        let vlen = slot.vlen as usize;
-        let klen = slot.klen as usize;
-        let mut buf = vec![0u8; vlen + klen];
-
-        Self::read_exact_at(&self.file, &mut buf, slot.offset as u64 + HEADER_SIZE)?;
-
-        let vbuf = buf[klen..klen + vlen].to_owned();
-        buf.truncate(klen);
-
-        Ok((buf, vbuf))
-    }
-
     fn read_kbuf(&self, slot: &ShardSlot) -> TResult<Vec<u8>> {
         let klen = slot.klen as usize;
         let mut buf = vec![0u8; klen];
@@ -212,12 +222,14 @@ impl ShardFile {
 
     #[cfg(unix)]
     fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> TResult<()> {
-        std::os::unix::fs::FileExt::read_exact_at(f, buf, offset)
+        std::os::unix::fs::FileExt::read_exact_at(f, buf, offset)?;
+        Ok(())
     }
 
     #[cfg(unix)]
     fn write_all_at(f: &File, buf: &[u8], offset: u64) -> TResult<()> {
-        std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
+        std::os::unix::fs::FileExt::write_all_at(f, buf, offset)?;
+        Ok(())
     }
 }
 
@@ -273,10 +285,7 @@ impl Shard {
         }
 
         // if we ran out of room in this row
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("row {} is full", row_idx),
-        ))
+        Err(Error::RowFull(row_idx))
     }
 
     pub fn get(&self, kbuf: &[u8], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
@@ -348,49 +357,51 @@ mod tests {
     }
 
     #[test]
-    fn set_get_remove_roundtrip() {
-        let (shard, _tmp) = new_shard(0..0x1000).unwrap();
+    fn set_get_remove_roundtrip() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..0x1000)?;
         let key = b"hello";
         let val: Vec<u8> = b"world".to_vec();
         let h = TurboHasher::new(key);
 
         // initially not present
-        assert_eq!(shard.get(key, h).unwrap(), None);
+        assert_eq!(shard.get(key, h)?, None);
 
         // set then get
-        shard.set((key, &val), h).unwrap();
+        shard.set((key, &val), h)?;
 
-        assert_eq!(shard.get(key, h).unwrap(), Some(val));
+        assert_eq!(shard.get(key, h)?, Some(val));
 
         // remove => true, then gone
-        assert!(shard.remove(key, h).unwrap());
-        assert_eq!(shard.get(key, h).unwrap(), None);
+        assert!(shard.remove(key, h)?);
+        assert_eq!(shard.get(key, h)?, None);
 
         // removing again returns false
-        assert!(!shard.remove(key, h).unwrap());
+        assert!(!shard.remove(key, h)?);
+        Ok(())
     }
 
     #[test]
-    fn overwrite_existing_value() {
-        let (shard, _tmp) = new_shard(0..0x1000).unwrap();
+    fn overwrite_existing_value() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..0x1000)?;
         let key = b"dup";
         let v1 = b"first".to_vec();
         let v2 = b"second".to_vec();
         let h = TurboHasher::new(key);
 
-        shard.set((key, &v1), h).unwrap();
+        shard.set((key, &v1), h)?;
 
-        assert_eq!(shard.get(key, h).unwrap(), Some(v1));
+        assert_eq!(shard.get(key, h)?, Some(v1));
 
         // overwrite
-        shard.set((key, &v2), h).unwrap();
+        shard.set((key, &v2), h)?;
 
-        assert_eq!(shard.get(key, h).unwrap(), Some(v2));
+        assert_eq!(shard.get(key, h)?, Some(v2));
+        Ok(())
     }
 
     #[test]
-    fn stats_n_occupied_and_n_deleted() {
-        let (shard, _tmp) = new_shard(0..0x1000).unwrap();
+    fn stats_n_occupied_and_n_deleted() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..0x1000)?;
         let header = shard.file.header();
         let load = |f: &AtomicU16| f.load(Ordering::SeqCst);
 
@@ -403,20 +414,52 @@ mod tests {
         let h1 = TurboHasher::new(k1);
         let h2 = TurboHasher::new(k2);
 
-        shard.set((k1, b"v1"), h1).unwrap();
-        shard.set((k2, b"v2"), h2).unwrap();
+        shard.set((k1, b"v1"), h1)?;
+        shard.set((k2, b"v2"), h2)?;
 
         assert_eq!(load(&header.stats.n_occupied), 2);
         assert_eq!(load(&header.stats.n_deleted), 0);
 
         // remove one
-        assert!(shard.remove(k1, h1).unwrap());
+        assert!(shard.remove(k1, h1)?);
         assert_eq!(load(&header.stats.n_occupied), 1);
         assert_eq!(load(&header.stats.n_deleted), 1);
 
         // remove non‐existent does nothing
-        assert!(!shard.remove(b"nope", TurboHasher::new(b"nope")).unwrap());
+        assert!(!shard.remove(b"nope", TurboHasher::new(b"nope"))?);
         assert_eq!(load(&header.stats.n_occupied), 1);
         assert_eq!(load(&header.stats.n_deleted), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn set_returns_row_full_error() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..0x1000)?;
+
+        // Simulate a row being full
+        let row_idx = 0;
+        let row = shard.file.row_mut(row_idx);
+        for i in 0..ROWS_WIDTH {
+            row.fp[i] = i as u32 + 1; // Fill with non-zero values
+        }
+
+        // Attempt to insert into the full row
+        let key = b"another_key";
+        let val = b"another_value";
+
+        // Manually create a hash that will map to the full row
+        let mut hash_input = Vec::new();
+        let h = loop {
+            hash_input.push(0);
+            let h = TurboHasher::new(&hash_input);
+            if h.row_selector() == row_idx {
+                break h;
+            }
+        };
+
+        let result = shard.set((key, val), h);
+
+        assert!(matches!(result, Err(Error::RowFull(idx)) if idx == row_idx));
+        Ok(())
     }
 }

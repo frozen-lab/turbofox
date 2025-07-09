@@ -1,8 +1,6 @@
-#![allow(dead_code)]
-
 use crate::{
     hasher::TurboHasher,
-    shard::{Shard, TResult},
+    shard::{Error, Shard, TResult},
 };
 use std::path::PathBuf;
 
@@ -90,10 +88,7 @@ impl Router {
         }
 
         // if we ran out of room in this row
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("out of range of {s}"),
-        ))
+        Err(Error::ShardOutOfRange(s))
     }
 
     pub fn get(&self, buf: &[u8], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
@@ -106,10 +101,7 @@ impl Router {
         }
 
         // if we ran out of room in this row
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("out of range of {s}"),
-        ))
+        Err(Error::ShardOutOfRange(s))
     }
 
     pub fn remove(&self, buf: &[u8], hash: TurboHasher) -> TResult<bool> {
@@ -122,10 +114,7 @@ impl Router {
         }
 
         // if we ran out of room in this row
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("out of range of {s}"),
-        ))
+        Err(Error::ShardOutOfRange(s))
     }
 }
 
@@ -204,14 +193,6 @@ mod tests {
 
         let res = router.get(key, fake);
 
-        assert!(res.is_err());
-        assert!(
-            &res.as_ref()
-                .unwrap_err()
-                .to_string()
-                .contains("out of range"),
-            "got unexpected error: {:?}",
-            res.unwrap_err()
-        );
+        assert!(matches!(res, Err(Error::ShardOutOfRange(_))));
     }
 }
