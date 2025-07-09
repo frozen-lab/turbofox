@@ -13,11 +13,10 @@ path = "src/lib.rs"
 
 [dependencies]
 memmap = "0.7.0"
-xxhash ={ path = "./xxhash"}
+xxhash = { path = "./xxhash"}
 
 [dev-dependencies]
-divan = "0.1.21"
 tempfile = "3.20.0"
 
 [workspace]
-members = [ "simulations","xxhash"]
+members = ["simulations", "xxhash"]
