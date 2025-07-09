@@ -1,25 +1,13 @@
-//! This module provides the `Router`, the central component for directing database
-//! operations to the correct shard.
-//!
-//! The `Router` is responsible for managing a collection of `Shard` instances, each
-//! representing a partition of the keyspace. When a `get`, `set`, or `remove`
-//! operation is requested, the router uses the key's hash to identify the
-//! appropriate shard and forwards the request to it.
-//!
-//! The `Router` also handles the loading of existing shards from disk and the
-//! creation of new shards when the database is first opened.
+//! `Router` is the central component for directing db operations to the correct shard.
 
 use crate::{
     hasher::TurboHasher,
-    shard::{Error, Shard, TResult},
+    shard::{Shard, TError, TResult},
 };
 use std::path::PathBuf;
 
 /// The `Router` manages a collection of shards and routes database operations
 /// to the correct one based on the key's hash.
-///
-/// It acts as the primary entry point for interacting with the database,
-/// abstracting away the underlying sharding mechanism.
 pub(crate) struct Router {
     shards: Vec<Shard>,
 }
@@ -30,19 +18,8 @@ impl Router {
     /// Opens the database at the specified directory, loading existing shards or
     /// creating a new one if none are found.
     ///
-    /// This function will scan the directory for shard files, clean up any temporary
+    /// NOTE: This function will scan the directory for shard files, clean up any temporary
     /// or merge-related files, and initialize the `Router` with the loaded shards.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::path::PathBuf;
-    /// use turbocache::router::Router;
-    ///
-    /// let dir = PathBuf::from("/tmp/turbocache_docs_open");
-    /// std::fs::create_dir_all(&dir).unwrap();
-    /// let router = Router::open(&dir).unwrap();
-    /// ```
     pub fn open(dirpath: &PathBuf) -> TResult<Self> {
         let shards = Self::load(dirpath)?;
 
@@ -58,10 +35,6 @@ impl Router {
     }
 
     /// Loads all valid shards from the specified directory.
-    ///
-    /// This function scans the directory for files with the `shard_` prefix,
-    /// parses the shard's range from the filename, and initializes a `Shard`
-    /// for each valid file. It also cleans up any leftover temporary files.
     fn load(dirpath: &PathBuf) -> TResult<Vec<Shard>> {
         let mut found_shards: Vec<Shard> = vec![];
 
@@ -117,25 +90,7 @@ impl Router {
 
     /// Sets a key-value pair in the appropriate shard.
     ///
-    /// The shard is determined by the `shard_selector` of the provided `hash`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::path::PathBuf;
-    /// use turbocache::router::Router;
-    /// use turbocache::hasher::TurboHasher;
-    ///
-    /// let dir = PathBuf::from("/tmp/turbocache_docs_set");
-    /// std::fs::create_dir_all(&dir).unwrap();
-    /// let router = Router::open(&dir).unwrap();
-    ///
-    /// let key = b"hello";
-    /// let value = b"world";
-    /// let hash = TurboHasher::new(key);
-    ///
-    /// router.set((key, value), hash).unwrap();
-    /// ```
+    /// NOTE: The shard is determined by the `shard_selector` of the provided `hash`.
     pub fn set(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
         let s = hash.shard_selector();
 
@@ -146,33 +101,10 @@ impl Router {
         }
 
         // if we ran out of room in this row
-        Err(Error::ShardOutOfRange(s))
+        Err(TError::ShardOutOfRange(s))
     }
 
     /// Retrieves a value by its key from the appropriate shard.
-    ///
-    /// The shard is determined by the `shard_selector` of the provided `hash`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::path::PathBuf;
-    /// use turbocache::router::Router;
-    /// use turbocache::hasher::TurboHasher;
-    ///
-    /// let dir = PathBuf::from("/tmp/turbocache_docs_get");
-    /// std::fs::create_dir_all(&dir).unwrap();
-    /// let router = Router::open(&dir).unwrap();
-    ///
-    /// let key = b"hello";
-    /// let value = b"world";
-    /// let hash = TurboHasher::new(key);
-    ///
-    /// router.set((key, value), hash).unwrap();
-    /// let retrieved = router.get(key, hash).unwrap();
-    ///
-    /// assert_eq!(retrieved, Some(value.to_vec()));
-    /// ```
     pub fn get(&self, buf: &[u8], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
         let s = hash.shard_selector();
 
@@ -183,37 +115,10 @@ impl Router {
         }
 
         // if we ran out of room in this row
-        Err(Error::ShardOutOfRange(s))
+        Err(TError::ShardOutOfRange(s))
     }
 
     /// Removes a key-value pair from the appropriate shard.
-    ///
-    /// The shard is determined by the `shard_selector` of the provided `hash`.
-    /// Returns `true` if the key was found and removed, `false` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::path::PathBuf;
-    /// use turbocache::router::Router;
-    /// use turbocache::hasher::TurboHasher;
-    ///
-    /// let dir = PathBuf::from("/tmp/turbocache_docs_remove");
-    /// std::fs::create_dir_all(&dir).unwrap();
-    /// let router = Router::open(&dir).unwrap();
-    ///
-    /// let key = b"hello";
-    /// let value = b"world";
-    /// let hash = TurboHasher::new(key);
-    ///
-    /// router.set((key, value), hash).unwrap();
-    /// let was_removed = router.remove(key, hash).unwrap();
-    ///
-    /// assert!(was_removed);
-    ///
-    /// let retrieved = router.get(key, hash).unwrap();
-    /// assert_eq!(retrieved, None);
-    /// ```
     pub fn remove(&self, buf: &[u8], hash: TurboHasher) -> TResult<bool> {
         let s = hash.shard_selector();
 
@@ -224,7 +129,7 @@ impl Router {
         }
 
         // if we ran out of room in this row
-        Err(Error::ShardOutOfRange(s))
+        Err(TError::ShardOutOfRange(s))
     }
 }
 
@@ -255,6 +160,7 @@ mod tests {
 
         // set and get
         router.set((key, &val), h).unwrap();
+
         assert_eq!(router.get(key, h).unwrap(), Some(val));
 
         // remove and gone
@@ -267,7 +173,6 @@ mod tests {
 
     #[test]
     fn persistence_across_reopen() {
-        // first open, insert a key
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_path_buf();
 
@@ -297,12 +202,10 @@ mod tests {
 
         let s = Shard::open(&dir, 0..1, true).unwrap();
         let router = Router { shards: vec![s] };
-
         let key = b"x";
         let fake = TurboHasher::new(key);
-
         let res = router.get(key, fake);
 
-        assert!(matches!(res, Err(Error::ShardOutOfRange(_))));
+        assert!(matches!(res, Err(TError::ShardOutOfRange(_))));
     }
 }

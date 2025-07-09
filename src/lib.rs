@@ -1,29 +1,10 @@
 //! # TurboCache
 //!
-//! TurboCache is a high-performance, embedded key-value store for Rust, designed
-//! for scenarios where you need a simple, fast, and persistent cache. It's built
-//! on a sharded, memory-mapped architecture that provides excellent performance
-//! for both reads and writes.
+//! TurboCache is a high-performance, embedded key-value store for Rust
 //!
-//! ## Key Features
+//! ### Example Usage
 //!
-//! - **Embedded**: TurboCache is a library, not a separate server. You can embed it
-//!   directly into your application.
-//! - **Persistent**: Data is stored on disk and persists across application restarts.
-//! - **Fast**: It uses memory-mapped files and a cuckoo-filter-like index to
-//!   provide fast access to your data.
-//! - **Sharded**: The keyspace is partitioned into shards, allowing for better
-//!   concurrency and scalability.
-//! - **Simple API**: The API is small and easy to use, with just `new`, `set`, `get`,
-//!   and `remove` methods.
-//!
-//! ## Getting Started
-//!
-//! To use TurboCache, simply add it to your `Cargo.toml` and create a new
-//! instance with a directory path. The database will be created in that
-//! directory, and you can start setting and getting values right away.
-//!
-//! ```no_run
+//! ```rust
 //! use turbocache::TurboCache;
 //! use std::path::PathBuf;
 //!
@@ -54,13 +35,10 @@ pub mod shard;
 
 use hasher::TurboHasher;
 use router::Router;
-pub use shard::{Error, TResult};
+pub use shard::{TError, TResult};
 use std::path::PathBuf;
 
 /// The main interface to the TurboCache database.
-///
-/// This struct provides the primary API for interacting with the cache, including
-/// methods for setting, getting, and removing key-value pairs.
 pub struct TurboCache {
     router: Router,
 }
@@ -68,12 +46,12 @@ pub struct TurboCache {
 impl TurboCache {
     /// Creates a new `TurboCache` instance at the specified directory.
     ///
-    /// If the directory does not exist, it will be created. If it already contains
+    /// **NOTE:** If the directory does not exist, it will be created. If it already contains
     /// a TurboCache database, it will be loaded.
     ///
-    /// # Example
+    /// ### Example
     ///
-    /// ```no_run
+    /// ```rust
     /// use turbocache::TurboCache;
     /// use std::path::PathBuf;
     ///
@@ -89,11 +67,11 @@ impl TurboCache {
 
     /// Sets a key-value pair in the cache.
     ///
-    /// If the key already exists, its value will be overwritten.
+    /// **Note:** If the key already exists, its value will be overwritten.
     ///
-    /// # Example
+    /// ### Example
     ///
-    /// ```no_run
+    /// ```rust
     /// use turbocache::TurboCache;
     /// use std::path::PathBuf;
     ///
@@ -113,9 +91,9 @@ impl TurboCache {
     ///
     /// Returns `Ok(Some(value))` if the key is found, `Ok(None)` if not.
     ///
-    /// # Example
+    /// ### Example
     ///
-    /// ```no_run
+    /// ```rust
     /// use turbocache::TurboCache;
     /// use std::path::PathBuf;
     ///
@@ -138,9 +116,9 @@ impl TurboCache {
     ///
     /// Returns `Ok(true)` if the key was found and removed, `Ok(false)` if not.
     ///
-    /// # Example
+    /// ### Example
     ///
-    /// ```no_run
+    /// ```rust
     /// use turbocache::TurboCache;
     /// use std::path::PathBuf;
     ///
