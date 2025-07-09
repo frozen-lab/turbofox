@@ -16,7 +16,14 @@ memmap = "0.7.0"
 xxhash = { path = "./xxhash"}
 
 [dev-dependencies]
+criterion = { version = "0.6.0", features = ["html_reports"] }
+rand = "0.9.1"
 tempfile = "3.20.0"
 
 [workspace]
 members = ["simulations", "xxhash"]
+
+[[bench]]
+name = "bench"
+path = "benchmarks/bench.rs"
+harness = false
