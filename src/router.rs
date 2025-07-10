@@ -62,19 +62,15 @@ impl Router {
             }
 
             // Clean up temporary files
-            if filename.starts_with("bottom_")
-                || filename.starts_with("top_")
-                || filename.starts_with("merge_")
-                || filename.ends_with(".tmp")
-            {
+            if filename.starts_with("bottom_") || filename.starts_with("top_") {
                 if let Err(e) = std::fs::remove_file(entry.path()) {
-                    eprintln!(
-                        "Warning: Failed to remove temporary file {}: {}",
-                        filename, e
-                    );
+                    return Err(TError::Io(e));
                 }
+
                 continue;
-            } else if !filename.starts_with("shard_") {
+            }
+
+            if !filename.starts_with("shard_") {
                 continue;
             }
 
@@ -87,29 +83,23 @@ impl Router {
             };
 
             let Ok(start) = u32::from_str_radix(start_str, 16) else {
-                eprintln!("Warning: Invalid start range in filename: {}", filename);
                 continue;
             };
 
             let Ok(end) = u32::from_str_radix(end_str, 16) else {
-                eprintln!("Warning: Invalid end range in filename: {}", filename);
                 continue;
             };
 
             if start >= end || end > Self::END_OF_SHARDS {
-                eprintln!(
-                    "Warning: Invalid shard range {}-{} in file: {}",
-                    start, end, filename
-                );
                 continue;
             }
 
             let range = start..end;
+
             match Shard::open(&dirpath, range, false) {
                 Ok(shard) => found_shards.push(shard),
                 Err(e) => {
-                    eprintln!("Warning: Failed to open shard {}: {}", filename, e);
-                    continue;
+                    return Err(e);
                 }
             }
         }
