@@ -134,24 +134,32 @@ impl Router {
         shards: &mut Vec<Shard>,
     ) -> TResult<()> {
         let s = hash.shard_selector();
+        let mut kvs: Vec<(Vec<u8>, Vec<u8>)> = vec![(buf.0.to_vec(), buf.1.to_vec())];
 
-        for i in 0..shards.len() {
-            if shards[i].span.contains(&s) {
-                match shards[i].set(buf, hash) {
-                    Ok(()) => return Ok(()),
-                    Err(TError::RowFull(_)) => {
-                        let old = std::mem::replace(
-                            &mut shards[i],
-                            Shard::open(&self.dirpath, 0..0, true)?,
-                        );
-                        let (left, right) = old.split(&self.dirpath)?;
-                        shards.remove(i);
-                        shards.insert(i, right);
-                        shards.insert(i, left);
+        while let Some((k, v)) = kvs.pop() {
+            for i in 0..shards.len() {
+                if shards[i].span.contains(&s) {
+                    let res = shards[i].set((&k, &v), hash);
 
-                        return self.set_recursive(buf, hash, shards);
+                    match res {
+                        Err(TError::RowFull(_)) => {
+                            let old = std::mem::replace(
+                                &mut shards[i],
+                                Shard::open(&self.dirpath, 0..0, true)?,
+                            );
+
+                            let (left, right, remaining_kvs) = old.split(&self.dirpath)?;
+                            kvs.extend(remaining_kvs);
+
+                            shards.remove(i);
+                            shards.insert(i, right);
+                            shards.insert(i, left);
+
+                            return self.set_recursive((&k, &v), hash, shards);
+                        }
+                        Err(err) => return Err(err),
+                        Ok(()) => return Ok(()),
                     }
-                    Err(err) => return Err(err),
                 }
             }
         }
