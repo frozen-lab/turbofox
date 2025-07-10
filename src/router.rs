@@ -549,4 +549,38 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    #[ignore]
+    fn test_cascading_splits_data_integrity() -> TResult<()> {
+        let (router, _tmp) = new_router()?;
+        let mut inserted_data = HashMap::new();
+
+        // Note: According to simulations, avg split will occur at
+        // around 20K entries
+        let num_entries = 50000;
+
+        for i in 0..num_entries {
+            let key = format!("key_{}", i);
+            let val = format!("value_{}", i);
+            let hash = TurboHasher::new(key.as_bytes());
+
+            router.set((key.as_bytes(), val.as_bytes()), hash)?;
+            inserted_data.insert(key, val);
+        }
+
+        for (key, expected_val) in inserted_data.iter() {
+            let hash = TurboHasher::new(key.as_bytes());
+            let retrieved = router.get(key.as_bytes(), hash)?;
+
+            assert_eq!(
+                retrieved,
+                Some(expected_val.as_bytes().to_vec()),
+                "Failed to retrieve key: {}",
+                key
+            );
+        }
+
+        Ok(())
+    }
 }
