@@ -122,55 +122,41 @@ impl Router {
 
     /// Sets a key-value pair in the appropriate shard.
     pub fn set(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
+        let mut shards = self.shards.lock().unwrap();
+
+        self.set_recursive(buf, hash, &mut shards)
+    }
+
+    fn set_recursive(
+        &self,
+        buf: (&[u8], &[u8]),
+        hash: TurboHasher,
+        shards: &mut Vec<Shard>,
+    ) -> TResult<()> {
         let s = hash.shard_selector();
 
-        loop {
-            let mut shards = self.shards.lock().unwrap();
-            let mut need_split = false;
-            let mut split_index = 0;
+        for i in 0..shards.len() {
+            if shards[i].span.contains(&s) {
+                match shards[i].set(buf, hash) {
+                    Ok(()) => return Ok(()),
+                    Err(TError::RowFull(_)) => {
+                        let old = std::mem::replace(
+                            &mut shards[i],
+                            Shard::open(&self.dirpath, 0..0, true)?,
+                        );
+                        let (left, right) = old.split(&self.dirpath)?;
+                        shards.remove(i);
+                        shards.insert(i, right);
+                        shards.insert(i, left);
 
-            // Find the shard that contains this selector
-            for i in 0..shards.len() {
-                if shards[i].span.contains(&s) {
-                    match shards[i].set(buf, hash) {
-                        Ok(()) => return Ok(()),
-                        Err(TError::RowFull(_)) => {
-                            // Mark that we need to split this shard
-                            need_split = true;
-                            split_index = i;
-                            break;
-                        }
-                        Err(err) => return Err(err),
+                        return self.set_recursive(buf, hash, shards);
                     }
+                    Err(err) => return Err(err),
                 }
             }
-
-            if need_split {
-                // Need to split the shard at split_index
-                let old_shard = std::mem::replace(
-                    &mut shards[split_index],
-                    // Create a temporary placeholder - we'll replace it immediately
-                    Shard::open(&self.dirpath, 0..1, true)?,
-                );
-
-                // Split the shard
-                let (left, right) = old_shard.split(&self.dirpath)?;
-
-                // Remove the placeholder
-                shards.remove(split_index);
-
-                // Insert the new shards in correct order (left first, then right)
-                shards.insert(split_index, left);
-                shards.insert(split_index + 1, right);
-
-                // Release lock and retry the entire operation
-                drop(shards);
-                continue;
-            }
-
-            // No shard covered this selector
-            return Err(TError::ShardOutOfRange(s));
         }
+
+        Err(TError::ShardOutOfRange(s))
     }
 
     /// Retrieves a value by its key from the appropriate shard.
