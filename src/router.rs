@@ -1,15 +1,15 @@
 //! `Router` is the central component for directing db operations to the correct shard.
-
 use crate::{
     hasher::TurboHasher,
     shard::{Shard, TError, TResult},
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Mutex};
 
 /// The `Router` manages a collection of shards and routes database operations
 /// to the correct one based on the key's hash.
 pub(crate) struct Router {
-    shards: Vec<Shard>,
+    dirpath: PathBuf,
+    shards: Mutex<Vec<Shard>>,
 }
 
 impl Router {
@@ -27,11 +27,15 @@ impl Router {
             let shard = Shard::open(&dirpath, 0..(u16::MAX as u32 + 1), true)?;
 
             return Ok(Self {
-                shards: vec![shard],
+                dirpath: dirpath.clone(),
+                shards: Mutex::new(vec![shard]),
             });
         }
 
-        Ok(Self { shards })
+        Ok(Self {
+            shards: Mutex::new(shards),
+            dirpath: dirpath.clone(),
+        })
     }
 
     /// Loads all valid shards from the specified directory.
@@ -93,24 +97,48 @@ impl Router {
     /// NOTE: The shard is determined by the `shard_selector` of the provided `hash`.
     pub fn set(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
         let s = hash.shard_selector();
+        let mut shards = self.shards.lock().unwrap();
 
-        for shard in &self.shards {
-            if shard.span.contains(&s) {
-                return shard.set(buf, hash);
+        // find the shard that contains this selector
+        for i in 0..shards.len() {
+            if shards[i].span.contains(&s) {
+                // try inserting
+                match shards[i].set(buf, hash) {
+                    Ok(()) => return Ok(()),
+                    Err(TError::RowFull(_)) => {
+                        // take current shard by replacing it w/ a dummy one
+                        let old = std::mem::replace(
+                            &mut shards[i],
+                            Shard::open(&self.dirpath, 0..0, true)?,
+                        );
+                        let (left, right) = old.split(&self.dirpath)?;
+
+                        // remove the dummy placeholder
+                        shards.remove(i);
+
+                        // insert the two new shards in its place
+                        shards.insert(i, right);
+                        shards.insert(i, left);
+
+                        return self.set(buf, hash);
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
 
-        // if we ran out of room in this row
+        // no shard covered this selector
         Err(TError::ShardOutOfRange(s))
     }
 
     /// Retrieves a value by its key from the appropriate shard.
     pub fn get(&self, buf: &[u8], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
         let s = hash.shard_selector();
+        let shards = self.shards.lock().unwrap();
 
-        for shard in &self.shards {
-            if shard.span.contains(&s) {
-                return shard.get(buf, hash);
+        for i in 0..shards.len() {
+            if shards[i].span.contains(&s) {
+                return shards[i].get(buf, hash);
             }
         }
 
@@ -121,10 +149,11 @@ impl Router {
     /// Removes a key-value pair from the appropriate shard.
     pub fn remove(&self, buf: &[u8], hash: TurboHasher) -> TResult<bool> {
         let s = hash.shard_selector();
+        let shards = self.shards.lock().unwrap();
 
-        for shard in &self.shards {
-            if shard.span.contains(&s) {
-                return shard.remove(buf, hash);
+        for i in 0..shards.len() {
+            if shards[i].span.contains(&s) {
+                return shards[i].remove(buf, hash);
             }
         }
 
@@ -201,7 +230,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let s = Shard::open(&dir, 0..1, true).unwrap();
-        let router = Router { shards: vec![s] };
+        let router = Router {
+            shards: Mutex::new(vec![s]),
+            dirpath: dir,
+        };
         let key = b"x";
         let fake = TurboHasher::new(key);
         let res = router.get(key, fake);
