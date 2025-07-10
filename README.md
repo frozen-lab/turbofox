@@ -19,21 +19,3 @@ A persistent, high-performance, disk-backed Key-Value store w/ a novel sharding 
 *   **Samples**: total measurement samples collected by Criterion
 *   **Iterations**: number of operations per sample (i.e., N_KEYS = 10_000 per `iter()` call)
 
----
-
-## TODO
-
-List of critical issues to be addressed:
-
-### Critical Bugs
-
--   [ ] **Ensure Atomic Shard Splitting**
-    -   **Issue**: The `split` operation is not atomic. A crash during a split can leave the
-    database in an inconsistent state, leading to data loss.
-    -   **Recommendation**: Implement a more robust, multi-phase split process:
-        1.  Create the new shard files with temporary names (e.g., `shard_..._new`).
-        2.  Write all the data to the new shards.
-        3.  `fsync` the new shard files to ensure they are written to disk.
-        4.  Atomically rename the new shard files to their final names.
-        5.  Delete the old shard file.
-

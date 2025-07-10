@@ -62,7 +62,11 @@ impl Router {
             }
 
             // Clean up temporary files
-            if filename.starts_with("bottom_") || filename.starts_with("top_") {
+            if filename.starts_with("bottom_")
+                || filename.starts_with("top_")
+                || filename.starts_with("merge_")
+                || filename.ends_with(".tmp")
+            {
                 if let Err(e) = std::fs::remove_file(entry.path()) {
                     return Err(TError::Io(e));
                 }
