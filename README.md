@@ -39,14 +39,7 @@ List of critical issues to be addressed:
 
 ### Robustness and Error Handling
 
--   [ ] **Prevent Mutex Poisoning**
-
-    -   **Issue**: Using `.unwrap()` on a `Mutex` lock can cause the application to panic if a
-    thread panics while holding the lock.
-    -   **Recommendation**: Use `lock().or_else(|e| e.into_inner())` to handle poisoned mutexes gracefully.
-
 -   [ ] **Improve Library Error Handling**
-
     -   **Issue**: The `load` function in `router.rs` prints errors to `stderr` instead of returning them,
     which is not ideal for a library.
     -   **Recommendation**: Return a `TResult` with a specific error type that can be handled by the caller.
@@ -54,14 +47,12 @@ List of critical issues to be addressed:
 ### Performance and Portability
 
 -   [ ] **Improve `get`/`set` Performance**
-
     -   **Issue**: High hash collision rates can lead to multiple slow disk reads for a single `get` or
     `set` operation.
     -   **Recommendation**: Consider adding Bloom filters to each row or storing in-memory key prefixes
     to reduce unnecessary disk access.
 
 -   [ ] **Make File I/O Portable**
-
     -   **Issue**: The code uses Unix-specific file I/O (`FileExt`), making it non-portable to Windows.
     -   **Recommendation**: Use conditional compilation (`#[cfg(...)]`) to provide separate, portable
     implementations for different operating systems.

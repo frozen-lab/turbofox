@@ -122,7 +122,10 @@ impl Router {
 
     /// Sets a key-value pair in the appropriate shard.
     pub fn set(&self, buf: (&[u8], &[u8]), hash: TurboHasher) -> TResult<()> {
-        let mut shards = self.shards.lock().unwrap();
+        let mut shards = self
+            .shards
+            .lock()
+            .or_else(|e| Ok::<std::sync::MutexGuard<'_, Vec<Shard>>, TError>(e.into_inner()))?;
 
         self.set_recursive(buf, hash, &mut shards)
     }
