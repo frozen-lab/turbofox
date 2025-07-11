@@ -1,5 +1,7 @@
 use xxhash::XxHash32;
 
+use crate::core::ROWS_NUM;
+
 const INVALID_HASH: u32 = 0;
 
 /// Hasher struct to derive the shard and row from a 64-bit hash value.
@@ -30,8 +32,8 @@ impl TurboHasher {
 
     /// Returns the row selector, which is an index into a shard's rows.
     #[inline]
-    pub fn row_selector(&self, num_rows: usize) -> usize {
-        self.row as usize % num_rows
+    pub fn row_selector(&self) -> usize {
+        self.row as usize % ROWS_NUM
     }
 
     fn from_hash(hash: u32) -> Self {
@@ -41,8 +43,11 @@ impl TurboHasher {
             hash = 0x1234_5678;
         }
 
-        let row = ((hash >> 32) & 0xFFFF) as u16;
-        let shard = ((hash >> 48) & 0xFFFF) as u16;
+        // Lower 16 bits
+        let row = (hash & 0xFFFF) as u16;
+
+        // Upper 16 bits
+        let shard = ((hash >> 16) & 0xFFFF) as u16;
 
         Self { row, shard }
     }
@@ -54,8 +59,6 @@ mod tests {
 
     #[test]
     fn deterministic_fp_shard_row() {
-        const NUM_ROWS: usize = 32;
-
         let data = b"some test data";
         let h1 = TurboHasher::new(data);
         let h2 = TurboHasher::new(data);
@@ -65,11 +68,7 @@ mod tests {
             h2.shard_selector(),
             "fingerprints differ"
         );
-        assert_eq!(
-            h1.row_selector(NUM_ROWS),
-            h2.row_selector(NUM_ROWS),
-            "row_selector differs"
-        );
+        assert_eq!(h1.row_selector(), h2.row_selector(), "row_selector differs");
         assert_eq!(
             h1.shard_selector(),
             h2.shard_selector(),
@@ -90,13 +89,11 @@ mod tests {
 
     #[test]
     fn row_selector_in_bounds() {
-        const ROWS_NUM: usize = 32;
-
         let data = b"row bounds";
 
         for _ in 0..100 {
             let h = TurboHasher::new(data);
-            let row = h.row_selector(ROWS_NUM);
+            let row = h.row_selector();
 
             assert!(row < ROWS_NUM, "row_selector {} out of bounds", row);
         }

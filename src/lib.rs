@@ -28,14 +28,14 @@
 //! let value = cache.get(b"hello").unwrap();
 //! assert_eq!(value, None);
 //! ```
+mod core;
+mod hasher;
+mod router;
+mod shard;
 
-pub mod hasher;
-pub mod router;
-pub mod shard;
-
+pub use crate::core::{TError, TResult};
 use hasher::TurboHasher;
 use router::Router;
-pub use shard::{TError, TResult};
 use std::path::PathBuf;
 
 /// The main interface to the TurboCache database.
@@ -124,14 +124,15 @@ impl TurboCache {
     ///
     /// let dir = PathBuf::from("/tmp/turbocache_docs_remove");
     /// std::fs::create_dir_all(&dir).unwrap();
+    ///
     /// let cache = TurboCache::new(dir).unwrap();
     ///
     /// cache.set(b"to_be_removed", b"data").unwrap();
-    /// let was_removed = cache.remove(b"to_be_removed").unwrap();
+    /// let value = cache.remove(b"to_be_removed").unwrap();
     ///
-    /// assert!(was_removed);
+    /// assert_eq!(value, Some(b"data".to_vec()));
     /// ```
-    pub fn remove(&self, kbuf: &[u8]) -> TResult<bool> {
+    pub fn remove(&self, kbuf: &[u8]) -> TResult<Option<Vec<u8>>> {
         let hash = TurboHasher::new(kbuf);
 
         self.router.remove(kbuf, hash)
@@ -204,7 +205,7 @@ mod tests {
         assert_eq!(cache.get(key)?, Some(val.to_vec()));
 
         let removed = cache.remove(key)?;
-        assert!(removed);
+        assert_ne!(removed, None);
 
         let get_again = cache.get(key)?;
         assert_eq!(get_again, None);
@@ -217,7 +218,7 @@ mod tests {
         let (cache, _) = create_cache();
         let removed = cache.remove(b"nope")?;
 
-        assert!(!removed);
+        assert_eq!(removed, None);
         Ok(())
     }
 

@@ -1,7 +1,9 @@
 //! `Router` is the central component for directing db operations to the correct shard.
+
 use crate::{
+    core::{TError, TResult, MAX_KEY_SIZE},
     hasher::TurboHasher,
-    shard::{Shard, TError, TResult},
+    shard::Shard,
 };
 use std::{path::PathBuf, sync::Mutex};
 
@@ -130,13 +132,22 @@ impl Router {
         hash: TurboHasher,
         shards: &mut Vec<Shard>,
     ) -> TResult<()> {
+        let klen = buf.0.len();
+
+        if klen > MAX_KEY_SIZE {
+            return Err(TError::KeyTooLarge(klen));
+        }
+
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[..klen].copy_from_slice(buf.0);
+
         let s = hash.shard_selector();
-        let mut kvs: Vec<(Vec<u8>, Vec<u8>)> = vec![(buf.0.to_vec(), buf.1.to_vec())];
+        let mut kvs: Vec<([u8; MAX_KEY_SIZE], Vec<u8>)> = vec![(kbuf, buf.1.to_vec())];
 
         while let Some((k, v)) = kvs.pop() {
             for i in 0..shards.len() {
                 if shards[i].span.contains(&s) {
-                    let res = shards[i].set((&k, &v), hash);
+                    let res = shards[i].set(&k, &v, hash);
 
                     match res {
                         Err(TError::RowFull(_)) => {
@@ -166,12 +177,22 @@ impl Router {
 
     /// Retrieves a value by its key from the appropriate shard.
     pub fn get(&self, buf: &[u8], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
+        let klen = buf.len();
+
+        if klen > MAX_KEY_SIZE {
+            return Err(TError::KeyTooLarge(klen));
+        }
+
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[..klen].copy_from_slice(buf);
+
         let s = hash.shard_selector();
+
         let shards = self.shards.lock().unwrap();
 
         for shard in shards.iter() {
             if shard.span.contains(&s) {
-                return shard.get(buf, hash);
+                return shard.get(&kbuf, hash);
             }
         }
 
@@ -179,13 +200,22 @@ impl Router {
     }
 
     /// Removes a key-value pair from the appropriate shard.
-    pub fn remove(&self, buf: &[u8], hash: TurboHasher) -> TResult<bool> {
+    pub fn remove(&self, buf: &[u8], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
+        let klen = buf.len();
+
+        if klen > MAX_KEY_SIZE {
+            return Err(TError::KeyTooLarge(klen));
+        }
+
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[..klen].copy_from_slice(buf);
+
         let s = hash.shard_selector();
         let shards = self.shards.lock().unwrap();
 
         for shard in shards.iter() {
             if shard.span.contains(&s) {
-                return shard.remove(buf, hash);
+                return shard.remove(&kbuf, hash);
             }
         }
 
@@ -253,11 +283,11 @@ mod tests {
         assert_eq!(router.get(key, h)?, Some(val.clone()));
 
         // Remove and gone
-        assert!(router.remove(key, h)?);
+        assert_eq!(router.remove(key, h)?, None);
         assert_eq!(router.get(key, h)?, None);
 
         // Removing again returns false
-        assert!(!router.remove(key, h)?);
+        assert_ne!(router.remove(key, h)?, None);
 
         Ok(())
     }
@@ -360,12 +390,16 @@ mod tests {
         // Add some data
         let key1 = b"key1";
         let val1 = b"value1";
+
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[..key1.len()].copy_from_slice(key1);
+
         let hash1 = TurboHasher::new(key1);
 
         if hash1.shard_selector() < 0x8000 {
-            shard1.set((key1, val1), hash1)?;
+            shard1.set(&kbuf, val1, hash1)?;
         } else {
-            shard2.set((key1, val1), hash1)?;
+            shard2.set(&kbuf, val1, hash1)?;
         }
 
         // Drop the shards to ensure they're written
@@ -374,6 +408,7 @@ mod tests {
 
         // Now load via router
         let router = Router::open(&dir)?;
+
         assert_eq!(router.shard_count(), 2);
 
         // Verify data is accessible
@@ -386,6 +421,7 @@ mod tests {
     fn test_cleanup_temporary_files() -> TResult<()> {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_path_buf();
+
         std::fs::create_dir_all(&dir)?;
 
         // Create some temporary files that should be cleaned up
@@ -399,19 +435,21 @@ mod tests {
         for filename in &temp_files {
             let filepath = dir.join(filename);
             std::fs::write(&filepath, "temporary data")?;
+
             assert!(filepath.exists());
         }
 
         // Also create a valid shard
         let _shard = Shard::open(&dir, 0..0x1000, true)?;
-
         // Opening the router should clean up temp files
         let router = Router::open(&dir)?;
+
         assert_eq!(router.shard_count(), 1);
 
         // Check that temp files were removed
         for filename in &temp_files {
             let filepath = dir.join(filename);
+
             assert!(
                 !filepath.exists(),
                 "Temp file {} was not cleaned up",
@@ -443,9 +481,9 @@ mod tests {
 
         // Create a valid shard
         let _shard = Shard::open(&dir, 0..0x1000, true)?;
-
         // Opening should ignore invalid files and load only valid ones
         let router = Router::open(&dir)?;
+
         assert_eq!(router.shard_count(), 1);
 
         Ok(())
@@ -510,8 +548,10 @@ mod tests {
         for (key, _) in &test_data {
             if removed_count % 2 == 0 {
                 let hash = TurboHasher::new(key.as_bytes());
-                assert!(router.remove(key.as_bytes(), hash)?);
+
+                assert_ne!(router.remove(key.as_bytes(), hash)?, None);
             }
+
             removed_count += 1;
         }
 
@@ -526,6 +566,7 @@ mod tests {
             } else {
                 assert_eq!(retrieved, Some(expected_val.as_bytes().to_vec()));
             }
+
             removed_count += 1;
         }
 
