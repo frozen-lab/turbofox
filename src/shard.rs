@@ -1,24 +1,44 @@
-//! `Shard` is the fundamental unit of storage in TurboCache.
+//! Shard is the fundamental unit of the storage,
+//! the index is mmaped and values are appended to the end.
+//!
+//! ### Memory Overhead
+//!
+//! Memory usage of the mmapped shard header (`HEADER_SIZE`):
+//!
+//! ```md
+//! ShardMeta   =   16    B  (8 B magic + 8 B version)
+//! ShardStats  =    8    B  (4 B n_occupied + 4 B write_offset)
+//! Padding     = 4072    B  (4096 B alignment − (16 B + 8 B) % 4096)
+//! Index       = 327_680 B  (640 B × 512 rows where 640 B = 16
+//!                          B×32 keys + 4 B×32 offsets)
+//! ────────────────────────────────────────────────
+//! HEADER_SIZE = 331_776 B  (~324 KiB)
+//! ```  
 //!
 //! ### OnDisk Layout
 //!
 //! The shard file has the following structure,
 //!
-//! ```md
-//!    +--------------------------------------------------+  Offset 0
-//!    |                  ShardHeader                     |
-//!    |  • Magic (8 bytes)                               |
-//!    |  • Version (8 byte)                              |
-//!    |  • Stats:                                        |
-//!    |      – n_occupied (u32)                          |
-//!    |      – write_offset(u32)                         |
-//!    |  • Index:                                        |
-//!    |                                                  |
-//!    |                                                  |
-//!    +--------------------------------------------------+  HEADER_SIZE
-//!    |  • Value Entries                                 |
-//!    |      - Appended sequentially at write_offset     |
-//!    +--------------------------------------------------+  EOF
+//! ```text
+//! +--------------------------------------------------+  Offset 0
+//! | ShardMeta                                        |
+//! |  • magic: [u8; 8]        (8 bytes)               |
+//! |  • version: u64          (8 bytes)               |
+//! +--------------------------------------------------+
+//! | ShardStats                                       |
+//! |  • n_occupied: AtomicU32 (4 bytes)               |
+//! |  • write_offset: AtomicU32 (4 bytes)             |
+//! +--------------------------------------------------+
+//! | PageAligned<[ShardSlot; ROWS_NUM]>               |
+//! |  • each ShardSlot:                               |
+//! |      – keys:    [SlotKey; ROWS_WIDTH]            |
+//! |      – offsets: [SlotOffset; ROWS_WIDTH]         |
+//! |    (4096‑byte alignment)                         |
+//! +--------------------------------------------------+  Offset = HEADER_SIZE
+//! | Value entries                                    |
+//! |  • appended sequentially at                      |
+//! |    (HEADER_SIZE + write_offset)                  |
+//! +--------------------------------------------------+  EOF
 //! ```
 //!
 
