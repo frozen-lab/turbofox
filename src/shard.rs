@@ -609,14 +609,6 @@ mod shard_tests {
     fn set_returns_row_full_error() -> TResult<()> {
         let (shard, _tmp) = new_shard(0..0x1000)?;
 
-        // Simulate a row being full
-        let row_idx = 0;
-        let row = shard.file.row_mut(row_idx);
-
-        for i in 0..ROWS_WIDTH {
-            row.keys[i] = SlotKey([1u8; MAX_KEY_SIZE]);
-        }
-
         // Attempt to insert into the full row
         let key = b"another_key";
         let val = b"another_value";
@@ -624,18 +616,18 @@ mod shard_tests {
         let mut kbuf = [0u8; MAX_KEY_SIZE];
         kbuf[..key.len()].copy_from_slice(key);
 
-        // Create a hash mapping to the full row
-        let mut hash_input = Vec::new();
-        let h = loop {
-            hash_input.push(0);
-            let tmp_h = TurboHasher::new(&kbuf);
+        let hash = TurboHasher::new(&kbuf);
 
-            if tmp_h.row_selector() as usize == row_idx {
-                break tmp_h;
-            }
-        };
+        // Simulate a row being full
+        let row_idx = hash.row_selector();
+        let row = shard.file.row_mut(row_idx);
 
-        let result = shard.set(&kbuf, val, h);
+        // fill in the selected row w/ dummy values
+        for i in 0..ROWS_WIDTH {
+            row.keys[i] = SlotKey([1u8; MAX_KEY_SIZE]);
+        }
+
+        let result = shard.set(&kbuf, val, hash);
 
         assert!(matches!(result, Err(TError::RowFull(idx)) if idx == row_idx));
 
