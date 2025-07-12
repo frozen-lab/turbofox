@@ -22,7 +22,7 @@
 //!
 //! // Remove a key.
 //! let was_removed = cache.remove(b"hello").unwrap();
-//! assert!(was_removed);
+//! assert_eq!(was_removed, Some(b"world".to_vec()));
 //!
 //! // The key is now gone.
 //! let value = cache.get(b"hello").unwrap();

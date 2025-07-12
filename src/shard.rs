@@ -345,7 +345,15 @@ impl Shard {
 
         if let Some(idx) = empty_index {
             let new_slot = self.file.write_slot(vbuf)?;
+
+            row.keys[idx] = SlotKey(*kbuf);
             row.offsets[idx] = new_slot;
+
+            self.file
+                .header_mut()
+                .stats
+                .n_occupied
+                .fetch_add(1, Ordering::SeqCst);
 
             return Ok(());
         }
@@ -386,12 +394,18 @@ impl Shard {
         for idx in 0..ROWS_WIDTH {
             let slot = row.keys[idx];
 
-            if &slot.0 == kbuf {
+            if slot != SlotKey::default() && &slot.0 == kbuf {
                 let offset = row.offsets[idx];
                 let vbuf = self.file.read_slot(offset)?;
 
                 row.keys[idx] = SlotKey::default();
                 row.offsets[idx] = SlotOffset::default();
+
+                self.file
+                    .header_mut()
+                    .stats
+                    .n_occupied
+                    .fetch_sub(1, Ordering::SeqCst);
 
                 return Ok(Some(vbuf));
             }
@@ -522,7 +536,8 @@ mod shard_tests {
         let mut kbuf = [0u8; MAX_KEY_SIZE];
         let val: Vec<u8> = b"world".to_vec();
 
-        kbuf.copy_from_slice(b"hello");
+        let key_bytes = b"hello";
+        kbuf[..key_bytes.len()].copy_from_slice(key_bytes);
         let h = TurboHasher::new(&kbuf);
 
         // initially not present

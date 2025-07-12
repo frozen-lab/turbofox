@@ -283,11 +283,11 @@ mod tests {
         assert_eq!(router.get(key, h)?, Some(val.clone()));
 
         // Remove and gone
-        assert_eq!(router.remove(key, h)?, None);
+        assert_eq!(router.remove(key, h)?, Some(val.clone()));
         assert_eq!(router.get(key, h)?, None);
 
-        // Removing again returns false
-        assert_ne!(router.remove(key, h)?, None);
+        // Removing again returns None
+        assert_eq!(router.remove(key, h)?, None);
 
         Ok(())
     }
@@ -524,50 +524,50 @@ mod tests {
         // Test that multiple operations can work concurrently
         // (Note: This is a basic test - proper concurrent testing would need threads)
 
-        let mut test_data = HashMap::new();
+        let mut test_data: HashMap<[u8; MAX_KEY_SIZE], Vec<u8>> = HashMap::new();
 
         // Insert multiple entries
         for i in 0..100 {
-            let key = format!("concurrent_key_{}", i);
-            let val = format!("concurrent_value_{}", i);
-            let hash = TurboHasher::new(key.as_bytes());
+            let mut key_buf = [0u8; MAX_KEY_SIZE];
+            let key_str = format!("key_{}", i);
+            key_buf[..key_str.len()].copy_from_slice(key_str.as_bytes());
 
-            router.set((key.as_bytes(), val.as_bytes()), hash)?;
-            test_data.insert(key, val);
+            let val = format!("value_{}", i).into_bytes();
+            let hash = TurboHasher::new(&key_buf);
+
+            router.set((&key_buf, &val), hash)?;
+            test_data.insert(key_buf, val);
         }
 
         // Verify all entries
         for (key, expected_val) in &test_data {
-            let hash = TurboHasher::new(key.as_bytes());
-            let retrieved = router.get(key.as_bytes(), hash)?;
-            assert_eq!(retrieved, Some(expected_val.as_bytes().to_vec()));
+            let hash = TurboHasher::new(key);
+            let retrieved = router.get(key, hash)?;
+            assert_eq!(retrieved, Some(expected_val.clone()));
         }
 
         // Remove half the entries
-        let mut removed_count = 0;
+        let mut removed_keys = Vec::new();
+        let mut count = 0;
         for (key, _) in &test_data {
-            if removed_count % 2 == 0 {
-                let hash = TurboHasher::new(key.as_bytes());
-
-                assert_ne!(router.remove(key.as_bytes(), hash)?, None);
+            if count % 2 == 0 {
+                let hash = TurboHasher::new(key);
+                assert_ne!(router.remove(key, hash)?, None);
+                removed_keys.push(*key);
             }
-
-            removed_count += 1;
+            count += 1;
         }
 
         // Verify removal
-        removed_count = 0;
         for (key, expected_val) in &test_data {
-            let hash = TurboHasher::new(key.as_bytes());
-            let retrieved = router.get(key.as_bytes(), hash)?;
+            let hash = TurboHasher::new(key);
+            let retrieved = router.get(key, hash)?;
 
-            if removed_count % 2 == 0 {
+            if removed_keys.contains(key) {
                 assert_eq!(retrieved, None);
             } else {
-                assert_eq!(retrieved, Some(expected_val.as_bytes().to_vec()));
+                assert_eq!(retrieved, Some(expected_val.clone()));
             }
-
-            removed_count += 1;
         }
 
         Ok(())
