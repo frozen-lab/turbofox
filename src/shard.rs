@@ -143,6 +143,15 @@ struct ShardSlot {
     offsets: [SlotOffset; ROWS_WIDTH],
 }
 
+impl Default for ShardSlot {
+    fn default() -> Self {
+        Self {
+            keys: [SlotKey::default(); ROWS_WIDTH],
+            offsets: [SlotOffset::default(); ROWS_WIDTH],
+        }
+    }
+}
+
 impl ShardSlot {
     // lookup the index of the candidate in the slot, if not found
     // the index of the empty slot is returned
@@ -218,6 +227,34 @@ struct ShardHeader {
     index: PageAligned<[ShardSlot; ROWS_NUM]>,
 }
 
+impl ShardHeader {
+    #[inline(always)]
+    const fn get_init_offset() -> u64 {
+        0u64
+    }
+
+    fn get_default_buf() -> Vec<u8> {
+        let header = ShardHeader {
+            meta: ShardMeta::default(),
+            stats: ShardStats::default(),
+            index: PageAligned([ShardSlot::default(); ROWS_NUM]),
+        };
+
+        let size = size_of::<ShardHeader>();
+        let mut buf = vec![0u8; size];
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &header as *const ShardHeader as *const u8,
+                buf.as_mut_ptr(),
+                size,
+            );
+        }
+
+        buf
+    }
+}
+
 struct ShardFile {
     file: File,
     mmap: MmapMut,
@@ -235,14 +272,6 @@ impl ShardFile {
 
         let mmap = unsafe { MmapOptions::new().len(HEADER_SIZE as usize).map_mut(&file) }?;
 
-        // the shard is new, so init the meta and stats
-        if is_new {
-            let header = unsafe { &mut *(mmap.as_ptr() as *mut ShardHeader) };
-
-            header.meta = ShardMeta::default();
-            header.stats = ShardStats::default();
-        }
-
         Ok(Self { file, mmap })
     }
 
@@ -250,7 +279,18 @@ impl ShardFile {
         let file = Self::file(path, true)?;
         file.set_len(HEADER_SIZE)?;
 
+        Self::init_header(&file)?;
+
         Ok(file)
+    }
+
+    fn init_header(file: &File) -> TResult<()> {
+        let buf = ShardHeader::get_default_buf();
+        let offset = ShardHeader::get_init_offset();
+
+        Self::write_all_at(file, &buf, offset)?;
+
+        Ok(())
     }
 
     fn file(path: &PathBuf, truncate: bool) -> TResult<File> {
