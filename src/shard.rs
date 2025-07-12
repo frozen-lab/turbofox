@@ -108,7 +108,7 @@ impl SlotOffset {
 }
 
 #[cfg(test)]
-mod slot_tests {
+mod shard_slot_offset_tests {
     use super::SlotOffset;
 
     #[test]
@@ -141,6 +141,37 @@ mod slot_tests {
 struct ShardSlot {
     keys: [SlotKey; ROWS_WIDTH],
     offsets: [SlotOffset; ROWS_WIDTH],
+}
+
+impl ShardSlot {
+    // lookup the index of the candidate in the slot, if not found
+    // the index of the empty slot is returned
+    fn lookup_candidate_or_empty(&self, candidate: SlotKey) -> (Option<usize>, Option<usize>) {
+        let mut empty_idx = None;
+
+        for (idx, &slot_k) in self.keys.iter().enumerate() {
+            if slot_k == candidate {
+                return (Some(idx), None);
+            }
+
+            if slot_k == SlotKey::default() {
+                empty_idx = Some(idx);
+            }
+        }
+
+        (None, empty_idx)
+    }
+
+    // lookup the index of the candidate in the slot
+    fn lookup_candidate(&self, candidate: SlotKey) -> Option<usize> {
+        for (idx, &slot_k) in self.keys.iter().enumerate() {
+            if slot_k == candidate && slot_k != SlotKey::default() {
+                return Some(idx);
+            }
+        }
+
+        None
+    }
 }
 
 #[repr(C)]
@@ -343,30 +374,25 @@ impl Shard {
 
     /// Sets a key-value pair in the shard.
     pub fn set(&self, kbuf: &[u8; MAX_KEY_SIZE], vbuf: &[u8], hash: TurboHasher) -> TResult<()> {
+        let candidate = SlotKey(*kbuf);
         let row_idx = hash.row_selector() as usize;
         let row = self.file.row_mut(row_idx);
-        let mut empty_index: Option<usize> = None;
 
-        // check if the key exists
-        for idx in 0..ROWS_WIDTH {
-            let slot = row.keys[idx];
+        let (cur_idx, new_idx) = ShardSlot::lookup_candidate_or_empty(row, candidate);
 
-            if &slot.0 == kbuf {
-                let new_slot = self.file.write_slot(vbuf)?;
-                row.offsets[idx] = new_slot;
+        // check if item already exists
+        if let Some(idx) = cur_idx {
+            let new_slot = self.file.write_slot(vbuf)?;
+            row.offsets[idx] = new_slot;
 
-                return Ok(());
-            }
-
-            if slot.0 == SlotKey::default().0 {
-                empty_index = Some(idx);
-            }
+            return Ok(());
         }
 
-        if let Some(idx) = empty_index {
+        // insert at a new slot
+        if let Some(idx) = new_idx {
             let new_slot = self.file.write_slot(vbuf)?;
 
-            row.keys[idx] = SlotKey(*kbuf);
+            row.keys[idx] = candidate;
             row.offsets[idx] = new_slot;
 
             self.file
@@ -387,18 +413,15 @@ impl Shard {
     /// Returns `Ok(Some(value))` if the key is found, `Ok(None)` if not, and
     /// an `Err` if an I/O error occurs.
     pub fn get(&self, kbuf: &[u8; MAX_KEY_SIZE], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
+        let candidate = SlotKey(*kbuf);
         let row_idx = hash.row_selector() as usize;
         let row = self.file.row(row_idx);
 
-        for idx in 0..ROWS_WIDTH {
-            let slot = row.keys[idx];
+        if let Some(idx) = ShardSlot::lookup_candidate(row, candidate) {
+            let offset = row.offsets[idx];
+            let vbuf = self.file.read_slot(offset)?;
 
-            if &slot.0 == kbuf {
-                let offset = row.offsets[idx];
-                let vbuf = self.file.read_slot(offset)?;
-
-                return Ok(Some(vbuf));
-            }
+            return Ok(Some(vbuf));
         }
 
         Ok(None)
@@ -408,27 +431,24 @@ impl Shard {
     ///
     /// Returns `Ok(true)` if the key was found and removed, `Ok(false)` if not.
     pub fn remove(&self, kbuf: &[u8; MAX_KEY_SIZE], hash: TurboHasher) -> TResult<Option<Vec<u8>>> {
+        let candidate = SlotKey(*kbuf);
         let row_idx = hash.row_selector() as usize;
         let row = self.file.row_mut(row_idx);
 
-        for idx in 0..ROWS_WIDTH {
-            let slot = row.keys[idx];
+        if let Some(idx) = ShardSlot::lookup_candidate(row, candidate) {
+            let offset = row.offsets[idx];
+            let vbuf = self.file.read_slot(offset)?;
 
-            if slot != SlotKey::default() && &slot.0 == kbuf {
-                let offset = row.offsets[idx];
-                let vbuf = self.file.read_slot(offset)?;
+            row.keys[idx] = SlotKey::default();
+            row.offsets[idx] = SlotOffset::default();
 
-                row.keys[idx] = SlotKey::default();
-                row.offsets[idx] = SlotOffset::default();
+            self.file
+                .header_mut()
+                .stats
+                .n_occupied
+                .fetch_sub(1, Ordering::SeqCst);
 
-                self.file
-                    .header_mut()
-                    .stats
-                    .n_occupied
-                    .fetch_sub(1, Ordering::SeqCst);
-
-                return Ok(Some(vbuf));
-            }
+            return Ok(Some(vbuf));
         }
 
         Ok(None)
