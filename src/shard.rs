@@ -201,6 +201,15 @@ struct ShardStats {
     write_offset: AtomicU32,
 }
 
+impl Default for ShardStats {
+    fn default() -> Self {
+        Self {
+            n_occupied: AtomicU32::new(0),
+            write_offset: AtomicU32::new(0),
+        }
+    }
+}
+
 /// The header of a shard file, containing metadata, stats, and the index.
 #[repr(C)]
 struct ShardHeader {
@@ -215,16 +224,24 @@ struct ShardFile {
 }
 
 impl ShardFile {
-    fn open(path: &PathBuf, truncate: bool) -> TResult<Self> {
+    fn open(path: &PathBuf, is_new: bool) -> TResult<Self> {
         let file = {
-            if truncate {
+            if is_new {
                 Self::new(path)?
             } else {
-                Self::file(path, truncate)?
+                Self::file(path, is_new)?
             }
         };
 
         let mmap = unsafe { MmapOptions::new().len(HEADER_SIZE as usize).map_mut(&file) }?;
+
+        // the shard is new, so init the meta and stats
+        if is_new {
+            let header = unsafe { &mut *(mmap.as_ptr() as *mut ShardHeader) };
+
+            header.meta = ShardMeta::default();
+            header.stats = ShardStats::default();
+        }
 
         Ok(Self { file, mmap })
     }
@@ -702,6 +719,22 @@ mod shard_tests {
         let (_top, _bottom, _) = shard.split(&tmp.path().to_path_buf())?;
 
         assert!(!old_path.exists(), "Old shard file was not deleted");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_shard_initializes_header() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..0x1000)?;
+        let header = shard.file.header();
+
+        // Verify ShardMeta
+        assert_eq!(header.meta.magic, MAGIC);
+        assert_eq!(header.meta.version, VERSION);
+
+        // Verify ShardStats
+        assert_eq!(header.stats.n_occupied.load(Ordering::SeqCst), 0);
+        assert_eq!(header.stats.write_offset.load(Ordering::SeqCst), 0);
 
         Ok(())
     }
