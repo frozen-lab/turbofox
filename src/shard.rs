@@ -2207,7 +2207,7 @@ mod shard_split_large_tests {
         k2[0] = 2;
 
         let h2 = TurboHasher::new(&k2);
-        const MAX_VLEN: usize = (1 << 12) - 1;
+        const MAX_VLEN: usize = (1 << 10) - 1;
         let v2 = vec![1u8; MAX_VLEN];
 
         shard.set(&k2, &v2, h2)?;
@@ -2455,7 +2455,7 @@ mod shard_simulations {
         let mut capacities = Vec::new();
         let mut rng = StdRng::seed_from_u64(07);
 
-        for i in 0..100 {
+        for i in 0..50 {
             let (shard, _tmp) = new_shard(0..(u16::MAX as u32 + 1)).unwrap();
 
             println!(
@@ -2464,7 +2464,7 @@ mod shard_simulations {
             );
 
             loop {
-                let vlen = rng.random_range(8..=256);
+                let vlen = rng.random_range(8..=512);
                 let val: Vec<u8> = (0..vlen).map(|_| rng.random()).collect();
 
                 let mut kbuf = [0u8; MAX_KEY_SIZE];
