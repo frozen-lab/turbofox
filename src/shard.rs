@@ -627,6 +627,7 @@ mod shard_header_tests {
     }
 }
 
+#[derive(Debug)]
 struct ShardFile {
     file: File,
     mmap: MmapMut,
@@ -641,6 +642,20 @@ impl ShardFile {
                 Self::file(path, is_new)?
             }
         };
+
+        // Validations for existing files,
+        //
+        // ▶ validate their size before memory mapping
+        if !is_new {
+            let metadata = file.metadata()?;
+
+            if metadata.len() < HEADER_SIZE {
+                return Err(TError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "shard file is smaller than header",
+                )));
+            }
+        }
 
         let mmap = unsafe { MmapOptions::new().len(HEADER_SIZE as usize).map_mut(&file) }?;
 
@@ -775,6 +790,419 @@ impl ShardFile {
                 Err(e) => return Err(e),
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shard_file_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    // create a temp file path
+    fn temp_path(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        dir.path().join(name)
+    }
+
+    #[test]
+    fn open_new_file_with_correct_initializes() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "new_shard.db");
+
+        // Open a new shard file
+        let shard_file = ShardFile::open(&path, true)?;
+
+        // ▶ Check file existence and size
+        assert!(path.exists(), "Shard file should be created");
+
+        let metadata = fs::metadata(&path)?;
+
+        assert_eq!(
+            metadata.len(),
+            HEADER_SIZE,
+            "File size should be exactly HEADER_SIZE"
+        );
+
+        // ▶ Check header content against default
+        let header = shard_file.header();
+
+        assert_eq!(
+            header.meta.magic, MAGIC,
+            "Magic number should match default"
+        );
+        assert_eq!(header.meta.version, VERSION, "Version should match default");
+        assert_eq!(
+            header.stats.n_occupied.load(Ordering::SeqCst),
+            0,
+            "`n_occupied` should be 0"
+        );
+        assert_eq!(
+            header.stats.write_offset.load(Ordering::SeqCst),
+            0,
+            "`write_offset` should be 0"
+        );
+
+        // ▶ Check that the index is zeroed out
+        let default_slot = ShardSlot::default();
+
+        for i in 0..ROWS_NUM {
+            let slot = &header.index.0[i];
+
+            for j in 0..ROWS_WIDTH {
+                assert_eq!(
+                    slot.keys[j], default_slot.keys[j],
+                    "Key at index [{}][{}] should be default",
+                    i, j
+                );
+                assert_eq!(
+                    slot.offsets[j].0, default_slot.offsets[j].0,
+                    "Offset at index [{}][{}] should be default",
+                    i, j
+                );
+            }
+        }
+
+        // ▶ Verify raw file content matches default buffer
+        let file_content = fs::read(&path)?;
+        let default_buf = ShardHeader::get_default_buf();
+
+        assert_eq!(
+            file_content, default_buf,
+            "The entire file content should match the default header buffer"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn open_existing_file_loads_data() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "existing_shard.db");
+
+        // ▶ Create and modify a shard file manually
+        {
+            let shard_file = ShardFile::open(&path, true)?;
+            let header = shard_file.header_mut();
+
+            header.stats.n_occupied.store(123, Ordering::SeqCst);
+            header.stats.write_offset.store(456, Ordering::SeqCst);
+
+            // ▶ Modify a specific slot in the index
+            let row_idx = 10;
+            let col_idx = 5;
+            let mut key = SlotKey::default();
+
+            key.0[0] = 0xAB;
+            header.index.0[row_idx].keys[col_idx] = key;
+            header.index.0[row_idx].offsets[col_idx] = SlotOffset(0xCDEF);
+
+            // ▶ Ensure changes are flushed to disk
+            shard_file.mmap.flush()?;
+        }
+
+        // ▶ Re-open the existing file, and check that the
+        // loaded data is correct
+        let shard_file = ShardFile::open(&path, false)?;
+        let header = shard_file.header();
+
+        assert_eq!(
+            header.stats.n_occupied.load(Ordering::SeqCst),
+            123,
+            "`n_occupied` should be loaded from existing file"
+        );
+        assert_eq!(
+            header.stats.write_offset.load(Ordering::SeqCst),
+            456,
+            "`write_offset` should be loaded from existing file"
+        );
+
+        let row_idx = 10;
+        let col_idx = 5;
+
+        let mut expected_key = SlotKey::default();
+        expected_key.0[0] = 0xAB;
+
+        assert_eq!(
+            header.index.0[row_idx].keys[col_idx], expected_key,
+            "Index key data should be loaded correctly"
+        );
+        assert_eq!(
+            header.index.0[row_idx].offsets[col_idx].0, 0xCDEF,
+            "Index offset data should be loaded correctly"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_read_slot_roundtrip() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "slot_test.db");
+        let shard_file = ShardFile::open(&path, true)?;
+
+        let v1 = b"hello".to_vec();
+        let v2 = b"world".to_vec();
+
+        // A larger value
+        let v3 = vec![0u8; 1024];
+
+        // Empty value
+        let v4 = b"".to_vec();
+
+        // ▶ Write first value
+        let slot1 = shard_file.write_slot(&v1)?;
+
+        assert_eq!(
+            shard_file
+                .header()
+                .stats
+                .write_offset
+                .load(Ordering::SeqCst),
+            v1.len() as u32,
+            "Write offset should be updated after first write"
+        );
+
+        // ▶ Write second value
+        let slot2 = shard_file.write_slot(&v2)?;
+
+        assert_eq!(
+            shard_file
+                .header()
+                .stats
+                .write_offset
+                .load(Ordering::SeqCst),
+            (v1.len() + v2.len()) as u32,
+            "Write offset should be updated after second write"
+        );
+
+        // Write third and fourth values
+        let slot3 = shard_file.write_slot(&v3)?;
+        let slot4 = shard_file.write_slot(&v4)?;
+
+        // ▶ Read back and verify
+
+        assert_eq!(
+            shard_file.read_slot(slot1)?,
+            v1,
+            "First value did not match after read"
+        );
+        assert_eq!(
+            shard_file.read_slot(slot2)?,
+            v2,
+            "Second value did not match after read"
+        );
+        assert_eq!(
+            shard_file.read_slot(slot3)?,
+            v3,
+            "Third value did not match after read"
+        );
+        assert_eq!(
+            shard_file.read_slot(slot4)?,
+            v4,
+            "Fourth (empty) value did not match after read"
+        );
+
+        // ▶ Verify the packed offsets and lengths
+        let (offset1, vlen1) = SlotOffset::from_self(slot1);
+        let (offset2, vlen2) = SlotOffset::from_self(slot2);
+
+        assert_eq!(offset1, 0, "Offset of first slot should be 0");
+        assert_eq!(vlen1, v1.len() as u16, "Vlen of first slot is incorrect");
+        assert_eq!(vlen2, v2.len() as u16, "Vlen of second slot is incorrect");
+        assert_eq!(
+            offset2,
+            v1.len() as u32,
+            "Offset of second slot is incorrect"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn header_and_row_mut_access() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "mut_access.db");
+        let shard_file = ShardFile::open(&path, true)?;
+
+        // ▶ Mutate stats via header_mut
+        shard_file
+            .header_mut()
+            .stats
+            .n_occupied
+            .store(99, Ordering::SeqCst);
+
+        assert_eq!(
+            shard_file.header().stats.n_occupied.load(Ordering::SeqCst),
+            99,
+            "Change via header_mut should be reflected immediately"
+        );
+
+        // ▶ Mutate index via row_mut
+        let row_idx = 42;
+        let col_idx = 7;
+
+        let mut key = SlotKey::default();
+        key.0[0] = 0xFF;
+
+        let offset = SlotOffset(12345);
+
+        let row = shard_file.row_mut(row_idx);
+
+        row.keys[col_idx] = key;
+        row.offsets[col_idx] = offset;
+
+        // ▶ Verify with immutable access
+        let same_row = shard_file.row(row_idx);
+
+        assert_eq!(
+            same_row.keys[col_idx], key,
+            "Key change via row_mut should be reflected"
+        );
+        assert_eq!(
+            same_row.offsets[col_idx].0, offset.0,
+            "Offset change via row_mut should be reflected"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic]
+    fn row_access_out_of_bounds() {
+        let dir = tempdir().unwrap();
+        let path = temp_path(&dir, "bounds_test.db");
+        let shard_file = ShardFile::open(&path, true).unwrap();
+
+        // This should panic
+        let _ = shard_file.row(ROWS_NUM);
+    }
+
+    #[test]
+    #[should_panic]
+    fn row_mut_access_out_of_bounds() {
+        let dir = tempdir().unwrap();
+        let path = temp_path(&dir, "bounds_test_mut.db");
+        let shard_file = ShardFile::open(&path, true).unwrap();
+
+        // This should panic
+        let _ = shard_file.row_mut(ROWS_NUM);
+    }
+
+    #[test]
+    fn read_from_invalid_offset_fails() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "invalid_read.db");
+        let shard_file = ShardFile::open(&path, true)?;
+
+        // ▶ Create a slot that points beyond the current end of the file!
+        //
+        // File size is HEADER_SIZE, write_offset is 0.
+        // A read from offset HEADER_SIZE should fail.
+
+        // 10 bytes from offset 0 in value area
+        let invalid_slot = SlotOffset::to_self(10, 0);
+        let result = shard_file.read_slot(SlotOffset(invalid_slot));
+
+        // On unix, this will be an `UnexpectedEof` from `read_exact_at`. The error type might
+        // differ across platforms! So just checking for `is_err` is robust ;)
+        assert!(
+            result.is_err(),
+            "Reading from an offset beyond EOF should fail"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn open_truncated_file_fails_mapping() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "truncated.db");
+
+        // ▶ Create a file smaller than the header
+        let file = File::create(&path)?;
+
+        file.set_len(HEADER_SIZE - 1)?;
+        drop(file);
+
+        // ▶ Attempting to open it should fail at the mmap stage
+        let result = ShardFile::open(&path, false);
+
+        assert!(
+            result.is_err(),
+            "Opening a file smaller than HEADER_SIZE should fail"
+        );
+
+        // ▶ The error should be an I/O error!
+        assert!(
+            matches!(result, Err(TError::Io(_))),
+            "Error should be an I/O error, but got {:?}",
+            result
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn meta_and_stats_are_written_correctly() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "meta_stats_test.db");
+
+        let dummy_magic = [1, 2, 3, 4, 5, 6, 7, 8];
+        let dummy_version = 77;
+
+        let dummy_n_occupied = 123;
+        let dummy_write_offset = 456;
+
+        // ▶ Create and modify a shard file
+        {
+            let shard_file = ShardFile::open(&path, true)?;
+            let header = shard_file.header_mut();
+
+            header.meta.magic = dummy_magic;
+            header.meta.version = dummy_version;
+
+            header
+                .stats
+                .n_occupied
+                .store(dummy_n_occupied, Ordering::SeqCst);
+            header
+                .stats
+                .write_offset
+                .store(dummy_write_offset, Ordering::SeqCst);
+
+            // Ensure changes are flushed to disk
+            shard_file.mmap.flush()?;
+        }
+
+        // ▶ Read the raw header from the file
+        let file = File::open(&path)?;
+        let mut header_buf = vec![0u8; size_of::<ShardHeader>()];
+
+        ShardFile::read_exact_at(&file, &mut header_buf, 0)?;
+
+        // ▶ Verify the raw bytes
+        let header_from_disk = unsafe { &*(header_buf.as_ptr() as *const ShardHeader) };
+
+        assert_eq!(
+            header_from_disk.meta.magic, dummy_magic,
+            "Magic bytes should be written correctly"
+        );
+        assert_eq!(
+            header_from_disk.meta.version, dummy_version,
+            "Version should be written correctly"
+        );
+        assert_eq!(
+            header_from_disk.stats.n_occupied.load(Ordering::SeqCst),
+            dummy_n_occupied,
+            "`n_occupied` should be written correctly"
+        );
+        assert_eq!(
+            header_from_disk.stats.write_offset.load(Ordering::SeqCst),
+            dummy_write_offset,
+            "`write_offset` should be written correctly"
+        );
+
         Ok(())
     }
 }
