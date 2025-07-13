@@ -553,63 +553,6 @@ mod shard_header_tests {
     }
 
     #[test]
-    fn shard_header_get_default_buf() {
-        let buf = ShardHeader::get_default_buf();
-
-        assert_eq!(
-            buf.len(),
-            HEADER_SIZE as usize,
-            "Default buffer size should be equal to HEADER_SIZE"
-        );
-
-        let header_ptr = buf.as_ptr() as *const ShardHeader;
-        let header = unsafe { &*header_ptr };
-
-        // Check meta
-        assert_eq!(
-            header.meta.magic, MAGIC,
-            "Magic in buffer should be correct"
-        );
-        assert_eq!(
-            header.meta.version, VERSION,
-            "Version in buffer should be correct"
-        );
-
-        // Check stats
-        assert_eq!(
-            header.stats.n_occupied.load(Ordering::SeqCst),
-            0,
-            "`n_occupied` in buffer should be 0"
-        );
-        assert_eq!(
-            header.stats.write_offset.load(Ordering::SeqCst),
-            0,
-            "`write_offset` in buffer should be 0"
-        );
-
-        // Check a portion of the index to ensure it's zeroed out
-        // as it should be on default state
-        let default_slot = ShardSlot::default();
-
-        for i in 0..ROWS_NUM {
-            let slot = &header.index.0[i];
-
-            for j in 0..super::ROWS_WIDTH {
-                assert_eq!(
-                    slot.keys[j].0, default_slot.keys[j].0,
-                    "Key at index [{}][{}] should be default",
-                    i, j
-                );
-                assert_eq!(
-                    slot.offsets[j].0, default_slot.offsets[j].0,
-                    "Offset at index [{}][{}] should be default",
-                    i, j
-                );
-            }
-        }
-    }
-
-    #[test]
     fn shard_header_initial_offset() {
         assert_eq!(
             ShardHeader::get_init_offset(),
@@ -872,6 +815,61 @@ mod shard_file_tests {
             file_content, default_buf,
             "The entire file content should match the default header buffer"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn header_init_correctness() -> TResult<()> {
+        let dir = tempdir()?;
+        let path = temp_path(&dir, "header_init_test.db");
+
+        // ▶ Open a new shard file, which should initialize the header
+        let shard_file = ShardFile::open(&path, true)?;
+
+        let header = shard_file.header();
+
+        // ▶ Verify ShardMeta fields
+        assert_eq!(
+            header.meta.magic, MAGIC,
+            "Magic should be initialized correctly"
+        );
+        assert_eq!(
+            header.meta.version, VERSION,
+            "Version should be initialized correctly"
+        );
+
+        // ▶ Verify ShardStats fields
+        assert_eq!(
+            header.stats.n_occupied.load(Ordering::SeqCst),
+            0,
+            "n_occupied should be 0"
+        );
+        assert_eq!(
+            header.stats.write_offset.load(Ordering::SeqCst),
+            0,
+            "write_offset should be 0"
+        );
+
+        // ▶ Verify index (ShardSlot array) is zeroed out
+        let default_slot = ShardSlot::default();
+
+        for i in 0..ROWS_NUM {
+            let slot = &header.index.0[i];
+
+            for j in 0..ROWS_WIDTH {
+                assert_eq!(
+                    slot.keys[j], default_slot.keys[j],
+                    "Index key at [{}][{}] should be default",
+                    i, j
+                );
+                assert_eq!(
+                    slot.offsets[j].0, default_slot.offsets[j].0,
+                    "Index offset at [{}][{}] should be default",
+                    i, j
+                );
+            }
+        }
 
         Ok(())
     }
