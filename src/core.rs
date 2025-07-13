@@ -37,6 +37,9 @@ pub enum TError {
 
     /// Key is too large
     KeyTooLarge(usize),
+
+    /// Key is too small
+    KeyTooSmall,
 }
 
 impl From<std::io::Error> for TError {
@@ -54,6 +57,7 @@ impl std::fmt::Display for TError {
             TError::KeyTooLarge(size) => {
                 write!(f, "key size {size} should be lower then {MAX_KEY_SIZE}")
             }
+            TError::KeyTooSmall => write!(f, "Key buffered must not be of zeroed bytes"),
         }
     }
 }

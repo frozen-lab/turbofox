@@ -63,7 +63,7 @@ pub(crate) const HEADER_SIZE: u64 = size_of::<ShardHeader>() as u64;
 #[repr(C, align(4096))]
 struct PageAligned<T>(T);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 struct SlotKey([u8; MAX_KEY_SIZE]);
 
@@ -107,35 +107,6 @@ impl SlotOffset {
     }
 }
 
-#[cfg(test)]
-mod shard_slot_offset_tests {
-    use super::SlotOffset;
-
-    #[test]
-    fn round_trip() {
-        let cases = &[(0_u16, 0_u32), (1, 1), (0xABC, 0xFFFFF), (0x7FF, 0x12345)];
-
-        for &(vlen, offset) in cases {
-            let packed = SlotOffset::to_self(vlen, offset);
-            let (off2, vlen2) = SlotOffset::from_self(SlotOffset(packed));
-
-            assert_eq!((off2, vlen2), (offset, vlen));
-        }
-    }
-
-    #[test]
-    #[should_panic]
-    fn vlen_too_large() {
-        let _ = SlotOffset::to_self(0x1000, 0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn offset_too_large() {
-        let _ = SlotOffset::to_self(0, 1 << 20);
-    }
-}
-
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct ShardSlot {
@@ -163,7 +134,7 @@ impl ShardSlot {
                 return (Some(idx), None);
             }
 
-            if slot_k == SlotKey::default() {
+            if slot_k == SlotKey::default() && empty_idx.is_none() {
                 empty_idx = Some(idx);
             }
         }
@@ -180,6 +151,256 @@ impl ShardSlot {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod shard_header_slot_tests {
+    use super::{ShardSlot, SlotKey, SlotOffset, MAX_KEY_SIZE, ROWS_WIDTH};
+
+    #[test]
+    fn slot_key_default_is_zeroed() {
+        let default_key = SlotKey::default();
+
+        assert!(
+            default_key.0.iter().all(|&b| b == 0),
+            "Default SlotKey should be all zeros"
+        );
+    }
+
+    #[test]
+    fn slot_key_equality() {
+        let key1 = SlotKey([1; MAX_KEY_SIZE]);
+        let key2 = SlotKey([1; MAX_KEY_SIZE]);
+        let key3 = SlotKey([2; MAX_KEY_SIZE]);
+        let default_key = SlotKey::default();
+
+        assert_eq!(key1, key2, "Keys with same content should be equal");
+        assert_eq!(
+            SlotKey::default(),
+            default_key,
+            "Two default keys should be equal"
+        );
+
+        assert_ne!(
+            key1, key3,
+            "Keys with different content should not be equal"
+        );
+        assert_ne!(
+            key1, default_key,
+            "A non-default key should not be equal to a default key"
+        );
+    }
+
+    #[test]
+    fn slot_offset_roundtrip() {
+        // slice of candidates (vlen, offset)
+        let cases = &[
+            // normal cases
+            (0_u16, 0_u32),
+            (1, 1),
+            (0xABC, 0xFFFFF),
+            (0x7FF, 0x12345),
+            // some edge cases
+            (0, (1 << 20) - 1),             // max offset, zero vlen
+            ((1 << 12) - 1, 0),             // max vlen, zero offset
+            ((1 << 12) - 1, (1 << 20) - 1), // max vlen, max offset
+        ];
+
+        for &(vlen, offset) in cases {
+            let packed = SlotOffset::to_self(vlen, offset);
+            let (unpacked_offset, unpacked_vlen) = SlotOffset::from_self(SlotOffset(packed));
+
+            assert_eq!(
+                unpacked_offset, offset,
+                "Offset did not match after roundtrip. Original: {}, Got: {}",
+                offset, unpacked_offset
+            );
+            assert_eq!(
+                unpacked_vlen, vlen,
+                "vlen did not match after roundtrip. Original: {}, Got: {}",
+                vlen, unpacked_vlen
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "vlen must be < 2^12")]
+    fn slot_offset_invalid_vlen() {
+        // 2^12 is invalid, casuse vlen is 12 bits!
+        // So max value is `2^12 - 1`.
+        let _ = SlotOffset::to_self(1 << 12, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "offset must be < 2^20")]
+    fn slot_offset_invalid_offset() {
+        // 2^20 is invalid, cause offset is 20 bits!
+        // So max value is `2^20 - 1`.
+        let _ = SlotOffset::to_self(0, 1 << 20);
+    }
+
+    #[test]
+    fn shard_slot_lookup_candidate() {
+        let mut slot = ShardSlot::default();
+
+        let key1 = SlotKey([1; MAX_KEY_SIZE]);
+        let key2 = SlotKey([2; MAX_KEY_SIZE]);
+        let non_existent_key = SlotKey([40; MAX_KEY_SIZE]);
+
+        // ▶ Empty slot
+        assert_eq!(
+            slot.lookup_candidate(key1),
+            None,
+            "Should not find key in an empty slot"
+        );
+
+        // ▶ Slot with just one key
+        slot.keys[5] = key1;
+
+        assert_eq!(
+            slot.lookup_candidate(key1),
+            Some(5),
+            "Should find the existing key at index 5"
+        );
+        assert_eq!(
+            slot.lookup_candidate(key2),
+            None,
+            "Should not find a non-existent key"
+        );
+
+        // ▶ Slot with multiple keys
+        slot.keys[0] = key2;
+
+        assert_eq!(
+            slot.lookup_candidate(key1),
+            Some(5),
+            "Should find key1 even with other keys present"
+        );
+        assert_eq!(
+            slot.lookup_candidate(key2),
+            Some(0),
+            "Should find key2 at index 0"
+        );
+
+        // ▶ Full slot
+        for i in 0..ROWS_WIDTH {
+            slot.keys[i] = SlotKey([(i + 1) as u8; MAX_KEY_SIZE]);
+        }
+
+        let last_key = SlotKey([ROWS_WIDTH as u8; MAX_KEY_SIZE]);
+
+        assert_eq!(
+            slot.lookup_candidate(last_key),
+            Some(ROWS_WIDTH - 1),
+            "Should find key in a full slot"
+        );
+        assert_eq!(
+            slot.lookup_candidate(non_existent_key),
+            None,
+            "Should not find key in a full slot if it's not there"
+        );
+
+        // ▶ Should not find a default/empty key,
+        //
+        // Reason: cause default/empty is not a valid candidate
+        // as its the default state
+        slot.keys[10] = SlotKey::default();
+
+        assert_eq!(
+            slot.lookup_candidate(SlotKey::default()),
+            None,
+            "Should not find the default (empty) key"
+        );
+    }
+
+    #[test]
+    fn shard_slot_lookup_candidate_or_empty() {
+        let mut slot = ShardSlot::default();
+        let key1 = SlotKey([1; MAX_KEY_SIZE]);
+        let key2 = SlotKey([2; MAX_KEY_SIZE]);
+
+        // ▶ Completely empty slot, should return no candidate,
+        // but the first empty slot index!
+        let (found, empty) = slot.lookup_candidate_or_empty(key1);
+
+        assert_eq!(
+            found, None,
+            "Should not find a candidate in a completely empty slots row"
+        );
+        assert_eq!(
+            empty,
+            Some(0),
+            "Should return the first index as empty for a new slot"
+        );
+
+        // ▶ Slots row with one key, searching for that key
+        slot.keys[3] = key1;
+        let (found, empty) = slot.lookup_candidate_or_empty(key1);
+
+        assert_eq!(found, Some(3), "Should find the candidate at index 3");
+        assert_eq!(
+            empty, None,
+            "Should not return an empty slot when candidate is found"
+        );
+
+        // ▶ Slots row with one key, searching for another key
+        let (found, empty) = slot.lookup_candidate_or_empty(key2);
+
+        assert_eq!(
+            found, None,
+            "Should not find a candidate for a key that is not present",
+        );
+        assert_eq!(
+            empty,
+            Some(0),
+            "Should return the first available empty slot (index 0)"
+        );
+
+        // ▶ Slots row with some keys, searching for a new key
+
+        // key2 is now at index 0
+        // empty slots are 1, 2, 4, 5...
+        slot.keys[0] = key2;
+        let (found, empty) = slot.lookup_candidate_or_empty(SlotKey([99; MAX_KEY_SIZE]));
+
+        assert_eq!(found, None, "Should not find a non-existent key");
+        assert_eq!(
+            empty,
+            Some(1),
+            "Should return the next empty slot (index 1)"
+        );
+
+        // ▶ Full slots, searching for an existing key
+        for i in 0..ROWS_WIDTH {
+            slot.keys[i] = SlotKey([(i + 1) as u8; MAX_KEY_SIZE]);
+        }
+
+        let existing_key_in_full_slot = SlotKey([5; MAX_KEY_SIZE]);
+        let (found, empty) = slot.lookup_candidate_or_empty(existing_key_in_full_slot);
+
+        assert_eq!(
+            found,
+            Some(4),
+            "Should find the existing key in a full slot"
+        );
+        assert_eq!(
+            empty, None,
+            "Should not return an empty slot when the slot is full and candidate is found"
+        );
+
+        // ▶ Full slots, searching for a new key, should get None!
+        let non_existent_key_in_full_slot = SlotKey([100; MAX_KEY_SIZE]);
+        let (found, empty) = slot.lookup_candidate_or_empty(non_existent_key_in_full_slot);
+
+        assert_eq!(
+            found, None,
+            "Should not find a non-existent key in a full slot"
+        );
+        assert_eq!(
+            empty, None,
+            "Should not find an empty slot when the slot is full"
+        );
     }
 }
 
@@ -432,6 +653,11 @@ impl Shard {
     /// Sets a key-value pair in the shard.
     pub fn set(&self, kbuf: &[u8; MAX_KEY_SIZE], vbuf: &[u8], hash: TurboHasher) -> TResult<()> {
         let candidate = SlotKey(*kbuf);
+
+        if candidate == SlotKey::default() {
+            return Err(TError::KeyTooSmall);
+        }
+
         let row_idx = hash.row_selector() as usize;
         let row = self.file.row_mut(row_idx);
 
