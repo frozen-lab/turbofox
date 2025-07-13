@@ -32,11 +32,17 @@ pub enum TError {
     /// A row in the shard's index is full.
     RowFull(usize),
 
+    /// File offset is out of bounds of `2^22` allowed range
+    OffsetOob(usize),
+
     /// The shard selector is out of the range handled by this shard.
     ShardOutOfRange(u32),
 
     /// Key is too large
     KeyTooLarge(usize),
+
+    /// Value is too large
+    ValTooLarge(usize),
 
     /// Key is too small
     KeyTooSmall,
@@ -53,9 +59,13 @@ impl std::fmt::Display for TError {
         match self {
             TError::Io(err) => write!(f, "I/O error: {}", err),
             TError::RowFull(row) => write!(f, "row {} is full", row),
+            TError::OffsetOob(offset) => write!(f, "offset {} is out of bounds", offset),
             TError::ShardOutOfRange(shard) => write!(f, "out of range of {}", shard),
             TError::KeyTooLarge(size) => {
                 write!(f, "key size {size} should be lower then {MAX_KEY_SIZE}")
+            }
+            TError::ValTooLarge(size) => {
+                write!(f, "value size {size} should be lower then `2^10` (1024)")
             }
             TError::KeyTooSmall => write!(f, "Key buffered must not be of zeroed bytes"),
         }

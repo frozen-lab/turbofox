@@ -86,24 +86,25 @@ impl Default for SlotOffset {
 impl SlotOffset {
     /// Unpacks a packed u32 into (offset, vlen).
     fn from_self(packed: SlotOffset) -> (u32, u16) {
-        const OFFSET_MASK: u32 = (1 << 20) - 1;
+        const OFFSET_MASK: u32 = (1 << 22) - 1;
 
         let offset = packed.0 & OFFSET_MASK;
-        let vlen = (packed.0 >> 20) as u16;
+        let vlen = (packed.0 >> 22) as u16;
 
         (offset, vlen)
     }
 
-    /// Packs a 12‑bit vlen and a 20‑bit offset into a single u32.
-    fn to_self(vlen: u16, offset: u32) -> u32 {
-        assert!(
-            (vlen as u32) < (1 << 12),
-            "vlen must be < 2^12, got {}",
-            vlen
-        );
-        assert!(offset < (1 << 20), "offset must be < 2^20, got {}", offset);
+    /// Packs a 10‑bit vlen and a 22‑bit offset into a single u32.
+    fn to_self(vlen: u16, offset: u32) -> TResult<u32> {
+        if !((vlen as u32) < (1 << 10)) {
+            return Err(TError::ValTooLarge(vlen as usize));
+        }
 
-        ((vlen as u32) << 20) | offset
+        if !(offset < (1 << 22)) {
+            return Err(TError::OffsetOob(offset as usize));
+        }
+
+        Ok(((vlen as u32) << 22) | offset)
     }
 }
 
@@ -199,16 +200,16 @@ mod shard_header_slot_tests {
             // normal cases
             (0_u16, 0_u32),
             (1, 1),
-            (0xABC, 0xFFFFF),
-            (0x7FF, 0x12345),
+            (0x3FF, 0xFFFFF),
+            (0x3FF, 0x12345),
             // some edge cases
-            (0, (1 << 20) - 1),             // max offset, zero vlen
-            ((1 << 12) - 1, 0),             // max vlen, zero offset
-            ((1 << 12) - 1, (1 << 20) - 1), // max vlen, max offset
+            (0, (1 << 22) - 1),             // max offset, zero vlen
+            ((1 << 10) - 1, 0),             // max vlen, zero offset
+            ((1 << 10) - 1, (1 << 22) - 1), // max vlen, max offset
         ];
 
         for &(vlen, offset) in cases {
-            let packed = SlotOffset::to_self(vlen, offset);
+            let packed = SlotOffset::to_self(vlen, offset).unwrap();
             let (unpacked_offset, unpacked_vlen) = SlotOffset::from_self(SlotOffset(packed));
 
             assert_eq!(
@@ -225,19 +226,19 @@ mod shard_header_slot_tests {
     }
 
     #[test]
-    #[should_panic(expected = "vlen must be < 2^12")]
+    #[should_panic(expected = "ValTooLarge(4096)")]
     fn slot_offset_invalid_vlen() {
-        // 2^12 is invalid, casuse vlen is 12 bits!
-        // So max value is `2^12 - 1`.
-        let _ = SlotOffset::to_self(1 << 12, 0);
+        // 2^12 is invalid, cause vlen is 10 bits!
+        // So max value is `2^10 - 1`.
+        let _ = SlotOffset::to_self(1 << 12, 0).unwrap();
     }
 
     #[test]
-    #[should_panic(expected = "offset must be < 2^20")]
+    #[should_panic(expected = "OffsetOob(4194304)")]
     fn slot_offset_invalid_offset() {
-        // 2^20 is invalid, cause offset is 20 bits!
-        // So max value is `2^20 - 1`.
-        let _ = SlotOffset::to_self(0, 1 << 20);
+        // 2^22 is invalid, cause offset is 22 bits!
+        // So max value is `2^22 - 1`.
+        let _ = SlotOffset::to_self(0, 1 << 22).unwrap();
     }
 
     #[test]
@@ -726,7 +727,7 @@ impl ShardFile {
 
         Self::write_all_at(&self.file, &vbuf, write_offset as u64 + HEADER_SIZE)?;
 
-        let offset = SlotOffset::to_self(vlen as u16, write_offset);
+        let offset = SlotOffset::to_self(vlen as u16, write_offset)?;
 
         Ok(SlotOffset(offset))
     }
@@ -945,7 +946,7 @@ mod shard_file_tests {
         let v2 = b"world".to_vec();
 
         // A larger value
-        let v3 = vec![0u8; 1024];
+        let v3 = vec![0u8; 1023];
 
         // Empty value
         let v4 = b"".to_vec();
@@ -1101,7 +1102,7 @@ mod shard_file_tests {
         // A read from offset HEADER_SIZE should fail.
 
         // 10 bytes from offset 0 in value area
-        let invalid_slot = SlotOffset::to_self(10, 0);
+        let invalid_slot = SlotOffset::to_self(10, 0).unwrap();
         let result = shard_file.read_slot(SlotOffset(invalid_slot));
 
         // On unix, this will be an `UnexpectedEof` from `read_exact_at`. The error type might
@@ -1621,7 +1622,7 @@ mod shard_tests {
         );
 
         // Test with max-size value
-        const MAX_VLEN: usize = (1 << 12) - 1;
+        const MAX_VLEN: usize = (1 << 10) - 1;
         let large_val = vec![1u8; MAX_VLEN];
         shard.set(&kbuf, &large_val, h)?;
         let retrieved_large = shard.get(&kbuf, h)?;
@@ -1635,18 +1636,18 @@ mod shard_tests {
     }
 
     #[test]
-    #[should_panic(expected = "vlen must be < 2^12")]
+    #[should_panic(expected = "ValTooLarge(1024)")]
     fn set_with_value_too_large_panics() {
         let (shard, _tmp) = new_shard(0..1).unwrap();
         let mut kbuf = [0u8; MAX_KEY_SIZE];
         kbuf[0] = 1;
         let h = TurboHasher::new(&kbuf);
 
-        const INVALID_VLEN: usize = 1 << 12;
+        const INVALID_VLEN: usize = 1 << 10;
         let too_large_val = vec![0u8; INVALID_VLEN];
 
         // This should panic inside SlotOffset::to_self
-        let _ = shard.set(&kbuf, &too_large_val, h);
+        let _ = shard.set(&kbuf, &too_large_val, h).unwrap();
     }
 
     #[test]
@@ -2461,5 +2462,89 @@ mod shard_split_large_tests {
         assert_eq!(top_count + bottom_count, 1);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shard_simulations {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use tempfile::TempDir;
+
+    fn new_shard(span: Range<u32>) -> TResult<(Shard, TempDir)> {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+
+        std::fs::create_dir_all(&dir)?;
+        let s = Shard::open(&dir, span, true)?;
+
+        Ok((s, tmp))
+    }
+
+    #[test]
+    #[ignore]
+    fn simulate() {
+        let mut capacities = Vec::new();
+        let mut rng = StdRng::seed_from_u64(07);
+
+        for i in 0..100 {
+            let (shard, _tmp) = new_shard(0..(u16::MAX as u32 + 1)).unwrap();
+
+            println!(
+                "\n--- Running Shard Insertion Simulation (Run {}) ---",
+                i + 1
+            );
+
+            loop {
+                let vlen = rng.random_range(8..=256);
+                let val: Vec<u8> = (0..vlen).map(|_| rng.random()).collect();
+
+                let mut kbuf = [0u8; MAX_KEY_SIZE];
+                let key_bytes: Vec<u8> = (0..MAX_KEY_SIZE).map(|_| rng.random()).collect();
+                kbuf[..key_bytes.len()].copy_from_slice(&key_bytes);
+
+                let h = TurboHasher::new(&kbuf);
+
+                if let Err(TError::RowFull(row_idx)) = shard.set(&kbuf, &val, h) {
+                    println!("Shard simulation stopped. Row {} is full.", row_idx);
+                    break;
+                }
+            }
+
+            let n_occupied = shard.file.header().stats.n_occupied.load(Ordering::SeqCst);
+            capacities.push(n_occupied);
+
+            println!(
+                "Run {} finished. Total keys inserted: {}",
+                i + 1,
+                n_occupied
+            );
+        }
+
+        let min_capacity = capacities.iter().min().unwrap();
+        let max_capacity = capacities.iter().max().unwrap();
+        let avg_capacity: u32 = capacities.iter().sum::<u32>() / capacities.len() as u32;
+
+        let total_possible_slots = (ROWS_NUM * ROWS_WIDTH) as f64;
+
+        let avg_occupancy_percentage = (avg_capacity as f64 / total_possible_slots) * 100.0;
+        let min_occupancy_percentage = (*min_capacity as f64 / total_possible_slots) * 100.0;
+        let max_occupancy_percentage = (*max_capacity as f64 / total_possible_slots) * 100.0;
+
+        println!("\n--- Simulation Results (Capacity) ---");
+
+        println!(
+            "Average capacity: {} ({:.2}%)",
+            avg_capacity, avg_occupancy_percentage
+        );
+        println!(
+            "Minimum capacity: {} ({:.2}%)",
+            min_capacity, min_occupancy_percentage
+        );
+        println!(
+            "Maximum capacity: {} ({:.2}%)",
+            max_capacity, max_occupancy_percentage
+        );
     }
 }

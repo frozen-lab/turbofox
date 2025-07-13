@@ -514,15 +514,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "simulations"
-version = "0.1.0"
-dependencies = [
- "rand",
- "tempfile",
- "turbocache",
-]
-
-[[package]]
 name = "syn"
 version = "2.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
