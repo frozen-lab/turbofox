@@ -476,6 +476,157 @@ impl ShardHeader {
     }
 }
 
+#[cfg(test)]
+mod shard_header_tests {
+    use super::*;
+    use std::{
+        mem::{align_of, size_of},
+        sync::atomic::Ordering,
+    };
+
+    #[test]
+    fn shard_meta_default_values() {
+        let meta = ShardMeta::default();
+
+        assert_eq!(
+            meta.magic, MAGIC,
+            "Default magic value should match the constant"
+        );
+        assert_eq!(
+            meta.version, VERSION,
+            "Default version should match the constant"
+        );
+    }
+
+    #[test]
+    fn shard_meta_size_and_alignment() {
+        assert_eq!(size_of::<ShardMeta>(), 16, "ShardMeta should be 16 bytes");
+
+        assert_eq!(
+            align_of::<ShardMeta>(),
+            8,
+            "ShardMeta should have 8-byte alignment"
+        );
+    }
+
+    #[test]
+    fn shard_stats_default_values() {
+        let stats = ShardStats::default();
+
+        assert_eq!(
+            stats.n_occupied.load(Ordering::SeqCst),
+            0,
+            "Default `n_occupied` should be 0"
+        );
+        assert_eq!(
+            stats.write_offset.load(Ordering::SeqCst),
+            0,
+            "Default `write_offset` should be 0"
+        );
+    }
+
+    #[test]
+    fn shard_stats_size_and_alignment() {
+        assert_eq!(size_of::<ShardStats>(), 8, "ShardStats should be 8 bytes");
+
+        assert_eq!(
+            align_of::<ShardStats>(),
+            4,
+            "ShardStats should have 4-byte alignment"
+        );
+    }
+
+    #[test]
+    fn shard_header_size_and_alignment() {
+        assert_eq!(
+            size_of::<ShardHeader>(),
+            HEADER_SIZE as usize,
+            "ShardHeader size should match the HEADER_SIZE constant"
+        );
+
+        assert_eq!(
+            align_of::<ShardHeader>(),
+            4096,
+            "ShardHeader should have 4096-byte alignment due to PageAligned index"
+        );
+    }
+
+    #[test]
+    fn shard_header_get_default_buf() {
+        let buf = ShardHeader::get_default_buf();
+
+        assert_eq!(
+            buf.len(),
+            HEADER_SIZE as usize,
+            "Default buffer size should be equal to HEADER_SIZE"
+        );
+
+        let header_ptr = buf.as_ptr() as *const ShardHeader;
+        let header = unsafe { &*header_ptr };
+
+        // Check meta
+        assert_eq!(
+            header.meta.magic, MAGIC,
+            "Magic in buffer should be correct"
+        );
+        assert_eq!(
+            header.meta.version, VERSION,
+            "Version in buffer should be correct"
+        );
+
+        // Check stats
+        assert_eq!(
+            header.stats.n_occupied.load(Ordering::SeqCst),
+            0,
+            "`n_occupied` in buffer should be 0"
+        );
+        assert_eq!(
+            header.stats.write_offset.load(Ordering::SeqCst),
+            0,
+            "`write_offset` in buffer should be 0"
+        );
+
+        // Check a portion of the index to ensure it's zeroed out
+        // as it should be on default state
+        let default_slot = ShardSlot::default();
+
+        for i in 0..ROWS_NUM {
+            let slot = &header.index.0[i];
+
+            for j in 0..super::ROWS_WIDTH {
+                assert_eq!(
+                    slot.keys[j].0, default_slot.keys[j].0,
+                    "Key at index [{}][{}] should be default",
+                    i, j
+                );
+                assert_eq!(
+                    slot.offsets[j].0, default_slot.offsets[j].0,
+                    "Offset at index [{}][{}] should be default",
+                    i, j
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shard_header_initial_offset() {
+        assert_eq!(
+            ShardHeader::get_init_offset(),
+            0,
+            "Initial offset for header should always be 0"
+        );
+    }
+
+    #[test]
+    fn page_aligned_struct_alignment() {
+        assert_eq!(
+            align_of::<PageAligned<[ShardSlot; ROWS_NUM]>>(),
+            4096,
+            "PageAligned index should enforce 4096-byte alignment"
+        );
+    }
+}
+
 struct ShardFile {
     file: File,
     mmap: MmapMut,
