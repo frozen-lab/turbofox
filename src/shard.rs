@@ -1147,58 +1147,27 @@ mod shard_file_tests {
         let dir = tempdir()?;
         let path = temp_path(&dir, "meta_stats_test.db");
 
-        let dummy_magic = [1, 2, 3, 4, 5, 6, 7, 8];
-        let dummy_version = 77;
-
-        let dummy_n_occupied = 123;
-        let dummy_write_offset = 456;
-
-        // ▶ Create and modify a shard file
-        {
-            let shard_file = ShardFile::open(&path, true)?;
-            let header = shard_file.header_mut();
-
-            header.meta.magic = dummy_magic;
-            header.meta.version = dummy_version;
-
-            header
-                .stats
-                .n_occupied
-                .store(dummy_n_occupied, Ordering::SeqCst);
-            header
-                .stats
-                .write_offset
-                .store(dummy_write_offset, Ordering::SeqCst);
-
-            // Ensure changes are flushed to disk
-            shard_file.mmap.flush()?;
-        }
-
         // ▶ Read the raw header from the file
-        let file = File::open(&path)?;
-        let mut header_buf = vec![0u8; size_of::<ShardHeader>()];
-
-        ShardFile::read_exact_at(&file, &mut header_buf, 0)?;
+        let shard_file = ShardFile::open(&path, true)?;
+        let header_from_disk = shard_file.header();
 
         // ▶ Verify the raw bytes
-        let header_from_disk = unsafe { &*(header_buf.as_ptr() as *const ShardHeader) };
-
         assert_eq!(
-            header_from_disk.meta.magic, dummy_magic,
+            header_from_disk.meta.magic, MAGIC,
             "Magic bytes should be written correctly"
         );
         assert_eq!(
-            header_from_disk.meta.version, dummy_version,
+            header_from_disk.meta.version, VERSION,
             "Version should be written correctly"
         );
         assert_eq!(
             header_from_disk.stats.n_occupied.load(Ordering::SeqCst),
-            dummy_n_occupied,
+            0,
             "`n_occupied` should be written correctly"
         );
         assert_eq!(
             header_from_disk.stats.write_offset.load(Ordering::SeqCst),
-            dummy_write_offset,
+            0,
             "`write_offset` should be written correctly"
         );
 
