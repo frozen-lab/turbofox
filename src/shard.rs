@@ -1366,6 +1366,7 @@ impl Shard {
 
                         target_row.offsets[target_col] = new_slot;
                         target_row.keys[target_col] = SlotKey(kbuf);
+
                         target_file
                             .header()
                             .stats
@@ -1552,41 +1553,258 @@ mod shard_tests {
     }
 
     #[test]
-    fn split_removes_old_shard_file() -> TResult<()> {
-        let span = 0..0x1000;
+    fn open_fails_for_invalid_dir() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("non_existent_dir");
+        let span = 0..1;
+
+        let result = Shard::open(&dir, span, true);
+
+        assert!(
+            result.is_err(),
+            "Shard::open should fail if the parent directory does not exist"
+        );
+    }
+
+    #[test]
+    fn open_creates_correct_filename() -> TResult<()> {
+        let span = 0x123..0x456;
         let (shard, tmp) = new_shard(span.clone())?;
-        let old_path = tmp
-            .path()
-            .join(format!("shard_{:04x}-{:04x}", span.start, span.end));
+        let expected_filename = format!("shard_{:04x}-{:04x}", span.start, span.end);
+        let expected_path = tmp.path().join(expected_filename);
 
-        assert!(old_path.exists());
-
-        let (_top, _bottom, _) = shard.split(&tmp.path().to_path_buf())?;
-
-        assert!(!old_path.exists(), "Old shard file was not deleted");
+        assert!(
+            expected_path.exists(),
+            "Shard file was not created at the expected path: {:?}",
+            expected_path
+        );
+        assert_eq!(
+            shard.span, span,
+            "Shard span should be initialized correctly"
+        );
 
         Ok(())
     }
 
     #[test]
-    fn test_new_shard_initializes_header() -> TResult<()> {
-        let (shard, _tmp) = new_shard(0..0x1000)?;
-        let header = shard.file.header();
+    fn set_with_empty_key_fails() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..1)?;
+        let kbuf = [0u8; MAX_KEY_SIZE]; // This is SlotKey::default()
+        let val = b"some value";
+        let h = TurboHasher::new(&kbuf);
 
-        // Verify ShardMeta
-        assert_eq!(header.meta.magic, MAGIC);
-        assert_eq!(header.meta.version, VERSION);
+        let result = shard.set(&kbuf, val, h);
 
-        // Verify ShardStats
-        assert_eq!(header.stats.n_occupied.load(Ordering::SeqCst), 0);
-        assert_eq!(header.stats.write_offset.load(Ordering::SeqCst), 0);
+        assert!(
+            matches!(result, Err(TError::KeyTooSmall)),
+            "Setting a default/empty key should return KeyTooSmall error"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn set_get_with_empty_and_large_values() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..1)?;
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[0] = 1;
+        let h = TurboHasher::new(&kbuf);
+
+        // Test with empty value
+        let empty_val = b"";
+        shard.set(&kbuf, empty_val, h)?;
+        let retrieved = shard.get(&kbuf, h)?;
+        assert_eq!(
+            retrieved,
+            Some(vec![]),
+            "Should correctly get an empty value"
+        );
+
+        // Test with max-size value
+        const MAX_VLEN: usize = (1 << 12) - 1;
+        let large_val = vec![1u8; MAX_VLEN];
+        shard.set(&kbuf, &large_val, h)?;
+        let retrieved_large = shard.get(&kbuf, h)?;
+        assert_eq!(
+            retrieved_large,
+            Some(large_val),
+            "Should correctly get a max-size value"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "vlen must be < 2^12")]
+    fn set_with_value_too_large_panics() {
+        let (shard, _tmp) = new_shard(0..1).unwrap();
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[0] = 1;
+        let h = TurboHasher::new(&kbuf);
+
+        const INVALID_VLEN: usize = 1 << 12;
+        let too_large_val = vec![0u8; INVALID_VLEN];
+
+        // This should panic inside SlotOffset::to_self
+        let _ = shard.set(&kbuf, &too_large_val, h);
+    }
+
+    #[test]
+    fn get_non_existent_key() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..1)?;
+        let mut k_exists = [0u8; MAX_KEY_SIZE];
+        k_exists[0] = 1;
+        let h_exists = TurboHasher::new(&k_exists);
+        shard.set(&k_exists, b"value", h_exists)?;
+
+        let mut k_missing = [0u8; MAX_KEY_SIZE];
+        k_missing[0] = 2;
+        let h_missing = TurboHasher::new(&k_missing);
+
+        let result = shard.get(&k_missing, h_missing)?;
+        assert_eq!(
+            result, None,
+            "Getting a non-existent key should return None"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_returns_correct_value() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..1)?;
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[0] = 1;
+        let val = b"value to be returned".to_vec();
+        let h = TurboHasher::new(&kbuf);
+
+        shard.set(&kbuf, &val, h)?;
+        let removed_val = shard.remove(&kbuf, h)?;
+
+        assert_eq!(
+            removed_val,
+            Some(val),
+            "Remove should return the value of the deleted key"
+        );
+
+        let removed_again = shard.remove(&kbuf, h)?;
+        assert_eq!(
+            removed_again, None,
+            "Removing a key again should return None"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn n_occupied_stat_on_overwrite() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..1)?;
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        kbuf[0] = 1;
+        let h = TurboHasher::new(&kbuf);
+
+        shard.set(&kbuf, b"v1", h)?;
+        let count1 = shard.file.header().stats.n_occupied.load(Ordering::SeqCst);
+        assert_eq!(count1, 1, "n_occupied should be 1 after first insert");
+
+        // Overwrite the key
+        shard.set(&kbuf, b"v2", h)?;
+        let count2 = shard.file.header().stats.n_occupied.load(Ordering::SeqCst);
+        assert_eq!(
+            count2, 1,
+            "n_occupied should not change when a key is overwritten"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn set_get_with_full_key() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..1)?;
+        let kbuf = [1u8; MAX_KEY_SIZE];
+        let val = b"value for full key".to_vec();
+        let h = TurboHasher::new(&kbuf);
+
+        shard.set(&kbuf, &val, h)?;
+        let retrieved = shard.get(&kbuf, h)?;
+        assert_eq!(
+            retrieved,
+            Some(val),
+            "Should set and get a key of MAX_KEY_SIZE"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_keys_in_same_row() -> TResult<()> {
+        let (shard, _tmp) = new_shard(0..1)?;
+        let mut k1 = [0u8; MAX_KEY_SIZE];
+        let mut k2 = [0u8; MAX_KEY_SIZE];
+        let v1 = b"value1".to_vec();
+        let v2 = b"value2".to_vec();
+
+        let mut h1;
+        let mut h2;
+
+        // Find two keys that map to the same row
+        let mut i: u32 = 0;
+        loop {
+            // Use a pseudo-random sequence to generate more varied keys
+            k1[0] = i.wrapping_mul(17) as u8;
+            k2[0] = i.wrapping_mul(31) as u8;
+            h1 = TurboHasher::new(&k1);
+            h2 = TurboHasher::new(&k2);
+
+            if h1.row_selector() == h2.row_selector() && k1 != k2 {
+                break;
+            }
+            i += 1;
+            assert!(i < 10000, "Could not find two keys for the same row");
+        }
+
+        // Set both keys
+        shard.set(&k1, &v1, h1)?;
+        shard.set(&k2, &v2, h2)?;
+
+        assert_eq!(
+            shard.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            2,
+            "Should have 2 occupied slots"
+        );
+
+        // Get both keys
+        assert_eq!(
+            shard.get(&k1, h1)?,
+            Some(v1.clone()),
+            "Should retrieve k1 correctly"
+        );
+        assert_eq!(
+            shard.get(&k2, h2)?,
+            Some(v2.clone()),
+            "Should retrieve k2 correctly"
+        );
+
+        // Remove one key and check
+        shard.remove(&k1, h1)?;
+        assert_eq!(shard.get(&k1, h1)?, None, "k1 should be gone after removal");
+        assert_eq!(
+            shard.get(&k2, h2)?,
+            Some(v2.clone()),
+            "k2 should still exist after k1 is removed"
+        );
+        assert_eq!(
+            shard.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            1,
+            "Should have 1 occupied slot after removal"
+        );
 
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod split_tests {
+mod shard_split_tests {
     use super::*;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -1617,6 +1835,23 @@ mod split_tests {
 
         assert_eq!(top_header.stats.n_occupied.load(Ordering::SeqCst), 0);
         assert_eq!(bottom_header.stats.n_occupied.load(Ordering::SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn split_removes_old_shard_file() -> TResult<()> {
+        let span = 0..0x1000;
+        let (shard, tmp) = new_shard(span.clone())?;
+        let old_path = tmp
+            .path()
+            .join(format!("shard_{:04x}-{:04x}", span.start, span.end));
+
+        assert!(old_path.exists());
+
+        let (_top, _bottom, _) = shard.split(&tmp.path().to_path_buf())?;
+
+        assert!(!old_path.exists(), "Old shard file was not deleted");
 
         Ok(())
     }
