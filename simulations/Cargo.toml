@@ -1,9 +1,0 @@
-[package]
-name = "simulations"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-turbocache ={ path = "../"}
-tempfile = "3.20.0"
-rand = "0.9.1"
