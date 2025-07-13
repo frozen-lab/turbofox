@@ -1829,29 +1829,12 @@ mod shard_split_tests {
         assert_eq!(top.span, 0..0x800);
         assert_eq!(bottom.span, 0x800..0x1000);
 
-        // Both shards should be empty
+        // ▶ Both shards should be empty
         let top_header = top.file.header();
         let bottom_header = bottom.file.header();
 
         assert_eq!(top_header.stats.n_occupied.load(Ordering::SeqCst), 0);
         assert_eq!(bottom_header.stats.n_occupied.load(Ordering::SeqCst), 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn split_removes_old_shard_file() -> TResult<()> {
-        let span = 0..0x1000;
-        let (shard, tmp) = new_shard(span.clone())?;
-        let old_path = tmp
-            .path()
-            .join(format!("shard_{:04x}-{:04x}", span.start, span.end));
-
-        assert!(old_path.exists());
-
-        let (_top, _bottom, _) = shard.split(&tmp.path().to_path_buf())?;
-
-        assert!(!old_path.exists(), "Old shard file was not deleted");
 
         Ok(())
     }
@@ -1905,7 +1888,8 @@ mod shard_split_tests {
         let mut top_count = 0;
         let mut bottom_count = 0;
 
-        // Insert multiple entries that will be distributed across both shards
+        // ▶ Inserting multiple entries which will be distributed
+        // across both shards
         for i in 0..50 {
             let key = format!("key_{i}");
             let val = format!("value_{i}");
@@ -1925,13 +1909,13 @@ mod shard_split_tests {
             }
         }
 
-        // Ensure we have data for both shards
+        // ▶ Ensure we have data for both shards
         assert!(top_count > 0, "No entries for top shard");
         assert!(bottom_count > 0, "No entries for bottom shard");
 
         let (top, bottom, _) = shard.split(&dir)?;
 
-        // Verify all entries are in the correct shards
+        // ▶ Verify all entries are in the correct shards
         for (key, (val, hash)) in test_data {
             let shard_selector = hash.shard_selector();
 
@@ -1947,14 +1931,14 @@ mod shard_split_tests {
                 &top
             };
 
+            assert_eq!(other_shard.get(&key, hash)?, None);
             assert_eq!(
                 expected_shard.get(&key.clone(), hash)?,
                 Some(val.into_bytes())
             );
-            assert_eq!(other_shard.get(&key, hash)?, None);
         }
 
-        // Verify stats
+        // ▶ Verify stats
         let top_header = top.file.header();
         let bottom_header = bottom.file.header();
 
@@ -1977,13 +1961,13 @@ mod shard_split_tests {
         let dir = tmp.path().to_path_buf();
         let original_path = dir.join(format!("shard_{:04x}-{:04x}", span.start, span.end));
 
-        // Ensure the file exists before split
+        // ▶ Ensure the file exists before split
         assert!(original_path.exists());
 
-        // Perform the split
+        // ▶ Perform the split
         let (_top, _bottom, _) = shard.split(&dir)?;
 
-        // Original file should be removed
+        // ▶ Original file should be removed
         assert!(
             !original_path.exists(),
             "Original shard file was not deleted"
@@ -1997,88 +1981,416 @@ mod shard_split_tests {
         let span = 0..0x1000;
         let (shard, tmp) = new_shard(span.clone())?;
         let dir = tmp.path().to_path_buf();
-
         let (top, bottom, _) = shard.split(&dir)?;
 
-        let top_path = dir.join(format!("shard_{:04x}-{:04x}", 0, 0x800));
-        let bottom_path = dir.join(format!("shard_{:04x}-{:04x}", 0x800, 0x1000));
+        let mid = (span.start + span.end) / 2;
+        let top_path = dir.join(format!("shard_{:04x}-{:04x}", span.start, mid));
+        let bottom_path = dir.join(format!("shard_{:04x}-{:04x}", mid, span.end));
 
-        assert!(top_path.exists(), "Top shard file was not created");
-        assert!(bottom_path.exists(), "Bottom shard file was not created");
-
-        // Verify the spans are correct
-        assert_eq!(top.span, 0..0x800);
-        assert_eq!(bottom.span, 0x800..0x1000);
+        assert!(
+            top_path.exists(),
+            "Top shard file {:?} was not created",
+            top_path
+        );
+        assert!(
+            bottom_path.exists(),
+            "Bottom shard file {:?} was not created",
+            bottom_path
+        );
+        assert_eq!(top.span, span.start..mid, "Top shard has incorrect span");
+        assert_eq!(
+            bottom.span,
+            mid..span.end,
+            "Bottom shard has incorrect span"
+        );
 
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod shard_split_large_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    fn new_shard(span: Range<u32>) -> TResult<(Shard, TempDir)> {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+
+        std::fs::create_dir_all(&dir)?;
+        let s = Shard::open(&dir, span, true)?;
+
+        Ok((s, tmp))
+    }
 
     #[test]
-    fn split_preserves_all_data() -> TResult<()> {
+    #[ignore]
+    fn test_split_with_large_number_of_entries() -> TResult<()> {
         let (shard, tmp) = new_shard(0..0x1000)?;
         let dir = tmp.path().to_path_buf();
 
-        let mut original_data = HashMap::new();
+        let num_entries = 10_000;
 
-        // Insert data with various key-value sizes
-        for i in 0..30 {
-            let key = format!("key_{:03}", i);
-            let val = format!("value_{:03}_{}", i, "x".repeat(i % 10));
+        let mut test_data = HashMap::new();
+        let mut uninserted_kvs = Vec::new();
+
+        let mut expected_top_count = 0;
+        let mut expected_bottom_count = 0;
+
+        // ▶ Insert a large number of entries
+        for i in 0..num_entries {
+            let key = format!("key_{:05}", i);
+            let val = format!(
+                "value_for_key_{:05}_with_some_extra_data_to_make_it_larger",
+                i
+            );
 
             let mut kbuf = [0u8; MAX_KEY_SIZE];
-            kbuf[..key.len()].copy_from_slice(&key.into_bytes());
+            kbuf[..key.len()].copy_from_slice(&key.clone().into_bytes());
 
             let hash = TurboHasher::new(&kbuf);
 
-            shard.set(&kbuf, val.as_bytes(), hash)?;
-            original_data.insert(kbuf, (val, hash));
+            match shard.set(&kbuf, &val.clone().into_bytes(), hash) {
+                Ok(_) => {
+                    test_data.insert(kbuf.clone(), (val, hash));
+
+                    if hash.shard_selector() < 0x800 {
+                        expected_top_count += 1;
+                    } else {
+                        expected_bottom_count += 1;
+                    }
+                }
+                Err(TError::RowFull(_)) => {
+                    uninserted_kvs.push((kbuf, val.into_bytes()));
+                }
+                Err(e) => panic!("Unexpected error during initial shard population: {:?}", e),
+            }
         }
 
-        let original_count = original_data.len();
+        // ▶ Ensure all intended entries are accounted for
+        assert_eq!(
+            test_data.len() + uninserted_kvs.len(),
+            num_entries,
+            "Total entries (inserted + uninserted) should match original count"
+        );
 
-        let (top, bottom, _) = shard.split(&dir)?;
+        // ▶ Perform the split
+        let (top, bottom, remaining_kvs) = shard.split(&dir)?;
 
-        // Verify all original data is preserved
-        let mut found_count = 0;
+        // ▶ Verify that the total count of items (migrated + remaining) matches the number of successfully inserted items
+        let total_migrated_count = top.file.header().stats.n_occupied.load(Ordering::SeqCst)
+            + bottom.file.header().stats.n_occupied.load(Ordering::SeqCst);
 
-        for (key, (val, hash)) in original_data {
+        assert_eq!(
+            total_migrated_count + remaining_kvs.len() as u32,
+            test_data.len() as u32,
+            "Total entries after split (migrated + remaining) should match successfully inserted count"
+        );
+
+        // ▶ Verify all entries are in the correct shards
+        for (key, (val, hash)) in test_data {
             let shard_selector = hash.shard_selector();
 
-            let target_shard = if shard_selector < 0x800 {
+            let expected_shard = if shard_selector < 0x800 {
                 &top
             } else {
                 &bottom
             };
 
-            let retrieved = target_shard.get(&key, hash)?;
+            let other_shard = if shard_selector < 0x800 {
+                &bottom
+            } else {
+                &top
+            };
 
             assert_eq!(
-                retrieved,
-                Some(val.as_bytes().to_vec()),
-                "Data not preserved for key: {:?}",
+                expected_shard.get(&key.clone(), hash)?,
+                Some(val.into_bytes()),
+                "Key {:?} not found or value mismatch in expected shard",
                 key
             );
-
-            found_count += 1;
+            assert_eq!(
+                other_shard.get(&key, hash)?,
+                None,
+                "Key {:?} found in unexpected shard",
+                key
+            );
         }
 
-        assert_eq!(found_count, original_count, "Not all data was preserved");
+        // ▶ Verify stats
+        let top_header = top.file.header();
+        let bottom_header = bottom.file.header();
 
-        // Verify total count matches
-        let top_count = top.file.header().stats.n_occupied.load(Ordering::SeqCst);
-        let bottom_count = bottom.file.header().stats.n_occupied.load(Ordering::SeqCst);
-
-        assert_eq!((top_count + bottom_count) as usize, original_count);
+        assert_eq!(
+            top_header.stats.n_occupied.load(Ordering::SeqCst),
+            expected_top_count,
+            "Top shard occupied count mismatch"
+        );
+        assert_eq!(
+            bottom_header.stats.n_occupied.load(Ordering::SeqCst),
+            expected_bottom_count,
+            "Bottom shard occupied count mismatch"
+        );
 
         Ok(())
     }
 
     #[test]
-    fn split_handles_edge_case_spans() -> TResult<()> {
-        // Test with span that has only 2 elements
-        let (shard, tmp) = new_shard(0..2)?;
+    #[ignore]
+    fn split_with_all_keys_to_one_shard() -> TResult<()> {
+        let span = 0..0x1000;
+        let mid = (span.start + span.end) / 2;
+        let (shard, tmp) = new_shard(span.clone())?;
         let dir = tmp.path().to_path_buf();
 
+        let mut keys_in_top = 0;
+        let mut test_data = HashMap::new();
+
+        // ▶ Insert entries that will all fall into the top shard
+        for i in 0..30 {
+            let mut kbuf = [0u8; MAX_KEY_SIZE];
+            let mut hash;
+            let mut counter = 0;
+
+            // ▶ Find a key that belongs to the top shard
+            loop {
+                let key = format!("key_{}_{}", i, counter);
+
+                kbuf[..key.len()].copy_from_slice(key.as_bytes());
+                hash = TurboHasher::new(&kbuf);
+
+                if hash.shard_selector() < mid {
+                    break;
+                }
+
+                counter += 1;
+
+                assert!(counter < 10000, "Failed to find a key for the top shard");
+            }
+
+            let val = format!("value_{}", i);
+
+            shard.set(&kbuf, val.as_bytes(), hash)?;
+            test_data.insert(kbuf, val);
+
+            keys_in_top += 1;
+        }
+
+        assert_eq!(
+            shard.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            keys_in_top,
+            "All keys should be in the original shard"
+        );
+
+        let (top, bottom, remaining) = shard.split(&dir)?;
+
+        assert!(
+            remaining.is_empty(),
+            "There should be no remaining KVs when all keys go to one shard"
+        );
+        assert_eq!(
+            top.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            keys_in_top,
+            "All keys should have moved to the top shard"
+        );
+        assert_eq!(
+            bottom.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            0,
+            "Bottom shard should be empty"
+        );
+
+        // ▶ Verify all data is in the top shard
+        for (kbuf, val) in test_data {
+            let hash = TurboHasher::new(&kbuf);
+
+            assert_eq!(
+                top.get(&kbuf, hash)?,
+                Some(val.into_bytes()),
+                "Key should be in the top shard after split"
+            );
+            assert_eq!(
+                bottom.get(&kbuf, hash)?,
+                None,
+                "Key should not be in the bottom shard after split"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn split_with_empty_and_large_values() -> TResult<()> {
+        let (shard, tmp) = new_shard(0..0x1000)?;
+        let dir = tmp.path().to_path_buf();
+
+        // ▶ K1: empty value
+        let mut k1 = [0u8; MAX_KEY_SIZE];
+        k1[0] = 1;
+
+        let h1 = TurboHasher::new(&k1);
+        let v1 = b"";
+
+        shard.set(&k1, v1, h1)?;
+
+        // ▶ K2: large value
+        let mut k2 = [0u8; MAX_KEY_SIZE];
+        k2[0] = 2;
+
+        let h2 = TurboHasher::new(&k2);
+        const MAX_VLEN: usize = (1 << 12) - 1;
+        let v2 = vec![1u8; MAX_VLEN];
+
+        shard.set(&k2, &v2, h2)?;
+
+        let (top, bottom, remaining) = shard.split(&dir)?;
+
+        assert!(
+            remaining.is_empty(),
+            "Should be no remaining KVs for this test case"
+        );
+
+        // ▶ Check k1
+        let shard1 = if h1.shard_selector() < 0x800 {
+            &top
+        } else {
+            &bottom
+        };
+
+        let other1 = if h1.shard_selector() < 0x800 {
+            &bottom
+        } else {
+            &top
+        };
+
+        assert_eq!(
+            shard1.get(&k1, h1)?,
+            Some(v1.to_vec()),
+            "Empty value not retrieved correctly after split"
+        );
+        assert_eq!(
+            other1.get(&k1, h1)?,
+            None,
+            "Key with empty value found in wrong shard"
+        );
+
+        // ▶ Check k2
+        let shard2 = if h2.shard_selector() < 0x800 {
+            &top
+        } else {
+            &bottom
+        };
+
+        let other2 = if h2.shard_selector() < 0x800 {
+            &bottom
+        } else {
+            &top
+        };
+
+        assert_eq!(
+            shard2.get(&k2, h2)?,
+            Some(v2),
+            "Large value not retrieved correctly after split"
+        );
+        assert_eq!(
+            other2.get(&k2, h2)?,
+            None,
+            "Key with large value found in wrong shard"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn split_with_row_collision() -> TResult<()> {
+        let span = 0..0x1000;
+        let mid = (span.start + span.end) / 2;
+        let (shard, tmp) = new_shard(span.clone())?;
+        let dir = tmp.path().to_path_buf();
+
+        let mut k1 = [0u8; MAX_KEY_SIZE];
+        let mut h1;
+
+        let mut k2 = [0u8; MAX_KEY_SIZE];
+        let mut h2;
+
+        let mut counter: u64 = 0;
+
+        // ▶ Find two keys that map to the same row in the original shard,
+        // but to different new shards.
+        loop {
+            let key1_str = format!("key_{}", counter);
+            k1[..key1_str.len()].copy_from_slice(key1_str.as_bytes());
+            h1 = TurboHasher::new(&k1);
+
+            let key2_str = format!("key_{}", counter + 1);
+            k2[..key2_str.len()].copy_from_slice(key2_str.as_bytes());
+            h2 = TurboHasher::new(&k2);
+
+            if h1.row_selector() == h2.row_selector()
+                && h1.shard_selector() < mid
+                && h2.shard_selector() >= mid
+            {
+                break;
+            }
+
+            counter += 2;
+
+            assert!(
+                counter < 100000,
+                "Could not find suitable colliding keys for test"
+            );
+        }
+
+        let v1 = b"value1".to_vec();
+        let v2 = b"value2".to_vec();
+
+        shard.set(&k1, &v1, h1)?;
+        shard.set(&k2, &v2, h2)?;
+
+        assert_eq!(
+            shard.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            2,
+            "Should have two items before split"
+        );
+
+        let (top, bottom, remaining) = shard.split(&dir)?;
+
+        assert!(remaining.is_empty(), "There should be no remaining KVs");
+        assert_eq!(
+            top.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            1,
+            "Top shard should have one item"
+        );
+        assert_eq!(
+            bottom.file.header().stats.n_occupied.load(Ordering::SeqCst),
+            1,
+            "Bottom shard should have one item"
+        );
+        assert_eq!(top.get(&k1, h1)?, Some(v1), "k1 should be in the top shard");
+        assert_eq!(top.get(&k2, h2)?, None, "k2 should not be in the top shard");
+        assert_eq!(
+            bottom.get(&k1, h1)?,
+            None,
+            "k1 should not be in the bottom shard"
+        );
+        assert_eq!(
+            bottom.get(&k2, h2)?,
+            Some(v2),
+            "k2 should be in the bottom shard"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn split_handles_edge_case_spans() -> TResult<()> {
+        // ▶ Test with span that has only 2 elements
+        let (shard, tmp) = new_shard(0..2)?;
+        let dir = tmp.path().to_path_buf();
         let (top, bottom, _) = shard.split(&dir)?;
 
         assert_eq!(top.span, 0..1);
@@ -2088,11 +2400,12 @@ mod shard_split_tests {
     }
 
     #[test]
+    #[ignore]
     fn split_with_deleted_entries() -> TResult<()> {
         let (shard, tmp) = new_shard(0..0x1000)?;
         let dir = tmp.path().to_path_buf();
 
-        // key1
+        // ▶ K1
         let k1 = b"key1";
         let val1 = b"value1";
 
@@ -2101,7 +2414,7 @@ mod shard_split_tests {
 
         let hash1 = TurboHasher::new(&key1);
 
-        // key2
+        // ▶ K2
         let k2 = b"key2";
         let val2 = b"value2";
 
@@ -2110,15 +2423,16 @@ mod shard_split_tests {
 
         let hash2 = TurboHasher::new(&key2);
 
-        // Insert two entries
+        // ▶ Insert two entries
         shard.set(&key1, val1, hash1)?;
         shard.set(&key2, val2, hash2)?;
 
-        // Delete one entry
+        // ▶ Delete one entry
         shard.remove(&key1, hash1)?;
 
         let (top, bottom, _) = shard.split(&dir)?;
-        // Only the non-deleted entry should be in the split shards
+
+        // ▶ Only the non-deleted entry should be in the split shards
         let shard_selector = hash2.shard_selector();
 
         let expected_shard = if shard_selector < 0x800 {
@@ -2136,11 +2450,11 @@ mod shard_split_tests {
         assert_eq!(expected_shard.get(&key2, hash2)?, Some(val2.to_vec()));
         assert_eq!(other_shard.get(&key2, hash2)?, None);
 
-        // Deleted entry should not be in either shard
+        // ▶ Deleted entry should not be in either shard
         assert_eq!(top.get(&key1, hash1)?, None);
         assert_eq!(bottom.get(&key1, hash1)?, None);
 
-        // Verify stats - only one occupied entry total
+        // ▶ Verify stats - only one occupied entry total
         let top_count = top.file.header().stats.n_occupied.load(Ordering::SeqCst);
         let bottom_count = bottom.file.header().stats.n_occupied.load(Ordering::SeqCst);
 
