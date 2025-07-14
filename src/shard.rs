@@ -2521,82 +2521,215 @@ mod shard_benchmarks {
     use super::*;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-    use std::collections::HashMap;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
-    fn new_shard(span: Range<u32>) -> TResult<(Shard, TempDir)> {
+    const NUM_ITER: usize = 20_000;
+    const NUM_SHARDS: usize = 10;
+
+    struct BenchContext {
+        shards: Vec<Shard>,
+
+        // The temp dir that holds the shard files.
+        // This needs to be kept alive for the duration of the benchmark.
+        _tmp: TempDir,
+    }
+
+    fn setup_shards() -> TResult<BenchContext> {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_path_buf();
 
         std::fs::create_dir_all(&dir)?;
-        let s = Shard::open(&dir, span, true)?;
 
-        Ok((s, tmp))
+        let mut shards = Vec::with_capacity(NUM_SHARDS);
+        let shard_space = (u16::MAX as u32 + 1) / NUM_SHARDS as u32;
+
+        for i in 0..NUM_SHARDS {
+            let end = if i == NUM_SHARDS - 1 {
+                u16::MAX as u32 + 1
+            } else {
+                (i + 1) as u32 * shard_space
+            };
+
+            let start = i as u32 * shard_space;
+            let shard = Shard::open(&dir, start..end, true)?;
+
+            shards.push(shard);
+        }
+
+        Ok(BenchContext { shards, _tmp: tmp })
+    }
+
+    fn gen_key(rng: &mut StdRng) -> [u8; MAX_KEY_SIZE] {
+        let mut kbuf = [0u8; MAX_KEY_SIZE];
+        rng.fill(&mut kbuf[..]);
+        kbuf
+    }
+
+    fn gen_val(rng: &mut StdRng) -> Vec<u8> {
+        let vlen = rng.random_range(8..=512);
+        let mut val = vec![0; vlen];
+        rng.fill(&mut val[..]);
+
+        val
+    }
+
+    fn get_shard_for_hash<'a>(shards: &'a [Shard], hash: &TurboHasher) -> &'a Shard {
+        let selector = hash.shard_selector();
+
+        shards.iter().find(|s| s.span.contains(&selector)).unwrap()
+    }
+
+    fn bench_set(shards: &[Shard], rng: &mut StdRng) -> Vec<([u8; MAX_KEY_SIZE], TurboHasher)> {
+        println!("\n--- Benching SET operation ---\n");
+
+        let mut keys = Vec::with_capacity(NUM_ITER);
+        let mut durations = Vec::with_capacity(NUM_ITER);
+
+        let mut successful_sets = 0;
+        let mut unsuccessful_sets = 0;
+
+        while successful_sets < NUM_ITER {
+            let kbuf = gen_key(rng);
+            let val = gen_val(rng);
+
+            let h = TurboHasher::new(&kbuf);
+
+            let shard = get_shard_for_hash(shards, &h);
+            let start = Instant::now();
+
+            if shard.set(&kbuf, &val, h).is_ok() {
+                durations.push(start.elapsed());
+                keys.push((kbuf, h));
+
+                successful_sets += 1;
+            } else {
+                unsuccessful_sets += 1;
+
+                // Row is full, just try with a different key
+                continue;
+            }
+        }
+
+        print_stats("SET", &durations, unsuccessful_sets);
+
+        keys
+    }
+
+    fn bench_get(shards: &[Shard], keys: &[([u8; MAX_KEY_SIZE], TurboHasher)], rng: &mut StdRng) {
+        println!("\n--- Benching GET operation ---\n");
+
+        let mut durations = Vec::with_capacity(NUM_ITER);
+        let mut failed_op: usize = 0;
+        let num_keys = keys.len();
+
+        if num_keys == 0 {
+            println!("No keys to get, skipping benchmark.");
+
+            return;
+        }
+
+        for _ in 0..NUM_ITER {
+            // 80% chance of getting an existing key
+            let (kbuf, h) = if rng.random_ratio(4, 5) {
+                let (k, h) = keys[rng.random_range(0..num_keys)];
+
+                (k, h)
+            } else {
+                let k = gen_key(rng);
+                let h = TurboHasher::new(&k);
+
+                (k, h)
+            };
+
+            let shard = get_shard_for_hash(shards, &h);
+            let start = Instant::now();
+
+            if shard.get(&kbuf, h).is_ok() {
+                durations.push(start.elapsed());
+            } else {
+                failed_op += 1;
+            }
+        }
+
+        print_stats("GET", &durations, failed_op);
+    }
+
+    fn bench_remove(
+        shards: &[Shard],
+        keys: &[([u8; MAX_KEY_SIZE], TurboHasher)],
+        rng: &mut StdRng,
+    ) {
+        println!("\n--- Benching REMOVE operation ---\n");
+
+        let mut durations = Vec::with_capacity(NUM_ITER);
+        let mut failed_op: usize = 0;
+        let mut keys_to_remove = keys.to_vec();
+
+        if keys_to_remove.is_empty() {
+            println!("No keys to remove, skipping benchmark.");
+
+            return;
+        }
+
+        let num_removals = std::cmp::min(NUM_ITER, keys_to_remove.len());
+
+        for _ in 0..num_removals {
+            if keys_to_remove.is_empty() {
+                break;
+            }
+
+            let key_index = rng.random_range(0..keys_to_remove.len());
+            let (kbuf, h) = keys_to_remove.swap_remove(key_index);
+
+            let shard = get_shard_for_hash(shards, &h);
+            let start = Instant::now();
+
+            if shard.remove(&kbuf, h).is_ok() {
+                durations.push(start.elapsed());
+            } else {
+                failed_op += 1;
+            }
+        }
+
+        print_stats("REMOVE", &durations, failed_op);
+    }
+
+    fn print_stats(op_name: &str, durations: &[Duration], failed_op: usize) {
+        if durations.is_empty() {
+            println!("No successful operations for {}.", op_name);
+
+            return;
+        }
+
+        let total_duration: Duration = durations.iter().sum();
+        let num_ops = durations.len();
+        let avg_time_ns = total_duration.as_nanos() / num_ops as u128;
+        let ops_per_sec = num_ops as f64 / total_duration.as_secs_f64();
+        let failed_perc = failed_op as f64 / num_ops as f64;
+
+        println!("Operation: {}", op_name);
+        println!("  Iterations:       {}", num_ops);
+        println!("  Total time:       {:?}", total_duration);
+        println!("  Average time:     {} ns/op", avg_time_ns);
+        println!("  Operations/sec:   {:.2}", ops_per_sec);
+        println!("  Failed Ops:       {} [{:.2}%]", failed_op, failed_perc);
     }
 
     #[test]
     #[ignore]
     fn bench() {
-        let mut rng = StdRng::seed_from_u64(123);
-        let num_iterations = 5000;
-        let mut set_times = Vec::new();
-        let mut get_times = Vec::new();
-        let mut remove_times = Vec::new();
-
-        let (shard, _tmp) = new_shard(0..(u16::MAX as u32 + 1)).unwrap();
-        let mut inserted_keys: HashMap<[u8; MAX_KEY_SIZE], Vec<u8>> = HashMap::new();
+        let mut rng = StdRng::seed_from_u64(41);
+        let context = setup_shards().expect("Failed to set up shards for benchmark");
 
         println!(
-            "\n--- Running Shard Operations Benchmark ({} iterations) ---",
-            num_iterations
+            "--- Running Shard Operations Benchmark ({} shards, up to {} iterations per op) ---",
+            NUM_SHARDS, NUM_ITER
         );
 
-        for i in 0..num_iterations {
-            let operation_type = rng.random_range(0..100); // 0-99
+        let keys = bench_set(&context.shards, &mut rng);
 
-            let mut kbuf = [0u8; MAX_KEY_SIZE];
-            let key_bytes: Vec<u8> = (0..MAX_KEY_SIZE).map(|_| rng.random()).collect();
-            kbuf[..key_bytes.len()].copy_from_slice(&key_bytes);
-            let h = TurboHasher::new(&kbuf);
-
-            let vlen = rng.random_range(8..=512);
-            let val: Vec<u8> = (0..vlen).map(|_| rng.random()).collect();
-
-            if operation_type < 50 {
-                // 50% chance for set
-                let start = Instant::now();
-                let _ = shard.set(&kbuf, &val, h);
-                set_times.push(start.elapsed());
-                inserted_keys.insert(kbuf, val);
-            } else if operation_type < 90 {
-                // 40% chance for get
-                let start = Instant::now();
-                let _ = shard.get(&kbuf, h);
-                get_times.push(start.elapsed());
-            } else {
-                // 10% chance for remove
-                let start = Instant::now();
-                let _ = shard.remove(&kbuf, h);
-                remove_times.push(start.elapsed());
-                inserted_keys.remove(&kbuf);
-            }
-
-            if (i + 1) % 10 == 0 {
-                println!("  Completed {} operations...", i + 1);
-            }
-        }
-
-        let avg_duration = |times: Vec<Duration>| -> Duration {
-            if times.is_empty() {
-                return Duration::new(0, 0);
-            }
-            times.iter().sum::<Duration>() / times.len() as u32
-        };
-
-        println!("\n--- Benchmark Results ---");
-        println!("Average Set Time: {:?}", avg_duration(set_times));
-        println!("Average Get Time: {:?}", avg_duration(get_times));
-        println!("Average Remove Time: {:?}", avg_duration(remove_times));
+        bench_get(&context.shards, &keys, &mut rng);
+        bench_remove(&context.shards, &keys, &mut rng);
     }
 }
