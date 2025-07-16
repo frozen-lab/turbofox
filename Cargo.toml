@@ -1,30 +1,9 @@
 [package]
 name = "turbocache"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 description = "Persistent, high-performance, disk-backed Key-Value store"
 license = "MIT"
 repository = "https://github.com/frozen-lab/turbocache"
-keywords = ["key-value", "database", "persistent"]
-categories = ["database", "caching"]
+keywords = ["key-value", "database", "persistent", "store", "db"]
 
-[lib]
-path = "src/lib.rs"
-
-[dependencies]
-anyhow = "1.0.98"
-memmap = "0.7.0"
-xxhash = { path = "./xxhash"}
-
-[dev-dependencies]
-criterion = { version = "0.6.0", features = ["html_reports"] }
-rand = "0.9.1"
-tempfile = "3.20.0"
-
-[workspace]
-members = ["xxhash"]
-
-[[bench]]
-name = "bench"
-path = "benchmarks/bench.rs"
-harness = false
