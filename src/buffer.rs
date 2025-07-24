@@ -1,64 +1,58 @@
 #![allow(dead_code)]
 
-use crate::core::{TurboError, TurboResult};
+use crate::{
+    core::{TurboResult, BUFFER_CAPACITY, DEFAULT_BUF_FILE_NAME, MAGIC, VERSION},
+    TurboError,
+};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
     mem::size_of,
     path::PathBuf,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::AtomicU32,
 };
 
-const BUF_CAP: usize = 8 * 64;
-const VERSION: u32 = 0;
-const MAGIC: [u8; 4] = *b"TCv0";
-const BUF_FILE_NAME: &str = "buffer";
 const HEADER_SIZE: u64 = size_of::<Header>() as u64;
 
 #[repr(C)]
 struct Meta {
-    magic: [u8; 4],
     version: u32,
-}
-
-impl Default for Meta {
-    fn default() -> Self {
-        Self {
-            magic: MAGIC,
-            version: VERSION,
-        }
-    }
+    magic: [u8; 4],
 }
 
 #[repr(C)]
 struct Stats {
+    capacity: AtomicU32,
     occupied: AtomicU32,
-    offset: AtomicU32,
 }
 
 #[repr(C)]
-struct Offset {
+#[derive(Debug, Clone, Copy)]
+struct PairOffset {
     offset: u32,
-    vlen: u16,
     klen: u16,
+    vlen: u16,
 }
+
+#[repr(C, align(4096))]
+struct PageAligned<T>(T);
 
 #[repr(C)]
 struct Header {
     meta: Meta,
     stats: Stats,
-    signs: [u32; BUF_CAP],
-    offset: [Offset; BUF_CAP],
+    signuatures: PageAligned<[u32; BUFFER_CAPACITY]>,
+    offsets: PageAligned<[PairOffset; BUFFER_CAPACITY]>,
 }
 
 struct BufFile {
-    file: File,
     mmap: MmapMut,
+    file: File,
 }
 
 impl BufFile {
-    pub fn open(dirpath: &PathBuf) -> TurboResult<Self> {
-        let file_path = dirpath.join(BUF_FILE_NAME);
+    fn open(dir: &PathBuf) -> TurboResult<Self> {
+        let file_path = dir.join(DEFAULT_BUF_FILE_NAME);
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -68,7 +62,6 @@ impl BufFile {
 
         let file_meta = file.metadata()?;
 
-        // if new file is created
         if file_meta.len() < HEADER_SIZE {
             return Self::create(file);
         }
@@ -85,6 +78,7 @@ impl BufFile {
         Ok(buffer)
     }
 
+    /// Create a new buffer w/ default state
     fn create(file: File) -> TurboResult<Self> {
         file.set_len(0)?;
         file.set_len(HEADER_SIZE)?;
@@ -92,57 +86,13 @@ impl BufFile {
         let mmap = unsafe { MmapOptions::new().len(HEADER_SIZE as usize).map_mut(&file) }?;
         let buffer = Self { file, mmap };
 
+        // set metadata
         let head = buffer.header_mut();
 
-        // set metadata
         head.meta.magic = MAGIC;
         head.meta.version = VERSION;
 
-        // set stats
-        head.stats.occupied = AtomicU32::new(0);
-        head.stats.offset = AtomicU32::new(0);
-
         Ok(buffer)
-    }
-
-    fn write_slot(&self, buf: (&[u8], &[u8])) -> TurboResult<Offset> {
-        let klen = buf.0.len();
-        let vlen = buf.1.len();
-        let blen = klen + vlen;
-
-        let mut wbuf = vec![0u8; blen];
-
-        wbuf[..klen].copy_from_slice(buf.0);
-        wbuf[klen..].copy_from_slice(buf.1);
-
-        let offset = self
-            .header()
-            .stats
-            .offset
-            .fetch_add(blen as u32, Ordering::SeqCst);
-
-        Self::write_all_at(&self.file, &wbuf, offset)?;
-
-        Ok(Offset {
-            offset,
-            vlen: vlen as u16,
-            klen: klen as u16,
-        })
-    }
-
-    fn read_slot(&self, offset: Offset) -> TurboResult<(Vec<u8>, Vec<u8>)> {
-        let klen = offset.klen as usize;
-        let vlen = offset.vlen as usize;
-
-        let mut rbuf = vec![0u8; klen + vlen];
-        let slot_offset = self.header().stats.offset.load(Ordering::SeqCst);
-
-        Self::read_exact_at(&self.file, &mut rbuf, slot_offset)?;
-
-        let vbuf = rbuf[klen..(klen + vlen)].to_owned();
-        rbuf.truncate(klen);
-
-        Ok((rbuf, vbuf))
     }
 
     /// Returns an immutable reference to the header
@@ -157,23 +107,52 @@ impl BufFile {
         unsafe { &mut *(self.mmap.as_ptr() as *mut Header) }
     }
 
-    /// Reads the exact number of bytes required to fill `buf` from a given offset.
+    /// Reads the exact number of bytes at a given offset (`pread`)
     #[cfg(unix)]
-    #[inline]
-    fn read_exact_at(f: &File, buf: &mut [u8], offset: u32) -> TurboResult<()> {
-        std::os::unix::fs::FileExt::read_exact_at(f, buf, offset as u64)?;
-
-        Ok(())
+    fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::read_exact_at(f, buf, offset)
     }
 
-    /// Writes a buffer to a file at a given offset.
+    /// Writes a buffer to a file at a given offset (`pwrite`)
     #[cfg(unix)]
-    #[inline]
-    fn write_all_at(f: &File, buf: &[u8], offset: u32) -> TurboResult<()> {
-        std::os::unix::fs::FileExt::write_all_at(f, buf, offset as u64)?;
+    fn write_all_at(f: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
+    }
 
+    /// Reads the exact number of bytes at a given offset (`pread`)
+    #[cfg(windows)]
+    fn read_exact_at(f: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            match std::os::windows::fs::FileExt::seek_read(f, buf, offset) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let tmp = buf;
+                    buf = &mut tmp[n..];
+                    offset += n as u64;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if !buf.is_empty() {
+            Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Writes a buffer to a file at a given offset (`pwrite`)
+    #[cfg(windows)]
+    fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            match std::os::windows::fs::FileExt::seek_write(f, buf, offset) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 }
-
-pub(crate) struct Buffer {}

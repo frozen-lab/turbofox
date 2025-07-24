@@ -1,4 +1,11 @@
-#![allow(dead_code)]
+pub(crate) const VERSION: u32 = 0;
+pub(crate) const MAGIC: [u8; 4] = *b"TCv0";
+
+pub(crate) const DEFAULT_BUF_FILE_NAME: &str = "dbuf";
+pub(crate) const NEW_BUF_FILE_NAME: &str = "nbuf";
+
+pub(crate) const BUFFER_CAPACITY: usize = 5120;
+const _: () = assert!(BUFFER_CAPACITY % 8 == 0);
 
 /// Custom `Result` type returned by TurboCache and its op's
 pub type TurboResult<T> = Result<T, TurboError>;
