@@ -1,14 +1,21 @@
+use std::path::PathBuf;
+
 pub(crate) const VERSION: u32 = 0;
 pub(crate) const MAGIC: [u8; 4] = *b"TCv0";
 
 pub(crate) const DEFAULT_BUF_FILE_NAME: &str = "dbuf";
 pub(crate) const NEW_BUF_FILE_NAME: &str = "nbuf";
 
-pub(crate) const BUFFER_CAPACITY: usize = 5120;
-const _: () = assert!(BUFFER_CAPACITY % 8 == 0);
+pub(crate) const INITIAL_BUFFER_CAP: usize = 1024 * 5; // 5 KiB
 
 /// Custom `Result` type returned by TurboCache and its op's
 pub type TurboResult<T> = Result<T, TurboError>;
+
+/// Configurations for `TurboCache`
+pub(crate) struct TurboConfig {
+    pub dirpath: PathBuf,
+    pub buf_cap: usize,
+}
 
 #[derive(Debug)]
 pub enum TurboError {
