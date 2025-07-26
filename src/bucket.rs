@@ -84,7 +84,10 @@ impl BucketFile {
 
         let sign_offset = size_of::<Meta>();
         let po_offset = sign_offset + capacity * size_of::<u32>();
-        let mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
+        let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
+
+        // init w/ zeroed values
+        mmap[..].fill(0);
 
         let bucket = Self {
             file,
@@ -143,47 +146,25 @@ impl BucketFile {
         Ok((buf, vbuf))
     }
 
-    fn lookup_set_idx(
-        &self,
-        signs: &[u32],
-        start_idx: &mut usize,
-        capacity: usize,
-        sign: u32,
-    ) -> Option<()> {
+    fn find_slot(&self, signs: &[u32], sign: u32) -> (usize, bool) {
+        let cap = self.capacity;
+        let mut idx = (sign as usize) % cap;
+
         loop {
-            let existing_sign = signs[*start_idx];
-
-            if existing_sign == TOMBSTONE_SIGN || existing_sign == EMPTY_SIGN {
-                return None;
+            match signs[idx] {
+                s if s == sign => {
+                    // overwrite existing key
+                    return (idx, false);
+                }
+                EMPTY_SIGN | TOMBSTONE_SIGN => {
+                    // fresh insert
+                    return (idx, true);
+                }
+                _ => {
+                    // occupied by someone else, keep probing
+                    idx = (idx + 1) % cap;
+                }
             }
-
-            if existing_sign == sign {
-                return Some(());
-            }
-
-            *start_idx = (*start_idx + 1) % capacity;
-        }
-    }
-
-    fn lookup_sign(
-        &self,
-        signs: &[u32],
-        start_idx: &mut usize,
-        capacity: usize,
-        sign: u32,
-    ) -> Option<()> {
-        loop {
-            let existing_sign = signs[*start_idx];
-
-            if existing_sign == EMPTY_SIGN {
-                return None;
-            }
-
-            if existing_sign == sign {
-                return Some(());
-            }
-
-            *start_idx = (*start_idx + 1) % capacity;
         }
     }
 
@@ -235,7 +216,7 @@ impl BucketFile {
         assert!(idx < self.capacity);
 
         unsafe {
-            let ptr = self.mmap.as_mut_ptr().add(self.sign_offset) as *mut PairOffset;
+            let ptr = self.mmap.as_mut_ptr().add(self.po_offset) as *mut PairOffset;
             *ptr.add(idx) = po;
         }
     }
@@ -301,8 +282,8 @@ impl BucketFile {
     const fn get_header_size(capacity: usize) -> usize {
         let mut n = size_of::<Meta>();
 
-        n += size_of::<PairOffset>() * capacity;
         n += size_of::<u32>() * capacity;
+        n += size_of::<PairOffset>() * capacity;
 
         n
     }
@@ -323,13 +304,11 @@ impl Bucket {
     pub fn set(&mut self, pair: KVPair, sign: u32) -> TurboResult<()> {
         let meta = self.file.metadata_mut();
         let signs = self.file.get_signatures();
-        let mut idx = sign as usize % self.capacity;
 
-        // if we do not found pre-existing item
-        if let None = self
-            .file
-            .lookup_set_idx(signs, &mut idx, self.capacity, sign)
-        {
+        // find the exact slot and know if it's a new insert
+        let (idx, was_empty) = self.file.find_slot(signs, sign);
+
+        if was_empty {
             meta.inserts.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -342,43 +321,11 @@ impl Bucket {
     }
 
     pub fn get(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        let signs = self.file.get_signatures();
-        let mut idx = sign as usize % self.capacity;
-
-        loop {
-            if let Some(_) = self.file.lookup_sign(signs, &mut idx, self.capacity, sign) {
-                let pair_offset = self.file.get_pair_offset(idx);
-                let pair = self.file.read_slot(&pair_offset)?;
-
-                if pair.0 == kbuf {
-                    return Ok(Some(pair.1));
-                }
-            } else {
-                return Ok(None);
-            }
-        }
+        Ok(None)
     }
 
     pub fn del(&mut self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        let meta = self.file.metadata_mut();
-        let signs = self.file.get_signatures();
-        let mut idx = sign as usize % self.capacity;
-
-        loop {
-            if let Some(_) = self.file.lookup_sign(signs, &mut idx, self.capacity, sign) {
-                let pair_offset = self.file.get_pair_offset(idx);
-                let pair = self.file.read_slot(&pair_offset)?;
-
-                if pair.0 == kbuf {
-                    meta.inserts.fetch_sub(1, Ordering::SeqCst);
-                    self.file.set_signature(idx, TOMBSTONE_SIGN);
-
-                    return Ok(Some(pair.1));
-                }
-            } else {
-                return Ok(None);
-            }
-        }
+        Ok(None)
     }
 
     pub fn iter(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
@@ -397,5 +344,32 @@ impl Bucket {
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::TurboHasher;
+
+    #[test]
+    fn test_set_and_get() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("bucket.dat");
+
+        let mut bucket = Bucket::new(&path, 16).unwrap();
+
+        let key = b"hello".to_vec();
+        let val = b"world".to_vec();
+        let sig = TurboHasher::new(&key).0;
+
+        // initially missing
+        assert_eq!(bucket.get(key.clone(), sig).unwrap(), None);
+
+        // insert and retrieve
+        bucket.set((key.clone(), val.clone()), sig).unwrap();
+        let got = bucket.get(key.clone(), sig).unwrap();
+
+        assert_eq!(got, Some(val.clone()));
     }
 }
