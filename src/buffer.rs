@@ -1,19 +1,27 @@
 #![allow(dead_code)]
 
 use crate::{
-    core::{TurboConfig, TurboResult, DEFAULT_BUF_FILE_NAME, MAGIC, VERSION},
+    core::{KVPair, TurboResult, MAGIC, VERSION},
     TurboError,
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
     mem::size_of,
+    path::PathBuf,
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 #[repr(C)]
 struct Meta {
     version: u32,
     magic: [u8; 4],
+}
+
+#[repr(C)]
+struct Stats {
+    n_pairs: AtomicU32,
+    file_offset: AtomicU32,
 }
 
 #[repr(C)]
@@ -30,31 +38,31 @@ struct PageAligned<T>(T);
 #[repr(C)]
 struct Header {
     meta: Meta,
+    stats: Stats,
     signuatures: PageAligned<Box<[u32]>>,
     offsets: PageAligned<Box<[PairOffset]>>,
 }
 
-struct BufFile {
+struct BucketFile {
     mmap: MmapMut,
     file: File,
     header_size: usize,
 }
 
-impl BufFile {
-    fn open(config: &TurboConfig) -> TurboResult<Self> {
-        let file_path = config.dirpath.join(DEFAULT_BUF_FILE_NAME);
+impl BucketFile {
+    fn open(bucket_path: &PathBuf, capacity: usize) -> TurboResult<Self> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(file_path)?;
+            .open(bucket_path)?;
 
         let file_meta = file.metadata()?;
-        let header_size = Self::get_header_size(config.buf_cap);
+        let header_size = Self::get_header_size(capacity);
 
         if file_meta.len() < header_size as u64 {
-            return Self::create(file, header_size);
+            return Err(TurboError::InvalidFile);
         }
 
         let mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
@@ -75,7 +83,6 @@ impl BufFile {
 
     /// Create a new buffer w/ default state
     fn create(file: File, header_size: usize) -> TurboResult<Self> {
-        file.set_len(0)?;
         file.set_len(header_size as u64)?;
 
         let mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
@@ -92,6 +99,46 @@ impl BufFile {
         head.meta.version = VERSION;
 
         Ok(buffer)
+    }
+
+    /// Write a [KVPair] to the bucket and get [PairOffset]
+    fn write_slot(&self, pair: KVPair) -> TurboResult<PairOffset> {
+        let klen = pair.0.len();
+        let vlen = pair.1.len();
+        let blen = klen + vlen;
+
+        let mut buf = vec![0u8; blen];
+
+        buf[..klen].copy_from_slice(&pair.0);
+        buf[klen..].copy_from_slice(&pair.1);
+
+        let offset = self
+            .header()
+            .stats
+            .file_offset
+            .fetch_add(blen as u32, Ordering::SeqCst);
+
+        Self::write_all_at(&self.file, &buf, offset as u64)?;
+
+        Ok(PairOffset {
+            klen: klen as u16,
+            vlen: vlen as u16,
+            offset,
+        })
+    }
+
+    /// Read a [KVPair] from a given [PairOffset]
+    fn read_slot(&self, pair: &PairOffset) -> TurboResult<KVPair> {
+        let klen = pair.klen as usize;
+        let vlen = pair.vlen as usize;
+        let mut buf = vec![0u8; klen + vlen];
+
+        Self::read_exact_at(&self.file, &mut buf, pair.offset as u64)?;
+
+        let vbuf = buf[klen..(klen + vlen)].to_owned();
+        buf.truncate(klen);
+
+        Ok((buf, vbuf))
     }
 
     /// Returns an immutable reference to the header
@@ -157,14 +204,15 @@ impl BufFile {
 
     /// Calculate the size of header based on the capacity of the Buffer
     ///
-    /// ```txt
-    /// size = sizeof(META) + (sizeof(PairOffset) * N) + (sizeof(u32) * N)
+    /// > Size is calculated as below,
     ///
-    /// where,
+    /// SIZE = sizeof(META) + sizeof(Stats) + (sizeof(PairOffset) * N) + (sizeof(u32) * N)
+    ///
+    /// Where,
     ///   N = Capacity of Buffer
     /// ```
     const fn get_header_size(capacity: usize) -> usize {
-        let mut n = size_of::<Meta>();
+        let mut n = size_of::<Meta>() + size_of::<Stats>();
 
         n += size_of::<PairOffset>() * capacity;
         n += 4 * capacity;

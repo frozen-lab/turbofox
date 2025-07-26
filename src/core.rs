@@ -1,12 +1,18 @@
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 pub(crate) const VERSION: u32 = 0;
 pub(crate) const MAGIC: [u8; 4] = *b"TCv0";
 
-pub(crate) const DEFAULT_BUF_FILE_NAME: &str = "dbuf";
-pub(crate) const NEW_BUF_FILE_NAME: &str = "nbuf";
+pub(crate) const DEFAULT_BUCKET_NAME: &str = "default_bucket";
+pub(crate) const STAGING_BUCKET_NAME: &str = "staging_bucket";
+pub(crate) const TC_INDEX_NAME: &str = "tc_index";
 
 pub(crate) const INITIAL_BUFFER_CAP: usize = 1024 * 5; // 5 KiB
+
+/// A custom type for Key-Value pair object
+pub(crate) type KVPair = (Vec<u8>, Vec<u8>);
 
 /// Custom `Result` type returned by TurboCache and its op's
 pub type TurboResult<T> = Result<T, TurboError>;
