@@ -5,6 +5,7 @@ use crate::{
     hash::{EMPTY_SIGN, TOMBSTONE_SIGN},
     TurboError,
 };
+use core::slice;
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
@@ -17,11 +18,7 @@ use std::{
 struct Meta {
     version: u32,
     magic: [u8; 4],
-}
-
-#[repr(C)]
-struct Stats {
-    n_pairs: AtomicU32,
+    inserts: AtomicU32,
     file_offset: AtomicU32,
 }
 
@@ -33,55 +30,13 @@ struct PairOffset {
     vlen: u16,
 }
 
-#[repr(C, align(4096))]
-struct PageAligned<T>(T);
-
-#[repr(C)]
-struct Header {
-    meta: Meta,
-    stats: Stats,
-    signuatures: PageAligned<Box<[u32]>>,
-    offsets: PageAligned<Box<[PairOffset]>>,
-}
-
-impl Header {
-    fn lookup_set(&self, start_idx: &mut usize, capacity: usize, sign: u32) -> Option<()> {
-        loop {
-            let existing_sign = self.signuatures.0[*start_idx];
-
-            if existing_sign == TOMBSTONE_SIGN || existing_sign == EMPTY_SIGN {
-                return None;
-            }
-
-            if existing_sign == sign {
-                return Some(());
-            }
-
-            *start_idx = (*start_idx + 1) % capacity;
-        }
-    }
-
-    fn lookup_get(&self, start_idx: &mut usize, capacity: usize, sign: u32) -> Option<()> {
-        loop {
-            let existing_sign = self.signuatures.0[*start_idx];
-
-            if existing_sign == EMPTY_SIGN {
-                return None;
-            }
-
-            if existing_sign == sign {
-                return Some(());
-            }
-
-            *start_idx = (*start_idx + 1) % capacity;
-        }
-    }
-}
-
 struct BucketFile {
     mmap: MmapMut,
     file: File,
+    capacity: usize,
     header_size: usize,
+    sign_offset: usize,
+    po_offset: usize,
 }
 
 impl BucketFile {
@@ -97,43 +52,56 @@ impl BucketFile {
         let header_size = Self::get_header_size(capacity);
 
         if file_meta.len() < header_size as u64 {
-            return Err(TurboError::InvalidFile);
+            return Self::create(file, header_size, capacity);
         }
 
+        let sign_offset = size_of::<Meta>();
+        let po_offset = sign_offset + capacity * size_of::<u32>();
         let mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
-        let buffer = Self {
+
+        let bucket = Self {
             file,
             mmap,
+            capacity,
             header_size,
+            sign_offset,
+            po_offset,
         };
-        let head = buffer.header();
 
-        // if file is invalid (invalid meta, or else)
-        if head.meta.magic != MAGIC || head.meta.version != VERSION {
+        let meta = bucket.metadata();
+
+        // check if file is invalid (invalid magic, or else)
+        if meta.magic != MAGIC || meta.version != VERSION {
             return Err(TurboError::InvalidFile);
         }
 
-        Ok(buffer)
+        Ok(bucket)
     }
 
     /// Create a new buffer w/ default state
-    fn create(file: File, header_size: usize) -> TurboResult<Self> {
+    fn create(file: File, header_size: usize, capacity: usize) -> TurboResult<Self> {
         file.set_len(header_size as u64)?;
 
+        let sign_offset = size_of::<Meta>();
+        let po_offset = sign_offset + capacity * size_of::<u32>();
         let mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
-        let buffer = Self {
+
+        let bucket = Self {
             file,
             mmap,
+            capacity,
             header_size,
+            sign_offset,
+            po_offset,
         };
 
         // set metadata
-        let head = buffer.header_mut();
+        let meta = bucket.metadata_mut();
 
-        head.meta.magic = MAGIC;
-        head.meta.version = VERSION;
+        meta.magic = MAGIC;
+        meta.version = VERSION;
 
-        Ok(buffer)
+        Ok(bucket)
     }
 
     /// Write a [KVPair] to the bucket and get [PairOffset]
@@ -148,8 +116,7 @@ impl BucketFile {
         buf[klen..].copy_from_slice(&pair.1);
 
         let offset = self
-            .header()
-            .stats
+            .metadata()
             .file_offset
             .fetch_add(blen as u32, Ordering::SeqCst);
 
@@ -176,16 +143,101 @@ impl BucketFile {
         Ok((buf, vbuf))
     }
 
-    /// Returns an immutable reference to the header
-    #[inline(always)]
-    fn header(&self) -> &Header {
-        unsafe { &*(self.mmap.as_ptr() as *const Header) }
+    fn lookup_set_idx(
+        &self,
+        signs: &[u32],
+        start_idx: &mut usize,
+        capacity: usize,
+        sign: u32,
+    ) -> Option<()> {
+        loop {
+            let existing_sign = signs[*start_idx];
+
+            if existing_sign == TOMBSTONE_SIGN || existing_sign == EMPTY_SIGN {
+                return None;
+            }
+
+            if existing_sign == sign {
+                return Some(());
+            }
+
+            *start_idx = (*start_idx + 1) % capacity;
+        }
     }
 
-    /// Returns a mutable reference to the header
+    fn lookup_sign(
+        &self,
+        signs: &[u32],
+        start_idx: &mut usize,
+        capacity: usize,
+        sign: u32,
+    ) -> Option<()> {
+        loop {
+            let existing_sign = signs[*start_idx];
+
+            if existing_sign == EMPTY_SIGN {
+                return None;
+            }
+
+            if existing_sign == sign {
+                return Some(());
+            }
+
+            *start_idx = (*start_idx + 1) % capacity;
+        }
+    }
+
+    /// Returns an immutable reference to [Metadata]
     #[inline(always)]
-    fn header_mut(&self) -> &mut Header {
-        unsafe { &mut *(self.mmap.as_ptr() as *mut Header) }
+    fn metadata(&self) -> &Meta {
+        unsafe { &*(self.mmap.as_ptr() as *const Meta) }
+    }
+
+    /// Returns a mutable reference to [Metadata]
+    #[inline(always)]
+    fn metadata_mut(&self) -> &mut Meta {
+        unsafe { &mut *(self.mmap.as_ptr() as *mut Meta) }
+    }
+
+    /// Returns an immutable reference to signatures slice
+    #[inline(always)]
+    fn get_signatures(&self) -> &[u32] {
+        unsafe {
+            let ptr = self.mmap.as_ptr().add(self.sign_offset) as *const u32;
+            slice::from_raw_parts(ptr, self.capacity)
+        }
+    }
+
+    /// Write a new signature into slot `idx`
+    #[inline]
+    pub fn set_signature(&mut self, idx: usize, sign: u32) {
+        assert!(idx < self.capacity);
+
+        unsafe {
+            let ptr = self.mmap.as_mut_ptr().add(self.sign_offset) as *mut u32;
+            *ptr.add(idx) = sign;
+        }
+    }
+
+    /// Read a single [PairOffset] by index, directly from the mmap
+    #[inline(always)]
+    pub fn get_pair_offset(&self, idx: usize) -> PairOffset {
+        debug_assert!(idx < self.capacity);
+        unsafe {
+            let ptr = self.mmap.as_ptr().add(self.po_offset) as *const PairOffset;
+            *ptr.add(idx)
+        }
+    }
+
+    /// Write a new item into [PairOffset] slice
+    #[inline]
+    pub fn set_pair_offset(&mut self, idx: usize, po: PairOffset) {
+        assert!(idx < self.capacity);
+
+        unsafe {
+            let ptr = self.mmap.as_mut_ptr().add(self.sign_offset) as *mut PairOffset;
+            *ptr.add(idx) = po;
+        }
     }
 
     /// Reads the exact number of bytes at a given offset (`pread`)
@@ -247,10 +299,10 @@ impl BucketFile {
     ///   N = Capacity of Buffer
     /// ```
     const fn get_header_size(capacity: usize) -> usize {
-        let mut n = size_of::<Meta>() + size_of::<Stats>();
+        let mut n = size_of::<Meta>();
 
         n += size_of::<PairOffset>() * capacity;
-        n += 4 * capacity;
+        n += size_of::<u32>() * capacity;
 
         n
     }
@@ -268,31 +320,34 @@ impl Bucket {
         Ok(Self { file, capacity })
     }
 
-    pub fn set(&self, pair: KVPair, sign: u32) -> TurboResult<()> {
-        let header = self.file.header_mut();
+    pub fn set(&mut self, pair: KVPair, sign: u32) -> TurboResult<()> {
+        let meta = self.file.metadata_mut();
+        let signs = self.file.get_signatures();
         let mut idx = sign as usize % self.capacity;
 
-        let is_update = header.lookup_set(&mut idx, self.capacity, sign).is_some();
-
-        if !is_update {
-            header.stats.n_pairs.fetch_add(1, Ordering::SeqCst);
+        // if we do not found pre-existing item
+        if let None = self
+            .file
+            .lookup_set_idx(signs, &mut idx, self.capacity, sign)
+        {
+            meta.inserts.fetch_add(1, Ordering::SeqCst);
         }
 
-        let p_offset = self.file.write_slot(pair)?;
+        let po = self.file.write_slot(pair)?;
 
-        header.signuatures.0[idx] = sign;
-        header.offsets.0[idx] = p_offset;
+        self.file.set_signature(idx, sign);
+        self.file.set_pair_offset(idx, po);
 
         Ok(())
     }
 
     pub fn get(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        let header = self.file.header();
+        let signs = self.file.get_signatures();
         let mut idx = sign as usize % self.capacity;
 
         loop {
-            if let Some(_) = header.lookup_get(&mut idx, self.capacity, sign) {
-                let pair_offset = header.offsets.0[idx];
+            if let Some(_) = self.file.lookup_sign(signs, &mut idx, self.capacity, sign) {
+                let pair_offset = self.file.get_pair_offset(idx);
                 let pair = self.file.read_slot(&pair_offset)?;
 
                 if pair.0 == kbuf {
@@ -304,18 +359,19 @@ impl Bucket {
         }
     }
 
-    pub fn del(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        let header = self.file.header_mut();
+    pub fn del(&mut self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
+        let meta = self.file.metadata_mut();
+        let signs = self.file.get_signatures();
         let mut idx = sign as usize % self.capacity;
 
         loop {
-            if let Some(_) = header.lookup_get(&mut idx, self.capacity, sign) {
-                let pair_offset = header.offsets.0[idx];
+            if let Some(_) = self.file.lookup_sign(signs, &mut idx, self.capacity, sign) {
+                let pair_offset = self.file.get_pair_offset(idx);
                 let pair = self.file.read_slot(&pair_offset)?;
 
                 if pair.0 == kbuf {
-                    header.signuatures.0[idx] = TOMBSTONE_SIGN;
-                    header.stats.n_pairs.fetch_sub(1, Ordering::SeqCst);
+                    meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                    self.file.set_signature(idx, TOMBSTONE_SIGN);
 
                     return Ok(Some(pair.1));
                 }
@@ -326,16 +382,14 @@ impl Bucket {
     }
 
     pub fn iter(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
-        let header = self.file.header();
+        let signs = self.file.get_signatures();
 
         while *start < self.capacity {
             let idx = *start;
             *start += 1;
 
-            let sign = header.signuatures.0[idx];
-
-            if sign != EMPTY_SIGN && sign != TOMBSTONE_SIGN {
-                let p_offset = header.offsets.0[idx];
+            if signs[idx] != EMPTY_SIGN && signs[idx] != TOMBSTONE_SIGN {
+                let p_offset = self.file.get_pair_offset(idx);
                 let pair = self.file.read_slot(&p_offset)?;
 
                 return Ok(Some(pair));

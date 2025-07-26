@@ -11,3 +11,6 @@ keywords = ["key-value", "database", "persistent", "store", "db"]
 memmap2 = "0.9.7"
 twox-hash = {version = "2.1.1", features = ["xxhash32"]}
 
+[dev-dependencies]
+tempfile = "3.20.0"
+

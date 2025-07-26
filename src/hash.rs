@@ -14,7 +14,7 @@ const DEFAULT_SEED: u32 = 0;
 /// Magic constant to substitute for reserved signatures
 const REPLACEMENT: u32 = 0x6052_c9b7;
 
-pub(crate) struct TurboHasher(u32);
+pub(crate) struct TurboHasher(pub u32);
 
 impl TurboHasher {
     pub fn new(buf: &[u8]) -> Self {
