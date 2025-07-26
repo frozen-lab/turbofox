@@ -1,4 +1,4 @@
-mod buffer;
+mod bucket;
 mod core;
 mod hash;
 

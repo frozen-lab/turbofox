@@ -2,6 +2,7 @@
 
 use crate::{
     core::{KVPair, TurboResult, MAGIC, VERSION},
+    hash::{EMPTY_SIGN, TOMBSTONE_SIGN},
     TurboError,
 };
 use memmap2::{MmapMut, MmapOptions};
@@ -43,6 +44,40 @@ struct Header {
     offsets: PageAligned<Box<[PairOffset]>>,
 }
 
+impl Header {
+    fn lookup_set(&self, start_idx: &mut usize, capacity: usize, sign: u32) -> Option<()> {
+        loop {
+            let existing_sign = self.signuatures.0[*start_idx];
+
+            if existing_sign == TOMBSTONE_SIGN || existing_sign == EMPTY_SIGN {
+                return None;
+            }
+
+            if existing_sign == sign {
+                return Some(());
+            }
+
+            *start_idx = (*start_idx + 1) % capacity;
+        }
+    }
+
+    fn lookup_get(&self, start_idx: &mut usize, capacity: usize, sign: u32) -> Option<()> {
+        loop {
+            let existing_sign = self.signuatures.0[*start_idx];
+
+            if existing_sign == EMPTY_SIGN {
+                return None;
+            }
+
+            if existing_sign == sign {
+                return Some(());
+            }
+
+            *start_idx = (*start_idx + 1) % capacity;
+        }
+    }
+}
+
 struct BucketFile {
     mmap: MmapMut,
     file: File,
@@ -74,7 +109,7 @@ impl BucketFile {
         let head = buffer.header();
 
         // if file is invalid (invalid meta, or else)
-        if head.meta.magic != MAGIC && head.meta.version != VERSION {
+        if head.meta.magic != MAGIC || head.meta.version != VERSION {
             return Err(TurboError::InvalidFile);
         }
 
@@ -218,5 +253,95 @@ impl BucketFile {
         n += 4 * capacity;
 
         n
+    }
+}
+
+pub struct Bucket {
+    file: BucketFile,
+    capacity: usize,
+}
+
+impl Bucket {
+    pub fn new(path: &PathBuf, capacity: usize) -> TurboResult<Self> {
+        let file = BucketFile::open(path, capacity)?;
+
+        Ok(Self { file, capacity })
+    }
+
+    pub fn set(&self, pair: KVPair, sign: u32) -> TurboResult<()> {
+        let header = self.file.header_mut();
+        let mut idx = sign as usize % self.capacity;
+
+        let is_update = header.lookup_set(&mut idx, self.capacity, sign).is_some();
+
+        if !is_update {
+            header.stats.n_pairs.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let p_offset = self.file.write_slot(pair)?;
+
+        header.signuatures.0[idx] = sign;
+        header.offsets.0[idx] = p_offset;
+
+        Ok(())
+    }
+
+    pub fn get(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
+        let header = self.file.header();
+        let mut idx = sign as usize % self.capacity;
+
+        loop {
+            if let Some(_) = header.lookup_get(&mut idx, self.capacity, sign) {
+                let pair_offset = header.offsets.0[idx];
+                let pair = self.file.read_slot(&pair_offset)?;
+
+                if pair.0 == kbuf {
+                    return Ok(Some(pair.1));
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+
+    pub fn del(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
+        let header = self.file.header_mut();
+        let mut idx = sign as usize % self.capacity;
+
+        loop {
+            if let Some(_) = header.lookup_get(&mut idx, self.capacity, sign) {
+                let pair_offset = header.offsets.0[idx];
+                let pair = self.file.read_slot(&pair_offset)?;
+
+                if pair.0 == kbuf {
+                    header.signuatures.0[idx] = TOMBSTONE_SIGN;
+                    header.stats.n_pairs.fetch_sub(1, Ordering::SeqCst);
+
+                    return Ok(Some(pair.1));
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+
+    pub fn iter(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
+        let header = self.file.header();
+
+        while *start < self.capacity {
+            let idx = *start;
+            *start += 1;
+
+            let sign = header.signuatures.0[idx];
+
+            if sign != EMPTY_SIGN && sign != TOMBSTONE_SIGN {
+                let p_offset = header.offsets.0[idx];
+                let pair = self.file.read_slot(&p_offset)?;
+
+                return Ok(Some(pair));
+            }
+        }
+
+        Ok(None)
     }
 }

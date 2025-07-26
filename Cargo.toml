@@ -9,5 +9,5 @@ keywords = ["key-value", "database", "persistent", "store", "db"]
 
 [dependencies]
 memmap2 = "0.9.7"
-twox-hash = {version = "2.1.1", features = ["xxhash3_64"]}
+twox-hash = {version = "2.1.1", features = ["xxhash32"]}
 
