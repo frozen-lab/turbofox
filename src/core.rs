@@ -36,6 +36,8 @@ pub enum TurboError {
 
     /// Invalid buffer or shard file
     InvalidFile,
+
+    BucketFull,
 }
 
 impl From<std::io::Error> for TurboError {
@@ -53,6 +55,7 @@ impl std::fmt::Display for TurboError {
             TurboError::KeyTooLarge(size) => write!(f, "Key size ({}) is too large", size),
             TurboError::ValueTooLarge(size) => write!(f, "Value size ({}) is too large", size),
             TurboError::InvalidFile => write!(f, "Invalid shard/buffer file"),
+            TurboError::BucketFull => write!(f, "Bucket is full"),
         }
     }
 }
