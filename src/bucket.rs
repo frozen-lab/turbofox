@@ -146,28 +146,37 @@ impl BucketFile {
         Ok((buf, vbuf))
     }
 
-    fn find_slot(&self, signs: &[u32], sign: u32) -> (usize, bool) {
-        let cap = self.capacity;
-        let mut idx = (sign as usize) % cap;
-
+    fn lookup_insert_slot(&self, start_idx: &mut usize, signs: &[u32], sign: u32) -> bool {
         loop {
-            match signs[idx] {
+            match signs[*start_idx] {
                 s if s == sign => {
-                    // overwrite existing key
-                    return (idx, false);
+                    return false;
                 }
                 EMPTY_SIGN | TOMBSTONE_SIGN => {
-                    // fresh insert
-                    return (idx, true);
+                    return true;
                 }
                 _ => {
-                    // occupied by someone else, keep probing
-                    idx = (idx + 1) % cap;
+                    *start_idx = (*start_idx + 1) % self.capacity;
                 }
             }
         }
     }
 
+    fn lookup_slot(&self, start_idx: &mut usize, signs: &[u32], sign: u32) -> bool {
+        loop {
+            match signs[*start_idx] {
+                s if s == sign => {
+                    return false;
+                }
+                EMPTY_SIGN => {
+                    return true;
+                }
+                _ => {
+                    *start_idx = (*start_idx + 1) % self.capacity;
+                }
+            }
+        }
+    }
     /// Returns an immutable reference to [Metadata]
     #[inline(always)]
     fn metadata(&self) -> &Meta {
@@ -305,8 +314,10 @@ impl Bucket {
         let meta = self.file.metadata_mut();
         let signs = self.file.get_signatures();
 
+        let mut start_idx = sign as usize % self.capacity;
+
         // find the exact slot and know if it's a new insert
-        let (idx, was_empty) = self.file.find_slot(signs, sign);
+        let was_empty = self.file.lookup_insert_slot(&mut start_idx, signs, sign);
 
         if was_empty {
             meta.inserts.fetch_add(1, Ordering::SeqCst);
@@ -314,18 +325,56 @@ impl Bucket {
 
         let po = self.file.write_slot(pair)?;
 
-        self.file.set_signature(idx, sign);
-        self.file.set_pair_offset(idx, po);
+        self.file.set_signature(start_idx, sign);
+        self.file.set_pair_offset(start_idx, po);
 
         Ok(())
     }
 
     pub fn get(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        Ok(None)
+        let signs = self.file.get_signatures();
+
+        let mut start_idx = sign as usize % self.capacity;
+
+        loop {
+            let was_empty = self.file.lookup_slot(&mut start_idx, signs, sign);
+
+            if was_empty {
+                return Ok(None);
+            }
+
+            let po = self.file.get_pair_offset(start_idx);
+            let (k, v) = self.file.read_slot(&po)?;
+
+            if kbuf == k {
+                return Ok(Some(v));
+            }
+        }
     }
 
     pub fn del(&mut self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        Ok(None)
+        let meta = self.file.metadata_mut();
+        let signs = self.file.get_signatures();
+
+        let mut start_idx = sign as usize % self.capacity;
+
+        loop {
+            let was_empty = self.file.lookup_slot(&mut start_idx, signs, sign);
+
+            if was_empty {
+                return Ok(None);
+            }
+
+            let po = self.file.get_pair_offset(start_idx);
+            let (k, v) = self.file.read_slot(&po)?;
+
+            if kbuf == k {
+                meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                self.file.set_signature(start_idx, TOMBSTONE_SIGN);
+
+                return Ok(Some(v));
+            }
+        }
     }
 
     pub fn iter(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
