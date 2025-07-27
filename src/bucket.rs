@@ -10,7 +10,7 @@ use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
     mem::size_of,
-    path::PathBuf,
+    path::Path,
     sync::atomic::{AtomicU32, Ordering},
 };
 
@@ -41,7 +41,7 @@ struct BucketFile {
 }
 
 impl BucketFile {
-    fn open(bucket_path: &PathBuf, capacity: usize) -> TurboResult<Self> {
+    fn open<P: AsRef<Path>>(bucket_path: P, capacity: usize) -> TurboResult<Self> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -309,7 +309,7 @@ pub struct Bucket {
 }
 
 impl Bucket {
-    pub fn new(path: &PathBuf, capacity: usize) -> TurboResult<Self> {
+    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<Self> {
         let file = BucketFile::open(path, capacity)?;
 
         Ok(Self { file, capacity })
@@ -406,7 +406,7 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn get_insertes(&self) -> usize {
+    pub fn get_inserts(&self) -> usize {
         self.file.get_inserted()
     }
 }

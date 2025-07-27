@@ -9,8 +9,6 @@ pub(crate) const BUCKET_NAME: &str = "default_bucket";
 pub(crate) const STAGING_BUCKET_NAME: &str = "staging_bucket";
 pub(crate) const INDEX_NAME: &str = "tc_index";
 
-pub(crate) const INITIAL_BUFFER_CAP: usize = 1024 * 5; // 5 KiB
-
 /// A custom type for Key-Value pair object
 pub(crate) type KVPair = (Vec<u8>, Vec<u8>);
 
