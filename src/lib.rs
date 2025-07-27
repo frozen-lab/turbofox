@@ -1,6 +1,7 @@
 mod bucket;
 mod core;
 mod hash;
+mod router;
 
 pub use core::TurboError;
 

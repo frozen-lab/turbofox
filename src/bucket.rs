@@ -176,13 +176,13 @@ impl BucketFile {
         Err(TurboError::BucketFull)
     }
 
-    /// Returns an immutable reference to [Metadata]
+    /// Returns an immutable reference to [Meta]
     #[inline(always)]
     fn metadata(&self) -> &Meta {
         unsafe { &*(self.mmap.as_ptr() as *const Meta) }
     }
 
-    /// Returns a mutable reference to [Metadata]
+    /// Returns a mutable reference to [Meta]
     #[inline(always)]
     fn metadata_mut(&self) -> &mut Meta {
         unsafe { &mut *(self.mmap.as_ptr() as *mut Meta) }
@@ -199,7 +199,7 @@ impl BucketFile {
 
     /// Write a new signature into slot `idx`
     #[inline]
-    pub fn set_signature(&mut self, idx: usize, sign: u32) {
+    fn set_signature(&mut self, idx: usize, sign: u32) {
         assert!(idx < self.capacity);
 
         unsafe {
@@ -208,9 +208,15 @@ impl BucketFile {
         }
     }
 
+    fn get_inserted(&self) -> usize {
+        self.metadata()
+            .inserts
+            .load(std::sync::atomic::Ordering::SeqCst) as usize
+    }
+
     /// Read a single [PairOffset] by index, directly from the mmap
     #[inline(always)]
-    pub fn get_pair_offset(&self, idx: usize) -> PairOffset {
+    fn get_pair_offset(&self, idx: usize) -> PairOffset {
         debug_assert!(idx < self.capacity);
         unsafe {
             let ptr = self.mmap.as_ptr().add(self.po_offset) as *const PairOffset;
@@ -220,7 +226,7 @@ impl BucketFile {
 
     /// Write a new item into [PairOffset] slice
     #[inline]
-    pub fn set_pair_offset(&mut self, idx: usize, po: PairOffset) {
+    fn set_pair_offset(&mut self, idx: usize, po: PairOffset) {
         assert!(idx < self.capacity);
 
         unsafe {
@@ -398,6 +404,10 @@ impl Bucket {
         }
 
         Ok(None)
+    }
+
+    pub fn get_insertes(&self) -> usize {
+        self.file.get_inserted()
     }
 }
 
