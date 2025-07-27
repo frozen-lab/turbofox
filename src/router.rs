@@ -225,8 +225,7 @@ impl<P: AsRef<Path>> Router<P> {
             self.index.update_staged_entries(staged_items);
 
             if self.bucket.get_inserts() == 0 {
-                // need to swap the buckets, del the bucket and assign staging
-                // bucket to it, after a rename
+                self.swap_with_staging()?;
             }
 
             return Ok(());
@@ -245,6 +244,7 @@ impl<P: AsRef<Path>> Router<P> {
             let bucket = Bucket::new(&bucket_path, new_cap)?;
 
             self.staging_bucket = Some(bucket);
+            self.index.set_staging_capacity(new_cap);
         }
 
         Ok(())
@@ -282,10 +282,40 @@ impl<P: AsRef<Path>> Router<P> {
         let val = self.bucket.del(kbuf, sign);
 
         if self.bucket.get_inserts() == 0 {
-            // need to swap the buckets, del the bucket and assign staging
-            // bucket to it, after a rename
+            self.swap_with_staging()?;
         }
 
         return val;
+    }
+
+    fn swap_with_staging(&mut self) -> TurboResult<()> {
+        let bucket_path = self.dirpath.as_ref().join(BUCKET_NAME);
+        let staging_path = self.dirpath.as_ref().join(STAGING_BUCKET_NAME);
+
+        let staging_bucket = self
+            .staging_bucket
+            .take()
+            .expect("swap_in_staging called with no staging_bucket");
+
+        let old_bucket = std::mem::replace(&mut self.bucket, staging_bucket);
+        drop(old_bucket);
+
+        std::fs::remove_file(&bucket_path)?;
+        std::fs::rename(&staging_path, &bucket_path)?;
+
+        let new_cap = self.index.get_staging_capacity();
+        let new_bucket = Bucket::new(&bucket_path, new_cap)?;
+        let meta = self.index.metadata_mut();
+
+        self.bucket = new_bucket;
+
+        meta.staged_entries = AtomicUsize::new(0);
+        meta.capacity = AtomicUsize::new(new_cap);
+        meta.staging_capacity = AtomicUsize::new(0);
+        meta.threshold = AtomicUsize::new(Index::calc_threshold(new_cap));
+
+        self.index.mmap.flush()?;
+
+        Ok(())
     }
 }
