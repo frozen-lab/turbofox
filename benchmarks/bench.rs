@@ -6,87 +6,73 @@ use std::time::Duration;
 use tempfile::TempDir;
 use turbocache::TurboCache;
 
-const N_KEYS: usize = 1_000;
-const INIT_CAP: usize = 128 * 5; // 5 Kib
-const KEY_LEN: usize = 16;
-const VAL_LEN: usize = 32;
+const SAMPLE: usize = 1_000;
+const INIT_CAP: usize = 1024 * 5; // 5 Kib
+const KEY_LEN: usize = 128;
+const VAL_LEN: usize = 256;
 const SEED: u64 = 42;
 
-fn gen_dataset() -> Vec<(Vec<u8>, Vec<u8>)> {
+fn gen_pair() -> (Vec<u8>, Vec<u8>) {
     let mut rng = StdRng::seed_from_u64(SEED);
 
-    (0..N_KEYS)
-        .map(|_| {
-            let key = (0..KEY_LEN).map(|_| rng.random()).collect();
-            let val = (0..VAL_LEN).map(|_| rng.random()).collect();
+    let key = (0..KEY_LEN).map(|_| rng.random()).collect();
+    let val = (0..VAL_LEN).map(|_| rng.random()).collect();
 
-            (key, val)
-        })
-        .collect()
+    (key, val)
 }
 
-fn bench_set(c: &mut Criterion) {
+fn set(c: &mut Criterion) {
     let mut group = c.benchmark_group("turbocache_set");
-    group.throughput(Throughput::Elements(N_KEYS as u64));
+    group.throughput(Throughput::Elements(1));
 
-    let data = gen_dataset();
+    let (k, v) = gen_pair();
     let tmp = TempDir::new().expect("tmp");
 
     let mut cache = TurboCache::new(tmp.path().to_path_buf(), INIT_CAP).unwrap();
 
-    group.bench_function("set_all", |b| {
+    group.bench_function("set", |b| {
         b.iter(|| {
-            for (k, v) in data.iter() {
-                cache
-                    .set(black_box(k.clone()), black_box(v.clone()))
-                    .unwrap();
-            }
+            cache
+                .set(black_box(k.clone()), black_box(v.clone()))
+                .unwrap();
         })
     });
 
     group.finish();
 }
 
-fn bench_get(c: &mut Criterion) {
+fn get(c: &mut Criterion) {
     let mut group = c.benchmark_group("turbocache_get");
-    group.throughput(Throughput::Elements(N_KEYS as u64));
+    group.throughput(Throughput::Elements(1));
 
-    let data = gen_dataset();
+    let (k, v) = gen_pair();
     let tmp = TempDir::new().expect("tmp");
     let mut cache = TurboCache::new(tmp.path().to_path_buf(), INIT_CAP).unwrap();
 
-    for (k, v) in &data {
-        cache.set(k.clone(), v.clone()).unwrap();
-    }
+    cache.set(k.clone(), v.clone()).unwrap();
 
-    group.bench_function("get_all", |b| {
+    group.bench_function("get", |b| {
         b.iter(|| {
-            for (k, _) in &data {
-                let _ = cache.get(black_box(k.clone())).unwrap();
-            }
+            let _ = cache.get(black_box(k.clone())).unwrap();
         })
     });
 
     group.finish();
 }
 
-fn bench_remove(c: &mut Criterion) {
+fn del(c: &mut Criterion) {
     let mut group = c.benchmark_group("turbocache_remove");
-    group.throughput(Throughput::Elements(N_KEYS as u64));
+    group.throughput(Throughput::Elements(1));
 
-    let data = gen_dataset();
+    let (k, v) = gen_pair();
     let tmp = TempDir::new().expect("tmp");
     let mut cache = TurboCache::new(tmp.path().to_path_buf(), INIT_CAP).unwrap();
 
-    for (k, v) in &data {
-        cache.set(k.clone(), v.clone()).unwrap();
-    }
+    cache.set(k.clone(), v.clone()).unwrap();
 
-    group.bench_function("remove_all", |b| {
+    group.bench_function("del", |b| {
         b.iter(|| {
-            for (k, _) in &data {
-                let _ = cache.del(black_box(k.clone())).unwrap();
-            }
+            let _ = cache.del(black_box(k.clone())).unwrap();
         })
     });
 
@@ -96,8 +82,9 @@ fn bench_remove(c: &mut Criterion) {
 fn configured_criterion() -> Criterion {
     Criterion::default()
         .configure_from_args()
-        .sample_size(1000)
+        .sample_size(SAMPLE)
         .measurement_time(Duration::from_secs(15))
+        .warm_up_time(Duration::from_secs(5))
         .noise_threshold(0.05)
         .with_plots()
 }
@@ -105,6 +92,6 @@ fn configured_criterion() -> Criterion {
 criterion_group! {
     name = benches;
     config = configured_criterion();
-    targets = bench_set, bench_get, bench_remove
+    targets = set, get, del
 }
 criterion_main!(benches);

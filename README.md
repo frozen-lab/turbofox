@@ -1,6 +1,6 @@
 # TurboCache
 
-A persistent, high-performance, disk-backed Key-Value store w/ a novel sharding algorithm.
+A persistent and efficient embedded KV database.
 
 ## Benchmarks
 
@@ -8,14 +8,15 @@ A persistent, high-performance, disk-backed Key-Value store w/ a novel sharding 
 *   **Kernel**: Linux 6.6.87.2-microsoft-standard-WSL2
 *   **CPU**: Intel Core i5-10300H @ 2.50GHz
 *   **Architecture**: x86/64
-*   **Pool Size**: 10_000 keys per iteration
+*   **Sample Size**: 1_000 kv pairs per iteration (about 5M iterations)
 
-| Operation      | Fastest   | Slowest   | Median    | Samples | Iterations |
-| -------------- | --------- | --------- | --------- | ------- | ---------- |
-| `bench_set`    | 11.993 ms | 12.222 ms | 12.103 ms | 1000    | 10_000     |
-| `bench_get`    | 9.0864 ms | 9.3700 ms | 9.2260 ms | 1000    | 10_000     |
-| `bench_remove` | 381.15 µs | 385.87 µs | 383.44 µs | 1000    | 10_000     |
+| Operation  | Latency \[p50]    | Throughput          | Outliers     |
+| -----------| ------------------| --------------------| ------------ |
+| **set**    | 1.4070 µs         | 0.710 M pairs/s     | 2.50%        |
+| **get**    | 488.37 ns         | 0.204 M pairs/s     | 17.70%       |
+| **del**    | 63.262 ns         | 1.580 M pairs/s     | 12.70%       |
 
-*   **Samples**: total measurement samples collected by Criterion
-*   **Iterations**: number of operations per sample (i.e., N_KEYS = 10_000 per `iter()` call)
+* **Latency** columns show the low, median, and high bounds reported by Criterion.
+* **Throughput** columns are in thousands‑elements per second.
+* **Outliers** gives the total count and percentage of measurements flagged above the noise threshold.
 

@@ -1,4 +1,4 @@
-//! TurboCache is a persistent and efficient embedded KV store.
+//! TurboCache is a persistent and efficient embedded KV database.
 //!
 //! ### Example
 //!
@@ -34,7 +34,7 @@ use std::path::Path;
 
 pub use core::{TurboError, TurboResult};
 
-/// TurboCache is a persistent and efficient embedded KV store.
+/// TurboCache is a persistent and efficient embedded KV database.
 ///
 /// ### Example
 ///
