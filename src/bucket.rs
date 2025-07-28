@@ -209,9 +209,7 @@ impl BucketFile {
     }
 
     fn get_inserted(&self) -> usize {
-        self.metadata()
-            .inserts
-            .load(std::sync::atomic::Ordering::SeqCst) as usize
+        self.metadata().inserts.load(Ordering::Acquire) as usize
     }
 
     /// Read a single [PairOffset] by index, directly from the mmap
@@ -326,7 +324,7 @@ impl Bucket {
             .lookup_insert_slot(start_idx, signs, sign, &pair.0)?;
 
         if is_new {
-            meta.inserts.fetch_add(1, Ordering::SeqCst);
+            meta.inserts.fetch_add(1, Ordering::Acquire);
         }
 
         let po = self.file.write_slot(pair)?;
@@ -398,6 +396,28 @@ impl Bucket {
             if signs[idx] != EMPTY_SIGN && signs[idx] != TOMBSTONE_SIGN {
                 let p_offset = self.file.get_pair_offset(idx);
                 let pair = self.file.read_slot(&p_offset)?;
+
+                return Ok(Some(pair));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn iter_del(&mut self, start: &mut usize) -> TurboResult<Option<KVPair>> {
+        let meta = self.file.metadata_mut();
+        let signs = self.file.get_signatures();
+
+        while *start < self.capacity {
+            let idx = *start;
+            *start += 1;
+
+            if signs[idx] != EMPTY_SIGN && signs[idx] != TOMBSTONE_SIGN {
+                let p_offset = self.file.get_pair_offset(idx);
+                let pair = self.file.read_slot(&p_offset)?;
+
+                meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                self.file.set_signature(idx, TOMBSTONE_SIGN);
 
                 return Ok(Some(pair));
             }

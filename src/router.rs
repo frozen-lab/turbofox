@@ -111,10 +111,10 @@ impl Index {
     }
 
     #[inline]
-    fn update_staged_entries(&self, value: usize) {
+    fn update_staged_entries(&self, value: usize) -> usize {
         self.metadata()
             .staged_entries
-            .fetch_add(value, Ordering::Release);
+            .fetch_add(value, Ordering::Release)
     }
 
     #[inline]
@@ -207,8 +207,12 @@ impl<P: AsRef<Path>> Router<P> {
             let mut staged_items: usize = 0;
             let mut start = self.index.get_staged_entries();
 
-            loop {
-                if let Some(item) = self.bucket.iter(&mut start)? {
+            let current_cap = self.index.get_capacity();
+            let current_staged = self.index.get_staged_entries();
+            let current_inserts = self.bucket.get_inserts();
+
+            for _ in 0..(current_cap / 4) {
+                if let Some(item) = self.bucket.iter_del(&mut start)? {
                     let new_sign = TurboHasher::new(&item.0).0;
                     bucket.set(item, new_sign)?;
 
@@ -216,7 +220,7 @@ impl<P: AsRef<Path>> Router<P> {
                     continue;
                 }
 
-                if staged_items >= 8 {
+                if current_staged + staged_items >= current_inserts {
                     break;
                 }
             }
@@ -254,7 +258,9 @@ impl<P: AsRef<Path>> Router<P> {
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket) = &self.staging_bucket {
-            return bucket.get(kbuf, sign);
+            if let Some(val) = bucket.get(kbuf.clone(), sign)? {
+                return Ok(Some(val));
+            }
         }
 
         self.bucket.get(kbuf, sign)
@@ -264,24 +270,24 @@ impl<P: AsRef<Path>> Router<P> {
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket) = &mut self.staging_bucket {
-            let val = bucket.del(kbuf, sign);
+            if let Some(val) = bucket.del(kbuf.clone(), sign)? {
+                // remove staging bucket if No item is remaining
+                if bucket.get_inserts() == 0 {
+                    self.staging_bucket = None;
 
-            // remove staging bucket if No item is remaining
-            if bucket.get_inserts() == 0 {
-                self.staging_bucket = None;
+                    let meta = self.index.metadata_mut();
 
-                let meta = self.index.metadata_mut();
+                    meta.staging_capacity = AtomicUsize::new(0);
+                    meta.staged_entries = AtomicUsize::new(0);
+                }
 
-                meta.staging_capacity = AtomicUsize::new(0);
-                meta.staged_entries = AtomicUsize::new(0);
+                return Ok(Some(val));
             }
-
-            return val;
         }
 
         let val = self.bucket.del(kbuf, sign);
 
-        if self.bucket.get_inserts() == 0 {
+        if self.bucket.get_inserts() == 0 && self.staging_bucket.is_some() {
             self.swap_with_staging()?;
         }
 
@@ -317,5 +323,142 @@ impl<P: AsRef<Path>> Router<P> {
         self.index.mmap.flush()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn make_router(cap: usize) -> (TempDir, Router<std::path::PathBuf>) {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
+        let router = Router::new(dir, cap).expect("Router::new");
+
+        (tmp, router)
+    }
+
+    #[test]
+    fn basic_set_get_del() {
+        let (_tmp, mut router) = make_router(16);
+
+        let key = b"hello".to_vec();
+        let val = b"world".to_vec();
+
+        router.set((key.clone(), val.clone())).unwrap();
+        let got = router.get(key.clone()).unwrap().unwrap();
+        let deleted = router.del(key.clone()).unwrap().unwrap();
+
+        assert_eq!(got, val);
+        assert_eq!(deleted, val);
+        assert!(router.get(key).unwrap().is_none());
+    }
+
+    #[test]
+    fn triggers_staging_and_swaps() {
+        // capacity=4 → threshold = 3
+        let (_tmp, mut router) = make_router(4);
+        let inputs: Vec<_> = (0..6).map(|i| (vec![i], vec![i + 100])).collect();
+
+        let threshold = router.index.get_threshold();
+        assert_eq!(threshold, 3);
+
+        for i in 0..(threshold - 1) {
+            router.set(inputs[i].clone()).unwrap();
+
+            assert!(
+                router.staging_bucket.is_none(),
+                "#{} should not have staging",
+                i
+            );
+        }
+
+        // hitting threshold: staging must appear
+        router.set(inputs[threshold - 1].clone()).unwrap();
+        assert!(
+            router.staging_bucket.is_some(),
+            "staging must exist once inserts == threshold"
+        );
+
+        let cap_before = router.index.get_capacity();
+        let stag_cap = router.index.get_staging_capacity();
+
+        assert_eq!(stag_cap, cap_before * 2, "staging_capacity doubled");
+
+        // keep inserting to force migration & final swap
+        for p in inputs.iter().skip(threshold) {
+            router.set(p.clone()).unwrap();
+        }
+
+        // now all items (6) should be in the new live bucket
+        for (k, v) in inputs.into_iter() {
+            let got = router.get(k.clone()).unwrap().expect("found");
+
+            assert_eq!(got, v);
+        }
+
+        assert!(
+            router.staging_bucket.is_none(),
+            "staging should be None after swap"
+        );
+        assert_eq!(router.index.get_capacity(), stag_cap);
+    }
+
+    #[test]
+    fn delete_triggers_swap_when_live_empty() {
+        // capacity=2, threshold=1 → staging immediately
+        let (_tmp, mut router) = make_router(2);
+
+        // insert 1 → staging
+        router.set((b"a".to_vec(), b"1".to_vec())).unwrap();
+        assert!(router.staging_bucket.is_some());
+
+        // insert second into staging then delete both
+        router.set((b"b".to_vec(), b"2".to_vec())).unwrap();
+        router.del(b"a".to_vec()).unwrap();
+
+        // just one entry, under the threshold
+        assert!(router.staging_bucket.is_none());
+
+        // after draining, staging_bucket should be None, capacity reset
+        let _ = router.del(b"b".to_vec()).unwrap();
+        assert!(router.staging_bucket.is_none());
+
+        // and get returns None
+        assert!(router.get(b"a".to_vec()).unwrap().is_none());
+        assert!(router.get(b"b".to_vec()).unwrap().is_none());
+    }
+
+    #[test]
+    fn persistence_of_index_and_bucket() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        {
+            let mut router = Router::new(&path, 8).unwrap();
+
+            router.set((b"x".to_vec(), b"100".to_vec())).unwrap();
+
+            // force staging
+            for i in 0..10 {
+                router.set((vec![i], vec![i + 1])).unwrap();
+            }
+
+            // record the updated capacity
+            let cap_after = router.index.get_capacity();
+
+            assert!(cap_after > 8);
+        }
+
+        let router2 = Router::new(&path, 8).unwrap();
+
+        // capacity must persist
+        let cap_persisted = router2.index.get_capacity();
+        assert!(cap_persisted > 8);
+
+        // data must still be there
+        let got = router2.get(b"x".to_vec()).unwrap().unwrap();
+        assert_eq!(got, b"100".to_vec());
     }
 }
