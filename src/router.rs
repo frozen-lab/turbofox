@@ -2,7 +2,10 @@
 
 use crate::{
     bucket::Bucket,
-    core::{KVPair, TurboResult, BUCKET_NAME, INDEX_NAME, MAGIC, STAGING_BUCKET_NAME, VERSION},
+    core::{
+        KVPair, TurboConfig, TurboResult, BUCKET_NAME, INDEX_NAME, MAGIC, STAGING_BUCKET_NAME,
+        VERSION,
+    },
     hash::TurboHasher,
 };
 use memmap2::{MmapMut, MmapOptions};
@@ -160,28 +163,28 @@ impl Index {
 }
 
 pub(crate) struct Router<P: AsRef<Path>> {
-    dirpath: P,
+    config: TurboConfig<P>,
     index: Index,
     bucket: Bucket,
     staging_bucket: Option<Bucket>,
 }
 
 impl<P: AsRef<Path>> Router<P> {
-    pub fn new(dirpath: P, cap: usize) -> TurboResult<Self> {
+    pub fn new(config: TurboConfig<P>) -> TurboResult<Self> {
         // make sure the dir exists
-        std::fs::create_dir_all(dirpath.as_ref())?;
+        std::fs::create_dir_all(config.dirpath.as_ref())?;
 
-        let index_path = dirpath.as_ref().join(INDEX_NAME);
-        let index = Index::new(&index_path, cap)?;
+        let index_path = config.dirpath.as_ref().join(INDEX_NAME);
+        let index = Index::new(&index_path, config.initial_capacity)?;
 
-        let bucket_path = dirpath.as_ref().join(BUCKET_NAME);
+        let bucket_path = config.dirpath.as_ref().join(BUCKET_NAME);
         let bucket = Bucket::new(&bucket_path, index.get_capacity())?;
 
         let num_entries = bucket.get_inserts();
         let threshold = index.get_threshold();
 
         let staging_bucket: Option<Bucket> = if num_entries >= threshold {
-            let bucket_path = dirpath.as_ref().join(STAGING_BUCKET_NAME);
+            let bucket_path = config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
             let bucket = Bucket::new(&bucket_path, index.get_staging_capacity())?;
 
             Some(bucket)
@@ -190,7 +193,7 @@ impl<P: AsRef<Path>> Router<P> {
         };
 
         Ok(Self {
-            dirpath,
+            config,
             index,
             bucket,
             staging_bucket,
@@ -217,12 +220,13 @@ impl<P: AsRef<Path>> Router<P> {
                     bucket.set(item, new_sign)?;
 
                     staged_items += 1;
-                    continue;
+
+                    if current_staged + staged_items >= current_inserts {
+                        break;
+                    }
                 }
 
-                if current_staged + staged_items >= current_inserts {
-                    break;
-                }
+                // NOTE: if `None`, then we've exhausted all the entries
             }
 
             // update staged items len
@@ -244,7 +248,7 @@ impl<P: AsRef<Path>> Router<P> {
         if inserts >= threshold {
             let new_cap = Index::calc_new_cap(self.index.get_capacity());
 
-            let bucket_path = self.dirpath.as_ref().join(STAGING_BUCKET_NAME);
+            let bucket_path = self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
             let bucket = Bucket::new(&bucket_path, new_cap)?;
 
             self.staging_bucket = Some(bucket);
@@ -305,8 +309,8 @@ impl<P: AsRef<Path>> Router<P> {
     }
 
     fn swap_with_staging(&mut self) -> TurboResult<()> {
-        let bucket_path = self.dirpath.as_ref().join(BUCKET_NAME);
-        let staging_path = self.dirpath.as_ref().join(STAGING_BUCKET_NAME);
+        let bucket_path = self.config.dirpath.as_ref().join(BUCKET_NAME);
+        let staging_path = self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
 
         let staging_bucket = self
             .staging_bucket
@@ -336,6 +340,110 @@ impl<P: AsRef<Path>> Router<P> {
     }
 }
 
+pub(crate) struct RouterIter<'a> {
+    live: &'a Bucket,
+    staging: Option<&'a Bucket>,
+    live_remaining: usize,
+    staging_remaining: usize,
+    live_idx: usize,
+    staging_idx: usize,
+    state: IterState,
+}
+
+enum IterState {
+    Live,
+    Staging,
+    Done,
+}
+
+impl<P: AsRef<Path>> super::Router<P> {
+    pub fn iter(&self) -> RouterIter<'_> {
+        let live_count = self.bucket.get_inserts();
+        let staging_count = self.staging_bucket.as_ref().map_or(0, |b| b.get_inserts());
+
+        RouterIter {
+            live: &self.bucket,
+            staging: self.staging_bucket.as_ref().map(|b| &*b),
+            live_remaining: live_count,
+            staging_remaining: staging_count,
+            live_idx: 0,
+            staging_idx: 0,
+            state: if live_count > 0 {
+                IterState::Live
+            } else if staging_count > 0 {
+                IterState::Staging
+            } else {
+                IterState::Done
+            },
+        }
+    }
+}
+
+impl<'a> Iterator for RouterIter<'a> {
+    type Item = TurboResult<KVPair>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.state {
+                IterState::Live => {
+                    if self.live_remaining == 0 {
+                        self.state = if self.staging_remaining > 0 {
+                            IterState::Staging
+                        } else {
+                            IterState::Done
+                        };
+
+                        continue;
+                    }
+
+                    match self.live.iter(&mut self.live_idx) {
+                        Ok(Some(pair)) => {
+                            self.live_remaining -= 1;
+                            return Some(Ok(pair));
+                        }
+                        Ok(None) => {
+                            // exhausted early? skip ahead to staging
+                            self.live_remaining = 0;
+
+                            continue;
+                        }
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+
+                IterState::Staging => {
+                    let bucket = match self.staging {
+                        Some(b) => b,
+                        None => {
+                            self.state = IterState::Done;
+                            continue;
+                        }
+                    };
+
+                    if self.staging_remaining == 0 {
+                        self.state = IterState::Done;
+                        continue;
+                    }
+
+                    match bucket.iter(&mut self.staging_idx) {
+                        Ok(Some(pair)) => {
+                            self.staging_remaining -= 1;
+                            return Some(Ok(pair));
+                        }
+                        Ok(None) => {
+                            self.staging_remaining = 0;
+                            continue;
+                        }
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+
+                IterState::Done => return None,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,7 +452,13 @@ mod tests {
     fn make_router(cap: usize) -> (TempDir, Router<std::path::PathBuf>) {
         let tmp = TempDir::new().expect("tempdir");
         let dir = tmp.path().to_path_buf();
-        let router = Router::new(dir, cap).expect("Router::new");
+
+        let config = TurboConfig {
+            dirpath: dir,
+            initial_capacity: cap,
+        };
+
+        let router = Router::new(config).expect("Router::new");
 
         (tmp, router)
     }
@@ -446,7 +560,11 @@ mod tests {
         let path = tmp.path().to_path_buf();
 
         {
-            let mut router = Router::new(&path, 8).unwrap();
+            let config = TurboConfig {
+                dirpath: path.clone(),
+                initial_capacity: 8,
+            };
+            let mut router = Router::new(config).unwrap();
 
             router.set((b"x".to_vec(), b"100".to_vec())).unwrap();
 
@@ -461,7 +579,11 @@ mod tests {
             assert!(cap_after > 8);
         }
 
-        let router2 = Router::new(&path, 8).unwrap();
+        let config = TurboConfig {
+            dirpath: path,
+            initial_capacity: 8,
+        };
+        let router2 = Router::new(config).unwrap();
 
         // capacity must persist
         let cap_persisted = router2.index.get_capacity();
@@ -545,7 +667,12 @@ mod tests {
 
         // first, create a normal router & shut down
         {
-            let mut r = Router::new(&path, 8).unwrap();
+            let config = TurboConfig {
+                dirpath: path.clone(),
+                initial_capacity: 8,
+            };
+            let mut r = Router::new(config).unwrap();
+
             r.set((b"x".to_vec(), b"y".to_vec())).unwrap();
         }
 
@@ -554,7 +681,12 @@ mod tests {
         std::fs::write(&idx, &[0u8; size_of::<Metadata>()]).unwrap();
 
         // reopening should not panic, and get("x") should now be None
-        let r2 = Router::new(&path, 16).unwrap();
+
+        let config = TurboConfig {
+            dirpath: path,
+            initial_capacity: 16,
+        };
+        let r2 = Router::new(config).unwrap();
 
         assert!(r2.get(b"x".to_vec()).unwrap().is_none());
         assert_eq!(r2.index.get_capacity(), 16); // should have the new cap

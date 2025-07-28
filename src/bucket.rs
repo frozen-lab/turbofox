@@ -388,16 +388,21 @@ impl Bucket {
 
     pub fn iter(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
         let signs = self.file.get_signatures();
+        let cap = self.capacity;
 
-        while *start < self.capacity {
+        while *start < cap {
             let idx = *start;
             *start += 1;
 
-            if signs[idx] != EMPTY_SIGN && signs[idx] != TOMBSTONE_SIGN {
-                let p_offset = self.file.get_pair_offset(idx);
-                let pair = self.file.read_slot(&p_offset)?;
-
-                return Ok(Some(pair));
+            match signs[idx] {
+                EMPTY_SIGN | TOMBSTONE_SIGN => {
+                    continue;
+                }
+                _ => {
+                    let p_offset = self.file.get_pair_offset(idx);
+                    let pair = self.file.read_slot(&p_offset)?;
+                    return Ok(Some(pair));
+                }
             }
         }
 
@@ -407,19 +412,25 @@ impl Bucket {
     pub fn iter_del(&mut self, start: &mut usize) -> TurboResult<Option<KVPair>> {
         let meta = self.file.metadata_mut();
         let signs = self.file.get_signatures();
+        let cap = self.capacity;
 
-        while *start < self.capacity {
+        while *start < cap {
             let idx = *start;
             *start += 1;
 
-            if signs[idx] != EMPTY_SIGN && signs[idx] != TOMBSTONE_SIGN {
-                let p_offset = self.file.get_pair_offset(idx);
-                let pair = self.file.read_slot(&p_offset)?;
+            match signs[idx] {
+                EMPTY_SIGN | TOMBSTONE_SIGN => {
+                    continue;
+                }
+                _ => {
+                    let p_offset = self.file.get_pair_offset(idx);
+                    let pair = self.file.read_slot(&p_offset)?;
 
-                meta.inserts.fetch_sub(1, Ordering::SeqCst);
-                self.file.set_signature(idx, TOMBSTONE_SIGN);
+                    meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                    self.file.set_signature(idx, TOMBSTONE_SIGN);
 
-                return Ok(Some(pair));
+                    return Ok(Some(pair));
+                }
             }
         }
 

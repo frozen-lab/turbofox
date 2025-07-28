@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::Path;
 
 pub(crate) const VERSION: u32 = 0;
 pub(crate) const MAGIC: [u8; 4] = *b"TCv0";
@@ -16,9 +16,9 @@ pub(crate) type KVPair = (Vec<u8>, Vec<u8>);
 pub type TurboResult<T> = Result<T, TurboError>;
 
 /// Configurations for `TurboCache`
-pub(crate) struct TurboConfig {
-    pub dirpath: PathBuf,
-    pub buf_cap: usize,
+pub(crate) struct TurboConfig<P: AsRef<Path>> {
+    pub dirpath: P,
+    pub initial_capacity: usize,
 }
 
 #[derive(Debug)]
