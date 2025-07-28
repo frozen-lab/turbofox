@@ -294,6 +294,16 @@ impl<P: AsRef<Path>> Router<P> {
         return val;
     }
 
+    pub fn get_inserts(&self) -> usize {
+        let mut inserts = self.bucket.get_inserts();
+
+        if let Some(bucket) = &self.staging_bucket {
+            inserts += bucket.get_inserts();
+        }
+
+        inserts
+    }
+
     fn swap_with_staging(&mut self) -> TurboResult<()> {
         let bucket_path = self.dirpath.as_ref().join(BUCKET_NAME);
         let staging_path = self.dirpath.as_ref().join(STAGING_BUCKET_NAME);
@@ -460,5 +470,175 @@ mod tests {
         // data must still be there
         let got = router2.get(b"x".to_vec()).unwrap().unwrap();
         assert_eq!(got, b"100".to_vec());
+    }
+
+    #[test]
+    fn get_and_del_nonexistent() {
+        let (_tmp, mut router) = make_router(8);
+
+        // never inserted
+        assert!(router.get(b"nope".to_vec()).unwrap().is_none());
+        assert!(router.del(b"nope".to_vec()).unwrap().is_none());
+
+        // still nothing, no staging should appear
+        assert!(router.staging_bucket.is_none());
+    }
+
+    #[test]
+    fn staged_entries_progress() {
+        // capacity=4 => threshold=3
+        let (_tmp, mut router) = make_router(4);
+
+        // fill bucket up to threshold ⇒ staging appears
+        for i in 0..3 {
+            router.set((vec![i], vec![i])).unwrap();
+        }
+
+        assert!(router.staging_bucket.is_some());
+
+        // this should trigger one iteration of migration
+        let before = router.index.get_staged_entries();
+        router.set((vec![9], vec![9])).unwrap();
+        let after = router.index.get_staged_entries();
+
+        // we should have migrated at least one entry (cap/4 == 1)
+        assert!(after >= before + 1);
+    }
+
+    #[test]
+    fn threshold_boundaries() {
+        let (_tmp, mut router) = make_router(5);
+        let thr = router.index.get_threshold();
+
+        // (5 * 4) / 5 = 4
+        assert_eq!(thr, 4);
+
+        // insert 0..(thr-1), no staging
+        for i in 0..(thr - 1) {
+            router.set((vec![i as u8], vec![i as u8])).unwrap();
+
+            assert!(
+                router.staging_bucket.is_none(),
+                "no staging at insert {}",
+                i + 1
+            );
+        }
+
+        // Now do the 4th (thr - 1 = 3) insert, reaching `inserts == threshold`
+        router.set((vec![(thr - 1) as u8], vec![0])).unwrap();
+        assert!(
+            router.staging_bucket.is_some(),
+            "staging must appear at insert == threshold"
+        );
+
+        // insert more ⇒ staging should still be Some, not re‑created
+        let cap_before = router.index.get_staging_capacity();
+        router.set((vec![100], vec![100])).unwrap();
+
+        assert_eq!(router.index.get_staging_capacity(), cap_before);
+    }
+
+    #[test]
+    fn reinit_on_bad_magic() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        // first, create a normal router & shut down
+        {
+            let mut r = Router::new(&path, 8).unwrap();
+            r.set((b"x".to_vec(), b"y".to_vec())).unwrap();
+        }
+
+        // now overwrite the index file with garbage
+        let idx = path.join(INDEX_NAME);
+        std::fs::write(&idx, &[0u8; size_of::<Metadata>()]).unwrap();
+
+        // reopening should not panic, and get("x") should now be None
+        let r2 = Router::new(&path, 16).unwrap();
+
+        assert!(r2.get(b"x".to_vec()).unwrap().is_none());
+        assert_eq!(r2.index.get_capacity(), 16); // should have the new cap
+    }
+
+    #[test]
+    fn rapid_delete_insert_cycle() {
+        let (_tmp, mut router) = make_router(2);
+
+        // force staging by inserting two
+        router.set((b"a".to_vec(), b"1".to_vec())).unwrap();
+        router.set((b"b".to_vec(), b"2".to_vec())).unwrap();
+
+        assert!(router.staging_bucket.is_some());
+
+        // delete both → back to no staging
+        router.del(b"a".to_vec()).unwrap();
+        router.del(b"b".to_vec()).unwrap();
+
+        assert!(router.staging_bucket.is_none());
+
+        // insert again ⇒ staging should re‑appear at threshold
+        router.set((b"c".to_vec(), b"3".to_vec())).unwrap();
+        router.set((b"d".to_vec(), b"4".to_vec())).unwrap();
+
+        assert_eq!(router.get_inserts(), 2);
+    }
+
+    #[test]
+    fn delete_cycle_capacity_is_either_initial_or_doubled_and_invariants_hold() {
+        let (_tmp, mut router) = make_router(3);
+
+        let init_cap = router.index.get_capacity();
+        let doubled_cap = crate::router::Index::calc_new_cap(init_cap);
+
+        // force staging into existence:
+        // threshold = init_cap * 4/5 (floor), so inserting >= threshold will create staging
+        for i in 0..(router.index.get_threshold() + 1) {
+            let key = vec![i as u8];
+            let val = vec![i as u8];
+
+            router.set((key, val)).unwrap();
+        }
+
+        assert!(router.staging_bucket.is_some());
+
+        let total_keys =
+            router.bucket.get_inserts() + router.staging_bucket.as_ref().unwrap().get_inserts();
+
+        // delete all available keys
+        for i in 0..total_keys {
+            let key = vec![i as u8];
+
+            router.del(key).unwrap();
+        }
+
+        // staging must be gone
+        assert!(router.staging_bucket.is_none());
+
+        // final capacity must be either init_cap or doubled_cap
+        let final_cap = router.index.get_capacity();
+        assert!(
+            final_cap == init_cap || final_cap == doubled_cap,
+            "final capacity {} must be one of initial {} or doubled {}",
+            final_cap,
+            init_cap,
+            doubled_cap
+        );
+
+        // metadata invariants
+        let meta = router.index.metadata();
+
+        assert_eq!(meta.staged_entries.load(Ordering::Acquire), 0);
+        assert_eq!(meta.staging_capacity.load(Ordering::Acquire), 0);
+        assert_eq!(
+            meta.threshold.load(Ordering::Acquire),
+            crate::router::Index::calc_threshold(final_cap)
+        );
+
+        // no keys should remain
+        for i in 0..total_keys {
+            let key = vec![i as u8];
+
+            assert!(router.get(key).unwrap().is_none());
+        }
     }
 }
