@@ -1,3 +1,10 @@
+## 0.0.3
+
+- A new storage architecture
+- No limits on key and value size (till `u16::Max`)
+- Impl of `iter` method to iteratre over all the pairs
+- Impl of `get_inserts` to fetch no. of totale pairs
+
 ## 0.0.2
 
 This release includes following breaking changes,
