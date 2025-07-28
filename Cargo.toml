@@ -2,7 +2,7 @@
 name = "turbocache"
 version = "0.0.3"
 edition = "2021"
-description = "Persistent, high-performance, disk-backed Key-Value store"
+description = "A persistent and efficient embedded KV store."
 license = "MIT"
 repository = "https://github.com/frozen-lab/turbocache"
 keywords = ["key-value", "database", "persistent", "store", "db"]
@@ -12,5 +12,11 @@ memmap2 = "0.9.7"
 twox-hash = {version = "2.1.1", features = ["xxhash32"]}
 
 [dev-dependencies]
+criterion = { version = "0.6.0", features = ["html_reports"] }
+rand = "0.9.1"
 tempfile = "3.20.0"
 
+[[bench]]
+name = "bench"
+path = "benchmarks/bench.rs"
+harness = false
