@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{
     core::{KVPair, TurboResult, MAGIC, VERSION},
     hash::{EMPTY_SIGN, TOMBSTONE_SIGN},
@@ -308,9 +306,25 @@ pub struct Bucket {
 
 impl Bucket {
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<Self> {
-        let file = BucketFile::open(path, capacity)?;
+        let file = Self::open_bucket(path, capacity)?;
 
         Ok(Self { file, capacity })
+    }
+
+    fn open_bucket<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<BucketFile> {
+        let file = match BucketFile::open(&path, capacity) {
+            Ok(f) => f,
+            Err(TurboError::InvalidFile) => {
+                // returns IO error if something goes wrong
+                std::fs::remove_file(&path)?;
+
+                // try to reopen the file
+                Self::open_bucket(path, capacity)?
+            }
+            Err(e) => return Err(e),
+        };
+
+        Ok(file)
     }
 
     pub fn set(&mut self, pair: KVPair, sign: u32) -> TurboResult<()> {

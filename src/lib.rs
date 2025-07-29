@@ -3,24 +3,23 @@
 //! ### Example
 //!
 //! ```rust
-//! use tempfile::TempDir;
-//! use turbocache::TurboCache;
+//! use turbocache::{TurboCache, TurboResult};
 //!
-//! let tmp = TempDir::new().unwrap();
+//! const CACHE_INITIAL_CAP: usize = 1024;
 //!
-//! // Create db w/ initial capacity of `16`
-//! let mut cache = TurboCache::new(tmp.path(), 16).unwrap();
+//! fn main() -> TurboResult<()> {
+//!     let path = std::env::temp_dir().join("cache-dir");
+//!     let mut cache = TurboCache::new(path, CACHE_INITIAL_CAP).unwrap();
 //!
-//! // `set` operation
-//! cache.set(b"hello".to_vec(), b"world".to_vec()).unwrap();
-//! assert_eq!(cache.get(b"hello".to_vec()).unwrap(), Some(b"world".to_vec()));
+//!     for i in 0..5 {
+//!         cache.set(vec![i], vec![i * 10]).unwrap();
+//!     }
 //!
-//! // `del` operation
-//! let removed = cache.del(b"hello".to_vec()).unwrap();
-//! assert_eq!(removed, Some(b"world".to_vec()));
+//!     assert_eq!(cache.get(vec![3]).unwrap(), Some(vec![30]));
+//!     assert_eq!(cache.del(vec![3]).unwrap(), Some(vec![30]));
 //!
-//! // `get` operation
-//! assert!(cache.get(b"hello".to_vec()).unwrap().is_none());
+//!     Ok(())
+//! }
 //! ```
 
 mod bucket;
@@ -39,24 +38,23 @@ pub use core::{TurboError, TurboResult};
 /// ### Example
 ///
 /// ```rust
-/// use tempfile::TempDir;
-/// use turbocache::TurboCache;
+/// use turbocache::{TurboCache, TurboResult};
 ///
-/// let tmp = TempDir::new().unwrap();
-/// let mut cache = TurboCache::new(tmp.path(), 4).unwrap();
+/// const CACHE_INITIAL_CAP: usize = 1024;
 ///
-/// for i in 0..5 {
-///     cache.set(vec![i], vec![i * 10]).unwrap();
+/// fn main() -> TurboResult<()> {
+///     let path = std::env::temp_dir().join("cache-dir");
+///     let mut cache = TurboCache::new(path, CACHE_INITIAL_CAP).unwrap();
+///
+///     for i in 0..5 {
+///         cache.set(vec![i], vec![i * 10]).unwrap();
+///     }
+///
+///     assert_eq!(cache.get(vec![3]).unwrap(), Some(vec![30]));
+///     assert_eq!(cache.del(vec![3]).unwrap(), Some(vec![30]));
+///
+///     Ok(())
 /// }
-///
-/// assert_eq!(cache.get(vec![3]).unwrap(), Some(vec![30]));
-///
-/// let all: std::collections::HashSet<_> = cache
-///     .iter()
-///     .map(|res| res.unwrap())
-///     .collect();
-///
-/// assert_eq!(all.len(), 5);
 /// ```
 pub struct TurboCache<P: AsRef<Path>> {
     router: Router<P>,

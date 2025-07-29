@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use twox_hash::XxHash32;
 
 /// Used as a tombstone state for a signature for deleated entries in [Bucket]

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::Path;
 
 pub(crate) const VERSION: u32 = 0;
@@ -33,8 +31,13 @@ pub enum TurboError {
     ValueTooLarge(usize),
 
     /// Invalid buffer or shard file
+    ///
+    /// NOTE: Only for internal use
     InvalidFile,
 
+    /// States that the underlying Bucket is full
+    ///
+    /// NOTE: Only for internal use
     BucketFull,
 }
 

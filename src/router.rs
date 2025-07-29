@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{
     bucket::Bucket,
     core::{
@@ -126,13 +124,6 @@ impl Index {
     }
 
     #[inline]
-    fn set_capacity(&self, new_cap: usize) {
-        self.metadata_mut()
-            .capacity
-            .store(new_cap, Ordering::Release);
-    }
-
-    #[inline]
     fn set_staging_capacity(&self, new_cap: usize) {
         self.metadata_mut()
             .staging_capacity
@@ -142,13 +133,6 @@ impl Index {
     #[inline]
     fn get_threshold(&self) -> usize {
         self.metadata().threshold.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    fn set_threshold(&self, new_cap: usize) {
-        let t = Self::calc_threshold(new_cap);
-
-        self.metadata_mut().threshold.store(t, Ordering::Release);
     }
 
     #[inline]
