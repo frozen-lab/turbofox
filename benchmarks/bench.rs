@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
@@ -7,7 +7,7 @@ use std::time::Duration;
 use turbocache::TurboCache;
 
 const SAMPLE: usize = 1_000;
-const INIT_CAP: usize = 1024 * 5; // 5 Kib
+const INIT_CAP: usize = 1024 * 5;
 const KEY_LEN: usize = 128;
 const VAL_LEN: usize = 256;
 const SEED: u64 = 42;
@@ -22,63 +22,73 @@ fn gen_pair() -> (Vec<u8>, Vec<u8>) {
 }
 
 fn create_db() -> TurboCache<PathBuf> {
-    let mut path = std::env::temp_dir();
-    path.push("tc-bench");
+    let path = std::env::temp_dir().join("tc-bench");
 
-    let cache = TurboCache::new(path, INIT_CAP).unwrap();
-
-    cache
+    TurboCache::new(path, INIT_CAP).unwrap()
 }
 
-fn set(c: &mut Criterion) {
-    let mut group = c.benchmark_group("turbocache_set");
-    group.throughput(Throughput::Elements(1));
-
-    let (k, v) = gen_pair();
-    let mut cache = create_db();
+fn bench_set(c: &mut Criterion) {
+    let mut group = c.benchmark_group("set");
+    group.throughput(Throughput::Elements(1)); // calculating ops/sec
 
     group.bench_function("set", |b| {
-        b.iter(|| {
-            cache
-                .set(black_box(k.clone()), black_box(v.clone()))
-                .unwrap();
-        })
+        let mut cache = create_db();
+
+        b.iter_batched(
+            || gen_pair(),
+            |(k, v)| {
+                black_box(cache.set(k, v).unwrap());
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
 }
 
-fn get(c: &mut Criterion) {
-    let mut group = c.benchmark_group("turbocache_get");
-    group.throughput(Throughput::Elements(1));
-
-    let (k, v) = gen_pair();
-    let mut cache = create_db();
-
-    cache.set(k.clone(), v.clone()).unwrap();
+fn bench_get(c: &mut Criterion) {
+    let mut group = c.benchmark_group("get");
+    group.throughput(Throughput::Elements(1)); // calculating ops/sec
 
     group.bench_function("get", |b| {
-        b.iter(|| {
-            let _ = cache.get(black_box(k.clone())).unwrap();
-        })
+        b.iter_batched(
+            || {
+                let mut cache = create_db();
+                let (k, v) = gen_pair();
+
+                cache.set(k.clone(), v).unwrap();
+
+                (cache, k)
+            },
+            |(cache, k)| {
+                black_box(cache.get(k).unwrap());
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
 }
 
-fn del(c: &mut Criterion) {
-    let mut group = c.benchmark_group("turbocache_remove");
-    group.throughput(Throughput::Elements(1));
-
-    let (k, v) = gen_pair();
-    let mut cache = create_db();
-
-    cache.set(k.clone(), v.clone()).unwrap();
+fn bench_del(c: &mut Criterion) {
+    let mut group = c.benchmark_group("del");
+    group.throughput(Throughput::Elements(1)); // calculating ops/sec
 
     group.bench_function("del", |b| {
-        b.iter(|| {
-            let _ = cache.del(black_box(k.clone())).unwrap();
-        })
+        b.iter_batched(
+            || {
+                let mut cache = create_db();
+                let (k, v) = gen_pair();
+
+                cache.set(k.clone(), v).unwrap();
+
+                (cache, k)
+            },
+            |(mut cache, k)| {
+                black_box(cache.del(k).unwrap());
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -97,6 +107,6 @@ fn configured_criterion() -> Criterion {
 criterion_group! {
     name = benches;
     config = configured_criterion();
-    targets = set, get, del
+    targets = bench_set, bench_get, bench_del,
 }
 criterion_main!(benches);
