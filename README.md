@@ -60,9 +60,9 @@ fn main() -> anyhow::Result<()> {
 * **CPU**: Intel Core i5-10300H @ 2.50GHz
 * **Architecture**: x86/64
 
-| Operation  | Latency \[p50]          | Throughput                    | Outliers          |
-| ---------- | ----------------------- | ----------------------------- | ----------------- |
-| **set**    | 1.2950 µs               | 0.7718 Million pairs/s        | 2.50%             |
-| **get**    | 502.52 ns               | 1.9900 Million pairs/s        | 17.70%            |
-| **del**    | 63.101 ns               | 15.848 Million pairs/s        | 12.70%            |
+| Operation      | Latency \[p50]          | Throughput                    | Outliers (total)          |
+| -------------- | ----------------------- | ----------------------------- | ------------------------- |
+| **set**        | 1.1099 µs               | 0.9010 Million pairs/s        | 7.5%                      |
+| **get**        | 408.84 ns               | 2.4459 Million pairs/s        | 8.3%                      |
+| **del**        | 48.205 ns               | 20.745 Million pairs/s        | 6.0%                      |
 

@@ -2,8 +2,8 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
+use std::path::PathBuf;
 use std::time::Duration;
-use tempfile::TempDir;
 use turbocache::TurboCache;
 
 const SAMPLE: usize = 1_000;
@@ -21,14 +21,21 @@ fn gen_pair() -> (Vec<u8>, Vec<u8>) {
     (key, val)
 }
 
+fn create_db() -> TurboCache<PathBuf> {
+    let mut path = std::env::temp_dir();
+    path.push("tc-bench");
+
+    let cache = TurboCache::new(path, INIT_CAP).unwrap();
+
+    cache
+}
+
 fn set(c: &mut Criterion) {
     let mut group = c.benchmark_group("turbocache_set");
     group.throughput(Throughput::Elements(1));
 
     let (k, v) = gen_pair();
-    let tmp = TempDir::new().expect("tmp");
-
-    let mut cache = TurboCache::new(tmp.path().to_path_buf(), INIT_CAP).unwrap();
+    let mut cache = create_db();
 
     group.bench_function("set", |b| {
         b.iter(|| {
@@ -46,8 +53,7 @@ fn get(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let (k, v) = gen_pair();
-    let tmp = TempDir::new().expect("tmp");
-    let mut cache = TurboCache::new(tmp.path().to_path_buf(), INIT_CAP).unwrap();
+    let mut cache = create_db();
 
     cache.set(k.clone(), v.clone()).unwrap();
 
@@ -65,8 +71,7 @@ fn del(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let (k, v) = gen_pair();
-    let tmp = TempDir::new().expect("tmp");
-    let mut cache = TurboCache::new(tmp.path().to_path_buf(), INIT_CAP).unwrap();
+    let mut cache = create_db();
 
     cache.set(k.clone(), v.clone()).unwrap();
 

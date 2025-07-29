@@ -43,4 +43,11 @@ fn test_with_large_amounts() {
 
         assert_eq!(vbuf, Some(v.clone()));
     }
+
+    // check if all items are retrived correctly on delete
+    for (k, v) in &dataset {
+        let vbuf = cache.del(k.clone()).unwrap();
+
+        assert_eq!(vbuf, Some(v.clone()));
+    }
 }

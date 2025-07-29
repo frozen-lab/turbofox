@@ -345,6 +345,7 @@ impl Bucket {
                 s if s == sign => {
                     let po = self.file.get_pair_offset(idx);
                     let (k, v) = self.file.read_slot(&po)?;
+
                     if kbuf == k {
                         return Ok(Some(v));
                     }
