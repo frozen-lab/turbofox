@@ -38,7 +38,7 @@ jobs:
 
   test-linux-arm64:
     name: Linux ARM64
-    runs-on: ubuntu-20.04-arm64
+    runs-on: ubuntu-24.04-arm
     
     steps:
       - uses: actions/checkout@v4
