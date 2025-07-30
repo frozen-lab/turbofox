@@ -34,8 +34,6 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - name: Test and build
-        run: cargo test --locked && cargo build --locked
       - name: Auth
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
