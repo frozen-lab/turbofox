@@ -10,6 +10,7 @@ use std::{
     mem::size_of,
     path::Path,
     sync::atomic::{AtomicU32, Ordering},
+    sync::{Arc, RwLock},
 };
 
 #[repr(C)]
@@ -298,9 +299,8 @@ impl BucketFile {
     }
 }
 
-#[derive(Debug)]
 pub struct Bucket {
-    file: BucketFile,
+    file: Arc<RwLock<BucketFile>>,
     capacity: usize,
 }
 
@@ -308,7 +308,10 @@ impl Bucket {
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<Self> {
         let file = Self::open_bucket(path, capacity)?;
 
-        Ok(Self { file, capacity })
+        Ok(Self {
+            file: Arc::new(RwLock::new(file)),
+            capacity,
+        })
     }
 
     fn open_bucket<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<BucketFile> {
@@ -327,38 +330,48 @@ impl Bucket {
         Ok(file)
     }
 
-    pub fn set(&mut self, pair: KVPair, sign: u32) -> TurboResult<()> {
-        let meta = self.file.metadata_mut();
-        let signs = self.file.get_signatures();
+    // Acquire the read lock while mapping a poison error into [TurboError]
+    fn read_lock(&self) -> Result<std::sync::RwLockReadGuard<'_, BucketFile>, TurboError> {
+        Ok(self.file.read()?)
+    }
+
+    // Acquire the write lock while mapping a poison error into [TurboError]
+    fn write_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, BucketFile>, TurboError> {
+        Ok(self.file.write()?)
+    }
+
+    pub fn set(&self, pair: KVPair, sign: u32) -> TurboResult<()> {
+        let mut file = self.write_lock()?;
+        let meta = file.metadata_mut();
+        let signs = file.get_signatures();
 
         let start_idx = sign as usize % self.capacity;
 
-        let (idx, is_new) = self
-            .file
-            .lookup_insert_slot(start_idx, signs, sign, &pair.0)?;
+        let (idx, is_new) = file.lookup_insert_slot(start_idx, signs, sign, &pair.0)?;
 
         if is_new {
             meta.inserts.fetch_add(1, Ordering::Acquire);
         }
 
-        let po = self.file.write_slot(pair)?;
+        let po = file.write_slot(pair)?;
 
-        self.file.set_signature(idx, sign);
-        self.file.set_pair_offset(idx, po);
+        file.set_signature(idx, sign);
+        file.set_pair_offset(idx, po);
 
         return Ok(());
     }
 
     pub fn get(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        let signs = self.file.get_signatures();
+        let file = self.read_lock()?;
+        let signs = file.get_signatures();
         let mut idx = sign as usize % self.capacity;
 
         for _ in 0..self.capacity {
             match signs[idx] {
                 EMPTY_SIGN => return Ok(None),
                 s if s == sign => {
-                    let po = self.file.get_pair_offset(idx);
-                    let (k, v) = self.file.read_slot(&po)?;
+                    let po = file.get_pair_offset(idx);
+                    let (k, v) = file.read_slot(&po)?;
 
                     if kbuf == k {
                         return Ok(Some(v));
@@ -372,23 +385,24 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn del(&mut self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
-        let meta = self.file.metadata_mut();
-        let signs = self.file.get_signatures();
+    pub fn del(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
+        let mut file = self.write_lock()?;
+        let meta = file.metadata_mut();
+        let signs = file.get_signatures();
         let mut idx = sign as usize % self.capacity;
 
         for _ in 0..self.capacity {
             match signs[idx] {
                 EMPTY_SIGN => return Ok(None),
                 s if s == sign => {
-                    let po = self.file.get_pair_offset(idx);
-                    let (k, v) = self.file.read_slot(&po)?;
+                    let po = file.get_pair_offset(idx);
+                    let (k, v) = file.read_slot(&po)?;
 
                     // found the key
                     if kbuf == k {
                         // update meta and header
                         meta.inserts.fetch_sub(1, Ordering::SeqCst);
-                        self.file.set_signature(idx, TOMBSTONE_SIGN);
+                        file.set_signature(idx, TOMBSTONE_SIGN);
 
                         return Ok(Some(v));
                     }
@@ -402,7 +416,8 @@ impl Bucket {
     }
 
     pub fn iter(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
-        let signs = self.file.get_signatures();
+        let file = self.read_lock()?;
+        let signs = file.get_signatures();
         let cap = self.capacity;
 
         while *start < cap {
@@ -414,8 +429,8 @@ impl Bucket {
                     continue;
                 }
                 _ => {
-                    let p_offset = self.file.get_pair_offset(idx);
-                    let pair = self.file.read_slot(&p_offset)?;
+                    let p_offset = file.get_pair_offset(idx);
+                    let pair = file.read_slot(&p_offset)?;
                     return Ok(Some(pair));
                 }
             }
@@ -424,9 +439,10 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn iter_del(&mut self, start: &mut usize) -> TurboResult<Option<KVPair>> {
-        let meta = self.file.metadata_mut();
-        let signs = self.file.get_signatures();
+    pub fn iter_del(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
+        let mut file = self.write_lock()?;
+        let meta = file.metadata_mut();
+        let signs = file.get_signatures();
         let cap = self.capacity;
 
         while *start < cap {
@@ -438,11 +454,11 @@ impl Bucket {
                     continue;
                 }
                 _ => {
-                    let p_offset = self.file.get_pair_offset(idx);
-                    let pair = self.file.read_slot(&p_offset)?;
+                    let p_offset = file.get_pair_offset(idx);
+                    let pair = file.read_slot(&p_offset)?;
 
                     meta.inserts.fetch_sub(1, Ordering::SeqCst);
-                    self.file.set_signature(idx, TOMBSTONE_SIGN);
+                    file.set_signature(idx, TOMBSTONE_SIGN);
 
                     return Ok(Some(pair));
                 }
@@ -453,7 +469,12 @@ impl Bucket {
     }
 
     pub fn get_inserts(&self) -> usize {
-        self.file.get_inserted()
+        match self.read_lock() {
+            Ok(lock) => lock.get_inserted(),
+            // if we encounter Lock Poisoned error, simply return 0
+            // TODO: Need a better way to deal with this!
+            Err(_) => 0,
+        }
     }
 }
 
@@ -476,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_set_and_get() {
-        let mut bucket = create_bucket();
+        let bucket = create_bucket();
 
         let key = b"foo".to_vec();
         let val = b"bar".to_vec();
@@ -492,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_delete_and_tombstone() {
-        let mut bucket = create_bucket();
+        let bucket = create_bucket();
 
         let key = b"alpha".to_vec();
         let val = b"beta".to_vec();
@@ -514,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_iter_only_live_entries() {
-        let mut bucket = create_bucket();
+        let bucket = create_bucket();
         let mut inserted = Vec::new();
 
         // insert 3 keys
@@ -554,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_collision_and_wraparound() {
-        let mut bucket = create_bucket();
+        let bucket = create_bucket();
 
         let key1 = b"A".to_vec();
         let key2 = b"B".to_vec();
@@ -591,7 +612,8 @@ mod tests {
 
         // first session
         {
-            let mut bucket = Bucket::new(&path, CAP).unwrap();
+            let bucket = Bucket::new(&path, CAP).unwrap();
+
             bucket.set((key.clone(), val.clone()), sig).unwrap();
         }
 
@@ -625,7 +647,7 @@ mod tests {
         file.write_all(&[0xff, 0xff, 0xff, 0xff]).unwrap();
         file.flush().unwrap();
 
-        // reopening should now throw an error
+        // reopening should not throw an error
         match Bucket::new(&path, CAP) {
             Ok(_) => {}
             Err(e) => panic!("unexpected error: {:?}", e),
@@ -634,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_upsert_does_not_increment_and_overwrites() {
-        let mut bucket = create_bucket();
+        let bucket = create_bucket();
 
         let key = b"dup".to_vec();
         let sig = TurboHasher::new(&key).0;
@@ -647,7 +669,7 @@ mod tests {
 
     #[test]
     fn test_zero_length_keys_and_values() {
-        let mut bucket = create_bucket();
+        let bucket = create_bucket();
 
         // empty key, non-empty value
         let k1 = vec![];
@@ -673,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_del_on_nonexistent_returns_none() {
-        let mut bucket = create_bucket();
+        let bucket = create_bucket();
 
         let key = b"ghost".to_vec();
         let sig = TurboHasher::new(&key).0;
@@ -689,7 +711,7 @@ mod tests {
 
         // first session: write 3 bytes
         {
-            let mut bucket = Bucket::new(&path, CAP).unwrap();
+            let bucket = Bucket::new(&path, CAP).unwrap();
 
             let key1 = b"A".to_vec(); // len = 1
             let val1 = b"111".to_vec(); // len = 3
@@ -702,7 +724,7 @@ mod tests {
 
         // second session: reopen, write 4 more bytes
         {
-            let mut bucket = Bucket::new(&path, CAP).unwrap();
+            let bucket = Bucket::new(&path, CAP).unwrap();
 
             let key2 = b"B".to_vec();
             let val2 = b"2222".to_vec(); // length = 4
@@ -713,7 +735,8 @@ mod tests {
 
             // 2) figure out which slot we used (simple linear‑probe from hash idx)
             let mut idx = sig2 as usize % CAP;
-            let signs = bucket.file.get_signatures();
+            let file_guard = bucket.read_lock().unwrap();
+            let signs = file_guard.get_signatures();
 
             // advance until we find our signature
             while signs[idx] != sig2 {
@@ -721,7 +744,7 @@ mod tests {
             }
 
             // 3) now read *after* the set
-            let po2 = bucket.file.get_pair_offset(idx);
+            let po2 = file_guard.get_pair_offset(idx);
 
             assert_eq!(
                 po2.offset as usize, 4,
@@ -741,7 +764,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("random.temp");
-        let mut bucket = Bucket::new(&path, CAP).unwrap();
+        let bucket = Bucket::new(&path, CAP).unwrap();
 
         // very simple LCG for reproducible “random” bytes
         let mut seed: u32 = 0x1234_5678;

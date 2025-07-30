@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::PoisonError;
 
 pub(crate) const VERSION: u32 = 0;
 pub(crate) const MAGIC: [u8; 4] = *b"TCv0";
@@ -30,6 +31,9 @@ pub enum TurboError {
     /// Value size out of range
     ValueTooLarge(usize),
 
+    /// Lock was poisoned because another thread panicked while holding it.
+    LockPoisoned(String),
+
     /// Invalid buffer or shard file
     ///
     /// NOTE: Only for internal use
@@ -42,6 +46,12 @@ impl From<std::io::Error> for TurboError {
     }
 }
 
+impl<T> From<PoisonError<T>> for TurboError {
+    fn from(e: PoisonError<T>) -> Self {
+        TurboError::LockPoisoned(e.to_string())
+    }
+}
+
 impl std::error::Error for TurboError {}
 
 impl std::fmt::Display for TurboError {
@@ -50,6 +60,7 @@ impl std::fmt::Display for TurboError {
             TurboError::Io(err) => write!(f, "I/O error: {}", err),
             TurboError::KeyTooLarge(size) => write!(f, "Key size ({}) is too large", size),
             TurboError::ValueTooLarge(size) => write!(f, "Value size ({}) is too large", size),
+            TurboError::LockPoisoned(e) => write!(f, "Lock poisoned due to error: {e}"),
             // NOTE: this is never exposed to outside
             TurboError::InvalidFile => write!(f, ""),
         }
