@@ -1,3 +1,10 @@
+## 0.0.3+1
+
+- Improved error handling
+- Fixed inflated benchmarks
+- Added example usage
+- Improved docs
+
 ## 0.0.3
 
 - A new storage architecture

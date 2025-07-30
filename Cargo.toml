@@ -1,6 +1,6 @@
 [package]
 name = "turbocache"
-version = "0.0.3"
+version = "0.0.3+1"
 edition = "2021"
 description = "A persistent and efficient embedded KV store."
 license = "MIT"
