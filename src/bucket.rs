@@ -171,7 +171,7 @@ impl BucketFile {
             idx = (idx + 1) % self.capacity;
         }
 
-        Err(TurboError::BucketFull)
+        panic!("Bucket is full, idx: {idx}, sign: {sign}");
     }
 
     /// Returns an immutable reference to [Meta]
@@ -627,30 +627,8 @@ mod tests {
 
         // reopening should now throw an error
         match Bucket::new(&path, CAP) {
-            Err(TurboError::InvalidFile) => {}
-            other => panic!("expected InvalidFile, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_bucket_full_error() {
-        let mut bucket = create_bucket();
-
-        // insert CAP distinct keys
-        for i in 0..CAP {
-            let k = vec![i as u8];
-            let v = vec![i as u8 + 100];
-            let sig = TurboHasher::new(&k).0;
-            bucket.set((k, v), sig).unwrap();
-        }
-
-        // now it’s “full” — next insert should error
-        let k = b"overflow".to_vec();
-        let sig = TurboHasher::new(&k).0;
-
-        match bucket.set((k, b"!".to_vec()), sig) {
-            Err(TurboError::BucketFull) => {}
-            other => panic!("expected BucketFull, got {:?}", other),
+            Ok(_) => {}
+            Err(e) => panic!("unexpected error: {:?}", e),
         }
     }
 

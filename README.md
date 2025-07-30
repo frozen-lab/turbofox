@@ -1,3 +1,7 @@
+[![Linux ARM64 Tests](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml)
+[![Linux x86_64 Tests](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml)
+[![Windows Tests](https://github.com/frozen-lab/turbocache/actions/workflows/windows_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/windows_tests.yml)
+
 # TurboCache
 
 A persistent and efficient embedded KV database.
@@ -20,38 +24,26 @@ cargo add turbocache
 ## Usage Example
 
 ```rust
-use tempfile::TempDir;
-use turbocache::TurboCache;
+use turbocache::{TurboCache, TurboResult};
 
-fn main() -> anyhow::Result<()> {
-    let tmp = TempDir::new()?;
-    let mut cache = TurboCache::new(tmp.path(), 16)?;
+const CACHE_INITIAL_CAP: usize = 1024;
 
-    // set
-    cache.set(b"apple".to_vec(), b"red".to_vec())?;
-    cache.set(b"banana".to_vec(), b"yellow".to_vec())?;
+fn main() -> TurboResult<()> {
+    let path = std::env::temp_dir().join("cache-dir");
+    let mut cache = TurboCache::new(path, CACHE_INITIAL_CAP).unwrap();
 
-    // get
-    assert_eq!(cache.get(b"apple".to_vec())?, Some(b"red".to_vec()));
-    assert!(cache.get(b"pear".to_vec())?.is_none());
-
-    // del
-    let removed = cache.del(b"banana".to_vec())?;
-    assert_eq!(removed, Some(b"yellow".to_vec()));
-
-    // Iterate all live entries
-    for entry in cache.iter() {
-        let (k, v) = entry?;
-
-        println!("key={:?}, val={:?}", k, v);
+    for i in 0..5 {
+        cache.set(vec![i], vec![i * 10]).unwrap();
     }
 
-    // Get total inserts so far
-    println!("Total inserts: {}", cache.get_inserts());
+    assert_eq!(cache.get(vec![3]).unwrap(), Some(vec![30]));
+    assert_eq!(cache.del(vec![3]).unwrap(), Some(vec![30]));
 
     Ok(())
 }
 ```
+
+Refer [here](https://docs.rs/turbocache/0.0.3/turbocache/index.html) for API Docs!
 
 ## Benchmarks
 

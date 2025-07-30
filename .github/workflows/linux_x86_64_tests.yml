@@ -1,4 +1,4 @@
-name: Linux X86_64
+name: Unx X86_64
 
 on:
   push:

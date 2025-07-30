@@ -1,4 +1,4 @@
-name: Linux ARM_64
+name: Unx ARM_64
 
 on:
   push:
