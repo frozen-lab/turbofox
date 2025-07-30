@@ -12,7 +12,7 @@ Add to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-turbocache = "0.0.3"
+turbocache = "0.0.4"
 ```
 
 Or install using `cargo`,
