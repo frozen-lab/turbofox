@@ -1,6 +1,7 @@
-[![Linux ARM64 Tests](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml)
-[![Linux x86_64 Tests](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml)
+
 [![Windows Tests](https://github.com/frozen-lab/turbocache/actions/workflows/windows_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/windows_tests.yml)
+[![Linux ARM64 Tests](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml)
+[![Linux x86 Tests](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml)
 
 # TurboCache
 
