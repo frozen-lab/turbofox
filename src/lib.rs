@@ -59,6 +59,7 @@ pub use core::{TurboError, TurboResult};
 ///     Ok(())
 /// }
 /// ```
+#[derive(Clone)]
 pub struct TurboCache<P: AsRef<Path>> {
     router: Arc<RwLock<Router<P>>>,
 }
