@@ -29,7 +29,10 @@ mod router;
 
 use core::TurboConfig;
 use router::Router;
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 pub use core::{TurboError, TurboResult};
 
@@ -57,7 +60,7 @@ pub use core::{TurboError, TurboResult};
 /// }
 /// ```
 pub struct TurboCache<P: AsRef<Path>> {
-    router: Router<P>,
+    router: Arc<RwLock<Router<P>>>,
 }
 
 impl<P: AsRef<Path>> TurboCache<P> {
@@ -85,7 +88,9 @@ impl<P: AsRef<Path>> TurboCache<P> {
 
         let router = Router::new(config)?;
 
-        Ok(Self { router })
+        Ok(Self {
+            router: Arc::new(RwLock::new(router)),
+        })
     }
 
     /// Insert or update the given key-value pair.
@@ -109,7 +114,9 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// assert_eq!(cache.get(b"apple".to_vec()).unwrap(), Some(b"red".to_vec()));
     /// ```
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> TurboResult<()> {
-        self.router.set((key, value))
+        let mut write_lock = self.write_lock()?;
+
+        write_lock.set((key, value))
     }
 
     /// Retrieve the current value for `key`, or `None` if it’s not present.
@@ -133,7 +140,9 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// assert!(cache.get(b"missing".to_vec()).unwrap().is_none());
     /// ```
     pub fn get(&self, key: Vec<u8>) -> TurboResult<Option<Vec<u8>>> {
-        self.router.get(key)
+        let read_lock = self.read_lock()?;
+
+        read_lock.get(key)
     }
 
     /// Delete and return the value for `key`, or `None` if it wasn’t present.
@@ -158,7 +167,9 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// assert!(cache.get(b"foo".to_vec()).unwrap().is_none());
     /// ```
     pub fn del(&mut self, key: Vec<u8>) -> TurboResult<Option<Vec<u8>>> {
-        self.router.del(key)
+        let mut write_lock = self.write_lock()?;
+
+        write_lock.del(key)
     }
 
     /// Iterate over **all** stored key/value pairs in the cache—first the live bucket,
@@ -193,7 +204,10 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// assert_eq!(got, want);
     /// ```
     pub fn iter(&self) -> TurboResult<impl Iterator<Item = TurboResult<(Vec<u8>, Vec<u8>)>> + '_> {
-        self.router.iter()
+        let read_lock = self.read_lock()?;
+        let collected: Vec<_> = read_lock.iter()?.collect();
+
+        Ok(collected.into_iter())
     }
 
     /// Get totale number of items in the db at the given state
@@ -213,7 +227,19 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// assert_eq!(cache.get_inserts().unwrap(), 2);
     /// ```
     pub fn get_inserts(&self) -> TurboResult<usize> {
-        self.router.get_inserts()
+        let read_lock = self.read_lock()?;
+
+        read_lock.get_inserts()
+    }
+
+    // Acquire the read lock for [Router] while mapping a poison error into [TurboError]
+    fn read_lock(&self) -> Result<std::sync::RwLockReadGuard<'_, Router<P>>, TurboError> {
+        Ok(self.router.read()?)
+    }
+
+    // Acquire the write lock for [Router] while mapping a poison error into [TurboError]
+    fn write_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, Router<P>>, TurboError> {
+        Ok(self.router.write()?)
     }
 }
 
