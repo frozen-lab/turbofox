@@ -1,7 +1,7 @@
 use crate::{
     bucket::Bucket,
     core::{
-        KVPair, TurboConfig, TurboResult, BUCKET_NAME, INDEX_NAME, MAGIC, STAGING_BUCKET_NAME,
+        InternalResult, KVPair, TurboConfig, BUCKET_NAME, INDEX_NAME, MAGIC, STAGING_BUCKET_NAME,
         VERSION,
     },
     hash::TurboHasher,
@@ -33,7 +33,7 @@ struct Index {
 impl Index {
     const META_SIZE: u64 = size_of::<Metadata>() as u64;
 
-    pub fn new<P: AsRef<Path>>(path: P, cap: usize) -> TurboResult<Self> {
+    pub fn new<P: AsRef<Path>>(path: P, cap: usize) -> InternalResult<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -62,7 +62,7 @@ impl Index {
         Ok(index)
     }
 
-    fn create(file: File, cap: usize) -> TurboResult<Self> {
+    fn create(file: File, cap: usize) -> InternalResult<Self> {
         file.set_len(Self::META_SIZE)?;
 
         let mut header_mmap = unsafe {
@@ -157,7 +157,7 @@ pub(crate) struct Router<P: AsRef<Path>> {
 }
 
 impl<P: AsRef<Path>> Router<P> {
-    pub fn new(config: TurboConfig<P>) -> TurboResult<Self> {
+    pub fn new(config: TurboConfig<P>) -> InternalResult<Self> {
         // make sure the dir exists
         std::fs::create_dir_all(config.dirpath.as_ref())?;
 
@@ -187,7 +187,7 @@ impl<P: AsRef<Path>> Router<P> {
         })
     }
 
-    pub fn set(&mut self, pair: KVPair) -> TurboResult<()> {
+    pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
         let sign = TurboHasher::new(&pair.0).0;
 
         if let Some(bucket_arc) = &self.staging_bucket {
@@ -270,7 +270,7 @@ impl<P: AsRef<Path>> Router<P> {
         }
     }
 
-    pub fn get(&self, kbuf: Vec<u8>) -> TurboResult<Option<Vec<u8>>> {
+    pub fn get(&self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket) = &self.staging_bucket {
@@ -286,7 +286,7 @@ impl<P: AsRef<Path>> Router<P> {
         bucket_lock.get(kbuf, sign)
     }
 
-    pub fn del(&mut self, kbuf: Vec<u8>) -> TurboResult<Option<Vec<u8>>> {
+    pub fn del(&mut self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket_arc) = &self.staging_bucket {
@@ -324,7 +324,7 @@ impl<P: AsRef<Path>> Router<P> {
         }
     }
 
-    pub fn get_inserts(&self) -> TurboResult<usize> {
+    pub fn get_inserts(&self) -> InternalResult<usize> {
         let lock = self.read_lock(&self.bucket)?;
         let mut inserts = lock.get_inserts()?;
 
@@ -336,7 +336,7 @@ impl<P: AsRef<Path>> Router<P> {
         Ok(inserts)
     }
 
-    fn swap_with_staging(&mut self) -> TurboResult<()> {
+    fn swap_with_staging(&mut self) -> InternalResult<()> {
         let bucket_path = self.config.dirpath.as_ref().join(BUCKET_NAME);
         let staging_path = self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
 
@@ -371,12 +371,18 @@ impl<P: AsRef<Path>> Router<P> {
     }
 
     /// Acquire a read‑lock on *any* Arc<RwLock<T>>, mapping poison → TurboError.
-    fn read_lock<'a, T>(&'a self, lk: &'a Arc<RwLock<T>>) -> TurboResult<RwLockReadGuard<'a, T>> {
+    fn read_lock<'a, T>(
+        &'a self,
+        lk: &'a Arc<RwLock<T>>,
+    ) -> InternalResult<RwLockReadGuard<'a, T>> {
         Ok(lk.read()?)
     }
 
     /// Acquire a write‑lock on *any* Arc<RwLock<T>>, mapping poison → TurboError.
-    fn write_lock<'a, T>(&'a self, lk: &'a Arc<RwLock<T>>) -> TurboResult<RwLockWriteGuard<'a, T>> {
+    fn write_lock<'a, T>(
+        &'a self,
+        lk: &'a Arc<RwLock<T>>,
+    ) -> InternalResult<RwLockWriteGuard<'a, T>> {
         Ok(lk.write()?)
     }
 }
@@ -398,7 +404,7 @@ enum IterState {
 }
 
 impl<P: AsRef<Path>> super::Router<P> {
-    pub fn iter(&self) -> TurboResult<RouterIter<'_>> {
+    pub fn iter(&self) -> InternalResult<RouterIter<'_>> {
         let live_guard = self.read_lock(&self.bucket)?;
         let staging_guard = match &self.staging_bucket {
             Some(arc) => Some(self.read_lock(arc)?),
@@ -432,7 +438,7 @@ impl<P: AsRef<Path>> super::Router<P> {
 }
 
 impl<'a> Iterator for RouterIter<'a> {
-    type Item = TurboResult<KVPair>;
+    type Item = InternalResult<KVPair>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {

@@ -1,5 +1,5 @@
 use crate::{
-    core::{KVPair, TurboResult, MAGIC, VERSION},
+    core::{InternalResult, KVPair, MAGIC, VERSION},
     hash::{EMPTY_SIGN, TOMBSTONE_SIGN},
     InternalError,
 };
@@ -40,7 +40,7 @@ struct BucketFile {
 }
 
 impl BucketFile {
-    fn open<P: AsRef<Path>>(bucket_path: P, capacity: usize) -> TurboResult<Self> {
+    fn open<P: AsRef<Path>>(bucket_path: P, capacity: usize) -> InternalResult<Self> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -79,7 +79,7 @@ impl BucketFile {
     }
 
     /// Create a new buffer w/ default state
-    fn create(file: File, header_size: usize, capacity: usize) -> TurboResult<Self> {
+    fn create(file: File, header_size: usize, capacity: usize) -> InternalResult<Self> {
         file.set_len(header_size as u64)?;
 
         let sign_offset = size_of::<Meta>();
@@ -108,7 +108,7 @@ impl BucketFile {
     }
 
     /// Write a [KVPair] to the bucket and get [PairOffset]
-    fn write_slot(&self, pair: KVPair) -> TurboResult<PairOffset> {
+    fn write_slot(&self, pair: KVPair) -> InternalResult<PairOffset> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
         let blen = klen + vlen;
@@ -133,7 +133,7 @@ impl BucketFile {
     }
 
     /// Read a [KVPair] from a given [PairOffset]
-    fn read_slot(&self, pair: &PairOffset) -> TurboResult<KVPair> {
+    fn read_slot(&self, pair: &PairOffset) -> InternalResult<KVPair> {
         let klen = pair.klen as usize;
         let vlen = pair.vlen as usize;
         let mut buf = vec![0u8; klen + vlen];
@@ -156,7 +156,7 @@ impl BucketFile {
         signs: &[u32],
         sign: u32,
         kbuf: &[u8],
-    ) -> TurboResult<(usize, bool)> {
+    ) -> InternalResult<(usize, bool)> {
         for _ in 0..self.capacity {
             match signs[idx] {
                 EMPTY_SIGN | TOMBSTONE_SIGN => return Ok((idx, true)),
@@ -305,7 +305,7 @@ pub struct Bucket {
 }
 
 impl Bucket {
-    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<Self> {
+    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
         let file = Self::open_bucket(path, capacity)?;
 
         Ok(Self {
@@ -314,7 +314,7 @@ impl Bucket {
         })
     }
 
-    fn open_bucket<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<BucketFile> {
+    fn open_bucket<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<BucketFile> {
         let file = match BucketFile::open(&path, capacity) {
             Ok(f) => f,
             Err(InternalError::InvalidFile) => {
@@ -340,7 +340,7 @@ impl Bucket {
         Ok(self.file.write()?)
     }
 
-    pub fn set(&self, pair: KVPair, sign: u32) -> TurboResult<()> {
+    pub fn set(&self, pair: KVPair, sign: u32) -> InternalResult<()> {
         let mut file = self.write_lock()?;
         let meta = file.metadata_mut();
         let signs = file.get_signatures();
@@ -361,7 +361,7 @@ impl Bucket {
         return Ok(());
     }
 
-    pub fn get(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
+    pub fn get(&self, kbuf: Vec<u8>, sign: u32) -> InternalResult<Option<Vec<u8>>> {
         let file = self.read_lock()?;
         let signs = file.get_signatures();
         let mut idx = sign as usize % self.capacity;
@@ -385,7 +385,7 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn del(&self, kbuf: Vec<u8>, sign: u32) -> TurboResult<Option<Vec<u8>>> {
+    pub fn del(&self, kbuf: Vec<u8>, sign: u32) -> InternalResult<Option<Vec<u8>>> {
         let mut file = self.write_lock()?;
         let meta = file.metadata_mut();
         let signs = file.get_signatures();
@@ -415,7 +415,7 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn iter(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
+    pub fn iter(&self, start: &mut usize) -> InternalResult<Option<KVPair>> {
         let file = self.read_lock()?;
         let signs = file.get_signatures();
         let cap = self.capacity;
@@ -439,7 +439,7 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn iter_del(&self, start: &mut usize) -> TurboResult<Option<KVPair>> {
+    pub fn iter_del(&self, start: &mut usize) -> InternalResult<Option<KVPair>> {
         let mut file = self.write_lock()?;
         let meta = file.metadata_mut();
         let signs = file.get_signatures();
@@ -468,7 +468,7 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn get_inserts(&self) -> TurboResult<usize> {
+    pub fn get_inserts(&self) -> InternalResult<usize> {
         let lock = self.read_lock()?;
 
         Ok(lock.get_inserted())

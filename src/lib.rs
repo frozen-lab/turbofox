@@ -27,14 +27,14 @@ mod core;
 mod hash;
 mod router;
 
-use core::TurboConfig;
+use core::{InternalError, InternalResult, TurboConfig};
 use router::Router;
 use std::{
     path::Path,
     sync::{Arc, RwLock},
 };
 
-pub use core::{InternalError, TurboResult};
+pub use core::{TurboError, TurboResult};
 
 /// TurboCache is a persistent and efficient embedded KV database.
 ///
@@ -69,7 +69,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     ///
     /// ### Errors
     ///
-    /// Returns a `InternalError::Io` if the directory cannot be created or files opened,
+    /// Returns a `TurboError::Io` if the directory cannot be created or files opened,
     /// or other errors if the on‑disk files are corrupt.
     ///
     /// ### Example
@@ -100,7 +100,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     ///
     /// ### Error
     ///
-    /// Returns `InternalError` if any error occurs!
+    /// Returns `TurboError` if any error occurs!
     ///
     /// ### Example
     ///
@@ -117,14 +117,14 @@ impl<P: AsRef<Path>> TurboCache<P> {
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> TurboResult<()> {
         let mut write_lock = self.write_lock()?;
 
-        write_lock.set((key, value))
+        Ok(write_lock.set((key, value))?)
     }
 
     /// Retrieve the current value for `key`, or `None` if it’s not present.
     ///
     /// ### Errors
     ///
-    /// Returns `InternalError` if any error occurs!
+    /// Returns `TurboError` if any error occurs!
     ///
     /// ### Example
     ///
@@ -143,14 +143,14 @@ impl<P: AsRef<Path>> TurboCache<P> {
     pub fn get(&self, key: Vec<u8>) -> TurboResult<Option<Vec<u8>>> {
         let read_lock = self.read_lock()?;
 
-        read_lock.get(key)
+        Ok(read_lock.get(key)?)
     }
 
     /// Delete and return the value for `key`, or `None` if it wasn’t present.
     ///
     /// ### Errors
     ///
-    /// Returns `InternalError` if any error occurs!
+    /// Returns `TurboError` if any error occurs!
     ///
     /// ### Example
     ///
@@ -170,7 +170,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     pub fn del(&mut self, key: Vec<u8>) -> TurboResult<Option<Vec<u8>>> {
         let mut write_lock = self.write_lock()?;
 
-        write_lock.del(key)
+        Ok(write_lock.del(key)?)
     }
 
     /// Iterate over **all** stored key/value pairs in the cache—first the live bucket,
@@ -182,7 +182,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     ///
     /// ### Errors
     ///
-    /// Returns `InternalError` if any error occurs!
+    /// Returns `TurboError` if any error occurs!
     ///
     /// ### Example
     ///
@@ -208,10 +208,14 @@ impl<P: AsRef<Path>> TurboCache<P> {
         let read_lock = self.read_lock()?;
         let collected: Vec<_> = read_lock.iter()?.collect();
 
-        Ok(collected.into_iter())
+        Ok(collected.into_iter().map(|item| item.map_err(|e| e.into())))
     }
 
     /// Get totale number of items in the db at the given state
+    ///
+    /// ### Errors
+    ///
+    /// Returns `TurboError` if any error occurs!
     ///
     /// ### Example
     ///
@@ -230,17 +234,23 @@ impl<P: AsRef<Path>> TurboCache<P> {
     pub fn get_inserts(&self) -> TurboResult<usize> {
         let read_lock = self.read_lock()?;
 
-        read_lock.get_inserts()
+        Ok(read_lock.get_inserts()?)
     }
 
-    // Acquire the read lock for [Router] while mapping a poison error into [InternalError]
-    fn read_lock(&self) -> Result<std::sync::RwLockReadGuard<'_, Router<P>>, InternalError> {
-        Ok(self.router.read()?)
+    // Acquire the read lock for [Router] while mapping a poison error into [TurboError]
+    fn read_lock(&self) -> InternalResult<std::sync::RwLockReadGuard<'_, Router<P>>> {
+        Ok(self
+            .router
+            .read()
+            .map_err(|e| InternalError::LockPoisoned(e.to_string()))?)
     }
 
-    // Acquire the write lock for [Router] while mapping a poison error into [InternalError]
-    fn write_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, Router<P>>, InternalError> {
-        Ok(self.router.write()?)
+    // Acquire the write lock for [Router] while mapping a poison error into [TurboError]
+    fn write_lock(&self) -> InternalResult<std::sync::RwLockWriteGuard<'_, Router<P>>> {
+        Ok(self
+            .router
+            .write()
+            .map_err(|e| InternalError::LockPoisoned(e.to_string()))?)
     }
 }
 

@@ -12,7 +12,9 @@ pub(crate) const INDEX_NAME: &str = "tc_index";
 pub(crate) type KVPair = (Vec<u8>, Vec<u8>);
 
 /// Custom `Result` type returned by TurboCache and its op's
-pub type TurboResult<T> = Result<T, InternalError>;
+pub type TurboResult<T> = Result<T, TurboError>;
+
+pub(crate) type InternalResult<T> = Result<T, InternalError>;
 
 /// Configurations for `TurboCache`
 pub(crate) struct TurboConfig<P: AsRef<Path>> {
@@ -21,23 +23,62 @@ pub(crate) struct TurboConfig<P: AsRef<Path>> {
 }
 
 #[derive(Debug)]
-pub enum InternalError {
-    /// An I/O error occurred.
-    Io(std::io::Error),
-
+pub enum TurboError {
     /// Key size out of range
     KeyTooLarge(usize),
 
     /// Value size out of range
     ValueTooLarge(usize),
 
+    /// An I/O error occurred.
+    Io(std::io::Error),
+
+    /// Lock was poisoned because another thread panicked while holding it.
+    LockPoisoned(String),
+
+    /// Unknown error
+    Unknown,
+}
+
+impl From<std::io::Error> for TurboError {
+    fn from(err: std::io::Error) -> Self {
+        TurboError::Io(err)
+    }
+}
+
+impl<T> From<PoisonError<T>> for TurboError {
+    fn from(e: PoisonError<T>) -> Self {
+        TurboError::LockPoisoned(e.to_string())
+    }
+}
+
+impl std::error::Error for TurboError {}
+
+impl std::fmt::Display for TurboError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TurboError::Io(err) => write!(f, "I/O error: {}", err),
+            TurboError::KeyTooLarge(size) => write!(f, "Key size ({}) is too large", size),
+            TurboError::ValueTooLarge(size) => write!(f, "Value size ({}) is too large", size),
+            TurboError::LockPoisoned(e) => write!(f, "Lock poisoned due to an error, [e]: {e}"),
+            TurboError::Unknown => write!(f, "Some unknown error occurred"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum InternalError {
+    /// An I/O error occurred.
+    Io(std::io::Error),
+
     /// Lock was poisoned because another thread panicked while holding it.
     LockPoisoned(String),
 
     /// Invalid buffer or shard file
-    ///
-    /// NOTE: Only for internal use
     InvalidFile,
+
+    /// Indicates that the underlying [Bucket] is under migration
+    _UnderMigration,
 }
 
 impl From<std::io::Error> for InternalError {
@@ -58,11 +99,19 @@ impl std::fmt::Display for InternalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InternalError::Io(err) => write!(f, "I/O error: {}", err),
-            InternalError::KeyTooLarge(size) => write!(f, "Key size ({}) is too large", size),
-            InternalError::ValueTooLarge(size) => write!(f, "Value size ({}) is too large", size),
-            InternalError::LockPoisoned(e) => write!(f, "Lock poisoned due to error: {e}"),
-            // NOTE: this is never exposed to outside
-            InternalError::InvalidFile => write!(f, ""),
+            InternalError::LockPoisoned(e) => write!(f, "Lock poisoned due to an error, [e]: {e}"),
+            InternalError::InvalidFile => write!(f, "Invalid file"),
+            InternalError::_UnderMigration => write!(f, "The underlying bucket is being migrated"),
+        }
+    }
+}
+
+impl From<InternalError> for TurboError {
+    fn from(err: InternalError) -> Self {
+        match err {
+            InternalError::Io(e) => TurboError::Io(e),
+            InternalError::LockPoisoned(e) => TurboError::LockPoisoned(e),
+            _ => TurboError::Unknown,
         }
     }
 }
