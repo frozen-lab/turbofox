@@ -468,13 +468,10 @@ impl Bucket {
         Ok(None)
     }
 
-    pub fn get_inserts(&self) -> usize {
-        match self.read_lock() {
-            Ok(lock) => lock.get_inserted(),
-            // if we encounter Lock Poisoned error, simply return 0
-            // TODO: Need a better way to deal with this!
-            Err(_) => 0,
-        }
+    pub fn get_inserts(&self) -> TurboResult<usize> {
+        let lock = self.read_lock()?;
+
+        Ok(lock.get_inserted())
     }
 }
 

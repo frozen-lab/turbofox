@@ -192,7 +192,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     ///
     /// assert_eq!(got, want);
     /// ```
-    pub fn iter(&self) -> impl Iterator<Item = TurboResult<(Vec<u8>, Vec<u8>)>> + '_ {
+    pub fn iter(&self) -> TurboResult<impl Iterator<Item = TurboResult<(Vec<u8>, Vec<u8>)>> + '_> {
         self.router.iter()
     }
 
@@ -212,7 +212,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     ///
     /// assert_eq!(cache.get_inserts(), 2);
     /// ```
-    pub fn get_inserts(&self) -> usize {
+    pub fn get_inserts(&self) -> TurboResult<usize> {
         self.router.get_inserts()
     }
 }
@@ -226,7 +226,11 @@ mod tests {
     fn collect_pairs<P: AsRef<std::path::Path>>(
         cache: &TurboCache<P>,
     ) -> HashSet<(Vec<u8>, Vec<u8>)> {
-        cache.iter().map(|res| res.expect("iter error")).collect()
+        cache
+            .iter()
+            .unwrap()
+            .map(|res| res.expect("iter error"))
+            .collect()
     }
 
     #[test]
@@ -251,7 +255,7 @@ mod tests {
         let cache = TurboCache::new(tmp.path(), 8).unwrap();
 
         // empty cache → iter yields nothing
-        assert!(cache.iter().next().is_none());
+        assert!(cache.iter().unwrap().next().is_none());
     }
 
     #[test]

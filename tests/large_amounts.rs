@@ -7,7 +7,7 @@ const N_KEYS: usize = 10_000;
 const KEY_LEN: usize = 32;
 const VAL_LEN: usize = 128;
 const SEED: u64 = 42;
-const INIT_CAP: usize = 1024 * 5; // 5 Kib
+const INIT_CAP: usize = 1024;
 
 fn gen_dataset() -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut rng = StdRng::seed_from_u64(SEED);
@@ -35,7 +35,7 @@ fn test_with_large_amounts() {
     }
 
     // check if inserts matches the size of [dataset]
-    assert_eq!(cache.get_inserts(), N_KEYS);
+    assert_eq!(cache.get_inserts().unwrap(), N_KEYS);
 
     // check if all items are retrived correctly
     for (k, v) in &dataset {
