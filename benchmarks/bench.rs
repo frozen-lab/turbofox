@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use turbocache::TurboCache;
 
-const SAMPLE: usize = 5_000;
+const SAMPLE: usize = 2_048;
 const INIT_CAP: usize = 1024 * 5;
 const KEY_LEN: usize = 128;
 const VAL_LEN: usize = 256;
@@ -21,8 +21,12 @@ fn gen_pair() -> (Vec<u8>, Vec<u8>) {
     (key, val)
 }
 
-fn create_db() -> TurboCache<PathBuf> {
+fn create_db(erase_old: bool) -> TurboCache<PathBuf> {
     let path = std::env::temp_dir().join("tc-bench");
+
+    if erase_old {
+        std::fs::remove_dir_all(&path).unwrap();
+    }
 
     TurboCache::new(path, INIT_CAP).unwrap()
 }
@@ -32,12 +36,16 @@ fn bench_set(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1)); // calculating ops/sec
 
     group.bench_function("set", |b| {
-        let mut cache = create_db();
+        let mut cache = create_db(true);
 
         b.iter_batched(
-            || gen_pair(),
-            |(k, v)| {
-                black_box(cache.set(k, v).unwrap());
+            || {
+                let pair = gen_pair();
+
+                pair
+            },
+            |pair| {
+                black_box(cache.set(pair.0, pair.1).unwrap());
             },
             BatchSize::SmallInput,
         )
@@ -50,17 +58,25 @@ fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
     group.throughput(Throughput::Elements(1)); // calculating ops/sec
 
+    // pre-populate cache
+    let mut cache = create_db(true);
+
+    for _ in 0..SAMPLE {
+        let (k, v) = gen_pair();
+
+        cache.set(k.clone(), v).unwrap();
+    }
+
     group.bench_function("get", |b| {
+        let cache = create_db(false);
+
         b.iter_batched(
             || {
-                let mut cache = create_db();
-                let (k, v) = gen_pair();
+                let (k, _) = gen_pair();
 
-                cache.set(k.clone(), v).unwrap();
-
-                (cache, k)
+                k
             },
-            |(cache, k)| {
+            |k| {
                 black_box(cache.get(k).unwrap());
             },
             BatchSize::SmallInput,
@@ -72,19 +88,27 @@ fn bench_get(c: &mut Criterion) {
 
 fn bench_del(c: &mut Criterion) {
     let mut group = c.benchmark_group("del");
-    group.throughput(Throughput::Elements(1)); // calculating ops/sec
+    group.throughput(Throughput::Elements(1));
+
+    // pre-populate cache
+    let mut cache = create_db(true);
+
+    for _ in 0..SAMPLE {
+        let (k, v) = gen_pair();
+
+        cache.set(k.clone(), v).unwrap();
+    }
 
     group.bench_function("del", |b| {
+        let mut cache = create_db(false);
+
         b.iter_batched(
             || {
-                let mut cache = create_db();
-                let (k, v) = gen_pair();
+                let (k, _) = gen_pair();
 
-                cache.set(k.clone(), v).unwrap();
-
-                (cache, k)
+                k
             },
-            |(mut cache, k)| {
+            |k| {
                 black_box(cache.del(k).unwrap());
             },
             BatchSize::SmallInput,
@@ -98,7 +122,7 @@ fn configured_criterion() -> Criterion {
     Criterion::default()
         .configure_from_args()
         .sample_size(SAMPLE)
-        .measurement_time(Duration::from_secs(15))
+        .measurement_time(Duration::from_secs(20))
         .warm_up_time(Duration::from_secs(5))
         .noise_threshold(0.05)
         .with_plots()
