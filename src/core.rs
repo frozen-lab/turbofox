@@ -12,7 +12,7 @@ pub(crate) const INDEX_NAME: &str = "tc_index";
 pub(crate) type KVPair = (Vec<u8>, Vec<u8>);
 
 /// Custom `Result` type returned by TurboCache and its op's
-pub type TurboResult<T> = Result<T, TurboError>;
+pub type TurboResult<T> = Result<T, InternalError>;
 
 /// Configurations for `TurboCache`
 pub(crate) struct TurboConfig<P: AsRef<Path>> {
@@ -21,7 +21,7 @@ pub(crate) struct TurboConfig<P: AsRef<Path>> {
 }
 
 #[derive(Debug)]
-pub enum TurboError {
+pub enum InternalError {
     /// An I/O error occurred.
     Io(std::io::Error),
 
@@ -40,29 +40,29 @@ pub enum TurboError {
     InvalidFile,
 }
 
-impl From<std::io::Error> for TurboError {
+impl From<std::io::Error> for InternalError {
     fn from(err: std::io::Error) -> Self {
-        TurboError::Io(err)
+        InternalError::Io(err)
     }
 }
 
-impl<T> From<PoisonError<T>> for TurboError {
+impl<T> From<PoisonError<T>> for InternalError {
     fn from(e: PoisonError<T>) -> Self {
-        TurboError::LockPoisoned(e.to_string())
+        InternalError::LockPoisoned(e.to_string())
     }
 }
 
-impl std::error::Error for TurboError {}
+impl std::error::Error for InternalError {}
 
-impl std::fmt::Display for TurboError {
+impl std::fmt::Display for InternalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TurboError::Io(err) => write!(f, "I/O error: {}", err),
-            TurboError::KeyTooLarge(size) => write!(f, "Key size ({}) is too large", size),
-            TurboError::ValueTooLarge(size) => write!(f, "Value size ({}) is too large", size),
-            TurboError::LockPoisoned(e) => write!(f, "Lock poisoned due to error: {e}"),
+            InternalError::Io(err) => write!(f, "I/O error: {}", err),
+            InternalError::KeyTooLarge(size) => write!(f, "Key size ({}) is too large", size),
+            InternalError::ValueTooLarge(size) => write!(f, "Value size ({}) is too large", size),
+            InternalError::LockPoisoned(e) => write!(f, "Lock poisoned due to error: {e}"),
             // NOTE: this is never exposed to outside
-            TurboError::InvalidFile => write!(f, ""),
+            InternalError::InvalidFile => write!(f, ""),
         }
     }
 }

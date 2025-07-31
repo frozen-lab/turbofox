@@ -1,7 +1,7 @@
 use crate::{
     core::{KVPair, TurboResult, MAGIC, VERSION},
     hash::{EMPTY_SIGN, TOMBSTONE_SIGN},
-    TurboError,
+    InternalError,
 };
 use core::slice;
 use memmap2::{MmapMut, MmapOptions};
@@ -72,7 +72,7 @@ impl BucketFile {
 
         // check if file is invalid (invalid magic, or else)
         if meta.magic != MAGIC || meta.version != VERSION {
-            return Err(TurboError::InvalidFile);
+            return Err(InternalError::InvalidFile);
         }
 
         Ok(bucket)
@@ -317,7 +317,7 @@ impl Bucket {
     fn open_bucket<P: AsRef<Path>>(path: P, capacity: usize) -> TurboResult<BucketFile> {
         let file = match BucketFile::open(&path, capacity) {
             Ok(f) => f,
-            Err(TurboError::InvalidFile) => {
+            Err(InternalError::InvalidFile) => {
                 // returns IO error if something goes wrong
                 std::fs::remove_file(&path)?;
 
@@ -330,13 +330,13 @@ impl Bucket {
         Ok(file)
     }
 
-    // Acquire the read lock while mapping a poison error into [TurboError]
-    fn read_lock(&self) -> Result<std::sync::RwLockReadGuard<'_, BucketFile>, TurboError> {
+    // Acquire the read lock while mapping a poison error into [InternalError]
+    fn read_lock(&self) -> Result<std::sync::RwLockReadGuard<'_, BucketFile>, InternalError> {
         Ok(self.file.read()?)
     }
 
-    // Acquire the write lock while mapping a poison error into [TurboError]
-    fn write_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, BucketFile>, TurboError> {
+    // Acquire the write lock while mapping a poison error into [InternalError]
+    fn write_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, BucketFile>, InternalError> {
         Ok(self.file.write()?)
     }
 
