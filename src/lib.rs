@@ -185,7 +185,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// cache.set(b"x".to_vec(), b"1".to_vec()).unwrap();
     /// cache.set(b"y".to_vec(), b"2".to_vec()).unwrap();
     ///
-    /// let got: HashSet<_> = cache.iter().map(|r| r.unwrap()).collect();
+    /// let got: HashSet<_> = cache.iter().unwrap().map(|r| r.unwrap()).collect();
     /// let want: HashSet<_> = vec![ (b"x".to_vec(), b"1".to_vec()), (b"y".to_vec(), b"2".to_vec()) ]
     ///     .into_iter()
     ///     .collect();
@@ -210,7 +210,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// cache.set(b"x".to_vec(), b"1".to_vec()).unwrap();
     /// cache.set(b"y".to_vec(), b"2".to_vec()).unwrap();
     ///
-    /// assert_eq!(cache.get_inserts(), 2);
+    /// assert_eq!(cache.get_inserts().unwrap(), 2);
     /// ```
     pub fn get_inserts(&self) -> TurboResult<usize> {
         self.router.get_inserts()

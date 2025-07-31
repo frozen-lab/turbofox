@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use turbocache::TurboCache;
 
-const SAMPLE: usize = 1_000;
+const SAMPLE: usize = 5_000;
 const INIT_CAP: usize = 1024 * 5;
 const KEY_LEN: usize = 128;
 const VAL_LEN: usize = 256;

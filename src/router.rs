@@ -192,9 +192,9 @@ impl<P: AsRef<Path>> Router<P> {
 
         if let Some(bucket_arc) = &self.staging_bucket {
             {
-                let staging_bucket_lock = self.write_lock(bucket_arc)?;
-                let bucket_lock = self.write_lock(&self.bucket)?;
                 let index_lock = self.write_lock(&self.index)?;
+                let bucket_lock = self.write_lock(&self.bucket)?;
+                let staging_bucket_lock = self.write_lock(bucket_arc)?;
 
                 staging_bucket_lock.set(pair, sign)?;
 
@@ -243,8 +243,8 @@ impl<P: AsRef<Path>> Router<P> {
         }
 
         {
-            let bucket_lock = self.write_lock(&self.bucket)?;
             let index_lock = self.write_lock(&self.index)?;
+            let bucket_lock = self.write_lock(&self.bucket)?;
 
             bucket_lock.set(pair, sign)?;
 
@@ -274,13 +274,14 @@ impl<P: AsRef<Path>> Router<P> {
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket) = &self.staging_bucket {
-            let bucket_lock = self.write_lock(bucket)?;
+            let bucket_lock = self.read_lock(bucket)?;
+
             if let Some(val) = bucket_lock.get(kbuf.clone(), sign)? {
                 return Ok(Some(val));
             }
         }
 
-        let bucket_lock = self.write_lock(&self.bucket)?;
+        let bucket_lock = self.read_lock(&self.bucket)?;
 
         bucket_lock.get(kbuf, sign)
     }
@@ -293,6 +294,8 @@ impl<P: AsRef<Path>> Router<P> {
                 let bucket_lock = self.write_lock(bucket_arc)?;
 
                 if let Some(val) = bucket_lock.del(kbuf.clone(), sign)? {
+                    // if staging has no items left, remove it and free up the
+                    // allocated resources
                     if bucket_lock.get_inserts()? == 0 {
                         drop(bucket_lock);
                         self.staging_bucket = None;
@@ -314,7 +317,6 @@ impl<P: AsRef<Path>> Router<P> {
 
             if bucket_lock.get_inserts()? == 0 && self.staging_bucket.is_some() {
                 drop(bucket_lock);
-
                 self.swap_with_staging()?;
             }
 
@@ -380,8 +382,8 @@ impl<P: AsRef<Path>> Router<P> {
 }
 
 pub(crate) struct RouterIter<'a> {
-    live_guard: RwLockWriteGuard<'a, Bucket>,
-    staging_guard: Option<RwLockWriteGuard<'a, Bucket>>,
+    live_guard: RwLockReadGuard<'a, Bucket>,
+    staging_guard: Option<RwLockReadGuard<'a, Bucket>>,
     live_remaining: usize,
     staging_remaining: usize,
     live_idx: usize,
@@ -397,16 +399,17 @@ enum IterState {
 
 impl<P: AsRef<Path>> super::Router<P> {
     pub fn iter(&self) -> TurboResult<RouterIter<'_>> {
-        let live_guard = self.write_lock(&self.bucket)?;
+        let live_guard = self.read_lock(&self.bucket)?;
         let staging_guard = match &self.staging_bucket {
-            Some(arc) => Some(self.write_lock(arc)?),
+            Some(arc) => Some(self.read_lock(arc)?),
             None => None,
         };
 
         let live_remaining = live_guard.get_inserts()?;
-        let staging_remaining = staging_guard
-            .as_ref()
-            .map_or(0, |g| g.get_inserts().unwrap_or(0));
+        let staging_remaining = match staging_guard.as_ref() {
+            Some(g) => g.get_inserts()?,
+            None => 0, // only when there is no staging bucket
+        };
 
         let state = if live_remaining > 0 {
             IterState::Live
