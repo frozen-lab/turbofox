@@ -9,8 +9,10 @@ use std::{
     fs::{File, OpenOptions},
     mem::size_of,
     path::Path,
-    sync::atomic::{AtomicU32, Ordering},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, RwLock,
+    },
 };
 
 #[repr(C)]
@@ -302,6 +304,7 @@ impl BucketFile {
 pub struct Bucket {
     file: Arc<RwLock<BucketFile>>,
     capacity: usize,
+    pub migrating: Arc<AtomicBool>,
 }
 
 impl Bucket {
@@ -310,6 +313,7 @@ impl Bucket {
 
         Ok(Self {
             file: Arc::new(RwLock::new(file)),
+            migrating: Arc::new(AtomicBool::new(false)),
             capacity,
         })
     }

@@ -1,6 +1,7 @@
-[![Linux X86](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml)
+[![Linux X86_64](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86_64_tests.yml)
 [![Linux ARM_64](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm_64_tests.yml)
-[![WIN](https://github.com/frozen-lab/turbocache/actions/workflows/windows_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/windows_tests.yml)
+[![WIN 11 x86_64](https://github.com/frozen-lab/turbocache/actions/workflows/windows_x86_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/windows_x86_64_tests.yml)
+[![WIN 11 ARM_64](https://github.com/frozen-lab/turbocache/actions/workflows/windows_arm_64_tests.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/windows_arm_64_tests.yml)
 
 # TurboCache
 
@@ -26,11 +27,11 @@ cargo add turbocache
 ```rust
 use turbocache::{TurboCache, TurboResult};
 
-const CACHE_INITIAL_CAP: usize = 1024;
+const INITIAL_CAP: usize = 1024;
 
 fn main() -> TurboResult<()> {
     let path = std::env::temp_dir().join("cache-dir");
-    let mut cache = TurboCache::new(path, CACHE_INITIAL_CAP).unwrap();
+    let mut cache = TurboCache::new(path, INITIAL_CAP).unwrap();
 
     for i in 0..5 {
         cache.set(vec![i], vec![i * 10]).unwrap();

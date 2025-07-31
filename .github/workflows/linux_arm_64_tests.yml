@@ -1,4 +1,4 @@
-name: Linux ARM_64
+name: ARM_64 (Lin)
 
 on:
   push:
@@ -14,9 +14,15 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+      
       - name: Build
         run: cargo build --verbose
+        
       - name: Run Simple Example
         run: cargo run --example simple
+        
+      - name: Run Multithreading Example
+        run: cargo run --example multithreading
+        
       - name: Run tests
         run: cargo test --workspace --verbose
