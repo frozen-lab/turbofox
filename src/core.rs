@@ -76,9 +76,6 @@ pub(crate) enum InternalError {
 
     /// Invalid buffer or shard file
     InvalidFile,
-
-    /// Indicates that the underlying [Bucket] is under migration
-    _UnderMigration,
 }
 
 impl From<std::io::Error> for InternalError {
@@ -98,10 +95,9 @@ impl std::error::Error for InternalError {}
 impl std::fmt::Display for InternalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InternalError::Io(err) => write!(f, "I/O error: {}", err),
-            InternalError::LockPoisoned(e) => write!(f, "Lock poisoned due to an error, [e]: {e}"),
-            InternalError::InvalidFile => write!(f, "Invalid file"),
-            InternalError::_UnderMigration => write!(f, "The underlying bucket is being migrated"),
+            InternalError::Io(_) => write!(f, ""),
+            InternalError::LockPoisoned(_) => write!(f, ""),
+            InternalError::InvalidFile => write!(f, ""),
         }
     }
 }

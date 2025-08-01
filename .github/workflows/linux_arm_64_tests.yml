@@ -1,4 +1,4 @@
-name: ARM_64 (Lin)
+name: Linux (ARM)
 
 on:
   push:

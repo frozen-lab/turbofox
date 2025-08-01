@@ -212,7 +212,7 @@ impl<P: AsRef<Path>> Router<P> {
                 let current_staged = index_lock.get_staged_entries();
                 let current_inserts = bucket_lock.get_inserts()?;
 
-                for _ in 0..(current_cap / 4) {
+                for _ in 0..1.max(current_cap / 4) {
                     if let Some(item) = bucket_lock.iter_del(&mut start)? {
                         let new_sign = TurboHasher::new(&item.0).0;
                         staging_bucket_lock.set(item, new_sign)?;
@@ -315,9 +315,25 @@ impl<P: AsRef<Path>> Router<P> {
             let bucket_lock = self.write_lock(&self.bucket)?;
             let val = bucket_lock.del(kbuf, sign)?;
 
-            if bucket_lock.get_inserts()? == 0 && self.staging_bucket.is_some() {
-                drop(bucket_lock);
-                self.swap_with_staging()?;
+            let staging_inserts = if let Some(staging_bucket) = &self.staging_bucket {
+                self.read_lock(staging_bucket)?.get_inserts()?
+            } else {
+                0
+            };
+
+            if bucket_lock.get_inserts()? == 0 {
+                if staging_inserts > 0 {
+                    drop(bucket_lock);
+                    self.swap_with_staging()?;
+                } else if self.staging_bucket.is_some() {
+                    // Both live and staging are empty, so remove staging.
+                    drop(bucket_lock);
+                    self.staging_bucket = None;
+                    let index_lock = self.write_lock(&self.index)?;
+                    let meta = index_lock.metadata_mut();
+                    meta.staging_capacity = AtomicUsize::new(0);
+                    meta.staged_entries = AtomicUsize::new(0);
+                }
             }
 
             return Ok(val);
@@ -896,23 +912,29 @@ mod tests {
     fn rapid_delete_insert_cycle() {
         let (_tmp, mut router) = make_router(2);
 
-        // force staging by inserting two
+        // force staging by inserting two, which should also trigger a swap
         router.set((b"a".to_vec(), b"1".to_vec())).unwrap();
         router.set((b"b".to_vec(), b"2".to_vec())).unwrap();
+        router.set((b"c".to_vec(), b"3".to_vec())).unwrap();
 
+        // Even After the swap, the staging bucket should be there
         assert!(router.staging_bucket.is_some());
 
-        // delete both → back to no staging
+        // delete 3 keys => back to no staging
         router.del(b"a".to_vec()).unwrap();
         router.del(b"b".to_vec()).unwrap();
+        router.del(b"c".to_vec()).unwrap();
 
         assert!(router.staging_bucket.is_none());
 
-        // insert again ⇒ staging should re‑appear at threshold
-        router.set((b"c".to_vec(), b"3".to_vec())).unwrap();
+        // The new capacity is 4, so the threshold is 3.
+        // Insert again => staging should re-appear at threshold
         router.set((b"d".to_vec(), b"4".to_vec())).unwrap();
+        router.set((b"e".to_vec(), b"5".to_vec())).unwrap();
+        router.set((b"f".to_vec(), b"6".to_vec())).unwrap();
 
-        assert_eq!(router.get_inserts().unwrap(), 2);
+        assert!(router.staging_bucket.is_some());
+        assert_eq!(router.get_inserts().unwrap(), 3);
     }
 
     #[test]

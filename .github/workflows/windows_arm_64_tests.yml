@@ -1,4 +1,4 @@
-name: ARM64 (WIN)
+name: WIN (ARM)
 
 on:
   push:

@@ -397,7 +397,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod multithreading {
+mod concurrency_tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
@@ -625,48 +625,48 @@ mod multithreading {
         assert_eq!(cache.get_inserts().unwrap(), 1);
     }
 
-    // #[test]
-    // fn concurrent_operations_during_swap() {
-    //     let tmp = TempDir::new().unwrap();
-    //     let mut threads = vec![];
+    #[test]
+    fn concurrent_operations_during_swap() {
+        let tmp = TempDir::new().unwrap();
+        let mut threads = vec![];
 
-    //     // A very small capacity to guarantee swaps happen quickly.
-    //     // Threshold for staging is (2 * 4) / 5 = 1. So, the 2nd item goes to staging.
-    //     let cache = TurboCache::new(tmp.path().to_path_buf(), 2).unwrap();
+        // A very small capacity to guarantee swaps happen quickly.
+        // Threshold for staging is (2 * 4) / 5 = 1. So, the 2nd item goes to staging.
+        let cache = TurboCache::new(tmp.path().to_path_buf(), 2).unwrap();
 
-    //     for i in 0..4 {
-    //         let mut cache_clone = cache.clone();
+        for i in 0..4 {
+            let mut cache_clone = cache.clone();
 
-    //         let handle = std::thread::spawn(move || {
-    //             for j in 0..20 {
-    //                 let key_val = (i * 20 + j) as u16;
-    //                 let key = key_val.to_be_bytes().to_vec();
+            let handle = std::thread::spawn(move || {
+                for j in 0..20 {
+                    let key_val = (i * 20 + j) as u16;
+                    let key = key_val.to_be_bytes().to_vec();
 
-    //                 cache_clone.set(key, vec![i as u8]).unwrap();
+                    cache_clone.set(key, vec![i as u8]).unwrap();
 
-    //                 std::thread::sleep(Duration::from_millis(1));
-    //             }
-    //         });
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
 
-    //         threads.push(handle);
-    //     }
+            threads.push(handle);
+        }
 
-    //     for handle in threads {
-    //         handle.join().unwrap();
-    //     }
+        for handle in threads {
+            handle.join().unwrap();
+        }
 
-    //     // Verify all keys were inserted correctly despite the chaos of swapping.
-    //     assert_eq!(cache.get_inserts().unwrap(), 80);
+        // Verify all keys were inserted correctly despite the chaos of swapping.
+        assert_eq!(cache.get_inserts().unwrap(), 80);
 
-    //     for i in 0..4 {
-    //         for j in 0..20 {
-    //             let key_val = (i * 20 + j) as u16;
-    //             let key = key_val.to_be_bytes().to_vec();
+        for i in 0..4 {
+            for j in 0..20 {
+                let key_val = (i * 20 + j) as u16;
+                let key = key_val.to_be_bytes().to_vec();
 
-    //             assert_eq!(cache.get(key).unwrap(), Some(vec![i as u8]));
-    //         }
-    //     }
-    // }
+                assert_eq!(cache.get(key).unwrap(), Some(vec![i as u8]));
+            }
+        }
+    }
 
     #[test]
     fn concurrent_iteration_with_modification() {
