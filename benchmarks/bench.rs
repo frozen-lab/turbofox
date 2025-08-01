@@ -25,7 +25,10 @@ fn create_db(erase_old: bool) -> TurboCache<PathBuf> {
     let path = std::env::temp_dir().join("tc-bench");
 
     if erase_old {
-        std::fs::remove_dir_all(&path).unwrap();
+        match std::fs::remove_dir_all(&path) {
+            Ok(_) => {}
+            Err(_) => {}
+        }
     }
 
     TurboCache::new(path, INIT_CAP).unwrap()
