@@ -11,7 +11,7 @@ use std::{
     fs::{File, OpenOptions},
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
 };
@@ -154,6 +154,7 @@ pub(crate) struct Router<P: AsRef<Path>> {
     index: Arc<RwLock<Index>>,
     bucket: Arc<RwLock<Bucket>>,
     staging_bucket: Option<Arc<RwLock<Bucket>>>,
+    swap_in_progress: Arc<AtomicBool>,
 }
 
 impl<P: AsRef<Path>> Router<P> {
@@ -184,10 +185,15 @@ impl<P: AsRef<Path>> Router<P> {
             index: Arc::new(RwLock::new(index)),
             bucket: Arc::new(RwLock::new(bucket)),
             staging_bucket,
+            swap_in_progress: Arc::new(AtomicBool::new(false)),
         })
     }
 
     pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
+        while self.swap_in_progress.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+
         let sign = TurboHasher::new(&pair.0).0;
 
         if let Some(bucket_arc) = &self.staging_bucket {
@@ -353,6 +359,15 @@ impl<P: AsRef<Path>> Router<P> {
     }
 
     fn swap_with_staging(&mut self) -> InternalResult<()> {
+        struct SwapGuard(Arc<AtomicBool>);
+        impl Drop for SwapGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        self.swap_in_progress.store(true, Ordering::Release);
+        let _guard = SwapGuard(self.swap_in_progress.clone());
+
         let bucket_path = self.config.dirpath.as_ref().join(BUCKET_NAME);
         let staging_path = self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
 
@@ -361,12 +376,24 @@ impl<P: AsRef<Path>> Router<P> {
             .take()
             .expect("swap_in_staging called with no staging_bucket");
 
+        // Acquire a read lock to flush the staging bucket's data to disk, ensuring
+        // that all pending writes are durable before we rename the file.
+        // NOTE: This assumes `Bucket` has a visible `flush` method, similar to `Index`.
+        // NOTE: A read lock is sufficient because `Bucket::flush` only requires `&self`.
+        self.read_lock(&staging_bucket)?.flush_mmap()?;
+
         let old_bucket = std::mem::replace(&mut self.bucket, staging_bucket);
+
+        // On Windows, a memory-mapped file generally cannot be deleted or renamed
+        // while it is mapped. We must drop the `old_bucket` to unmap its file
+        // before proceeding with filesystem operations. The `swap_in_progress`
+        // flag prevents other threads from accessing the inconsistent state.
         drop(old_bucket);
 
         std::fs::remove_file(&bucket_path)?;
         std::fs::rename(&staging_path, &bucket_path)?;
 
+        // Lock the index to safely update metadata.
         let index_lock = self.write_lock(&self.index)?;
 
         let new_cap = index_lock.get_staging_capacity();
@@ -378,6 +405,7 @@ impl<P: AsRef<Path>> Router<P> {
         meta.staging_capacity = AtomicUsize::new(0);
         meta.threshold = AtomicUsize::new(Index::calc_threshold(new_cap));
 
+        // Flush the updated index metadata to disk.
         index_lock.mmap.flush()?;
 
         drop(index_lock);
@@ -421,6 +449,10 @@ enum IterState {
 
 impl<P: AsRef<Path>> super::Router<P> {
     pub fn iter(&self) -> InternalResult<RouterIter<'_>> {
+        while self.swap_in_progress.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+
         let live_guard = self.read_lock(&self.bucket)?;
         let staging_guard = match &self.staging_bucket {
             Some(arc) => Some(self.read_lock(arc)?),

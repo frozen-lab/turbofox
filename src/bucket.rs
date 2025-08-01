@@ -475,6 +475,12 @@ impl Bucket {
 
         Ok(lock.get_inserted())
     }
+
+    pub fn flush_mmap(&self) -> InternalResult<()> {
+        self.read_lock()?.mmap.flush()?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
