@@ -97,3 +97,53 @@ fn test_concurrent_operations() -> TurboResult<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_crash_during_swap_with_staging() -> TurboResult<()> {
+    let tmp_dir = TempDir::new().unwrap();
+    let cache_path = tmp_dir.path().to_path_buf();
+    let num_entries = 100;
+    let dataset = gen_dataset(num_entries);
+
+    // Phase 1: Populate cache and simulate crash (by dropping cache)
+    {
+        let mut cache = TurboCache::new(cache_path.clone(), INIT_CAP)?;
+
+        for (key, value) in &dataset {
+            cache.set(key.clone(), value.clone())?;
+        }
+
+        // Cache is dropped here, which should trigger a flush and swap_with_staging
+        // This simulates a crash where the process terminates after writing to staging
+        // but before the final swap is complete, or during the swap itself.
+    }
+
+    // Phase 2: Restart cache and verify recovery
+    {
+        let cache = TurboCache::new(cache_path.clone(), INIT_CAP)?;
+
+        for (key, expected_value) in &dataset {
+            let actual_value = cache.get(key.clone())?;
+
+            assert!(
+                actual_value.is_some(),
+                "Key not found after recovery: {:?}",
+                key
+            );
+            assert_eq!(
+                actual_value.unwrap(),
+                *expected_value,
+                "Value mismatch for key: {:?}",
+                key
+            );
+        }
+
+        assert_eq!(
+            cache.get_inserts()?,
+            num_entries,
+            "Incorrect number of inserts after recovery"
+        );
+    }
+
+    Ok(())
+}
