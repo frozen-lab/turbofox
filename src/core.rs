@@ -40,20 +40,6 @@ pub enum TurboError {
     Unknown,
 }
 
-impl From<std::io::Error> for TurboError {
-    fn from(err: std::io::Error) -> Self {
-        TurboError::Io(err)
-    }
-}
-
-impl<T> From<PoisonError<T>> for TurboError {
-    fn from(e: PoisonError<T>) -> Self {
-        TurboError::LockPoisoned(e.to_string())
-    }
-}
-
-impl std::error::Error for TurboError {}
-
 impl std::fmt::Display for TurboError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -81,6 +67,12 @@ pub(crate) enum InternalError {
 impl From<std::io::Error> for InternalError {
     fn from(err: std::io::Error) -> Self {
         InternalError::Io(err)
+    }
+}
+
+impl<T> From<crossbeam::channel::SendError<T>> for InternalError {
+    fn from(e: crossbeam::channel::SendError<T>) -> Self {
+        InternalError::LockPoisoned(e.to_string())
     }
 }
 

@@ -5,6 +5,7 @@ use crate::{
         VERSION,
     },
     hash::TurboHasher,
+    InternalError,
 };
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use memmap2::{MmapMut, MmapOptions};
@@ -157,6 +158,7 @@ pub(crate) struct Router<P: AsRef<Path>> {
     bucket: Arc<RwLock<Bucket>>,
     staging_bucket: Option<Arc<RwLock<Bucket>>>,
     swap_in_progress: Arc<AtomicBool>,
+    mgr: Option<MigrationManager>,
 }
 
 impl<P: AsRef<Path>> Router<P> {
@@ -186,12 +188,14 @@ impl<P: AsRef<Path>> Router<P> {
             config,
             index: Arc::new(RwLock::new(index)),
             bucket: Arc::new(RwLock::new(bucket)),
-            staging_bucket,
             swap_in_progress: Arc::new(AtomicBool::new(false)),
+            mgr: None,
+            staging_bucket,
         })
     }
 
     pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
+        // wait if the swapping is in progress
         while self.swap_in_progress.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
@@ -259,7 +263,9 @@ impl<P: AsRef<Path>> Router<P> {
             let inserts = bucket_lock.get_inserts()?;
             let threshold = index_lock.get_threshold();
 
-            // if we reach [threshold], then create a staging bucket
+            // If we've reached the [threshold],
+            //   ▶ Create staging bucket
+            //   ▶ Creeate the migration manager
             if inserts >= threshold {
                 let new_cap = Index::calc_new_cap(index_lock.get_capacity());
 
@@ -272,6 +278,16 @@ impl<P: AsRef<Path>> Router<P> {
                 drop(index_lock);
 
                 self.staging_bucket = Some(Arc::new(RwLock::new(bucket)));
+
+                if let Some(staging_bucket) = self.staging_bucket.clone() {
+                    let mgr = MigrationManager::new(
+                        self.index.clone(),
+                        self.bucket.clone(),
+                        staging_bucket,
+                    )?;
+
+                    self.mgr = Some(mgr);
+                }
             }
 
             Ok(())
@@ -279,6 +295,11 @@ impl<P: AsRef<Path>> Router<P> {
     }
 
     pub fn get(&self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
+        // wait if the swapping is in progress
+        while self.swap_in_progress.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket) = &self.staging_bucket {
@@ -295,6 +316,11 @@ impl<P: AsRef<Path>> Router<P> {
     }
 
     pub fn del(&mut self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
+        // wait if the swapping is in progress
+        while self.swap_in_progress.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket_arc) = &self.staging_bucket {
@@ -302,11 +328,13 @@ impl<P: AsRef<Path>> Router<P> {
                 let bucket_lock = self.write_lock(bucket_arc)?;
 
                 if let Some(val) = bucket_lock.del(kbuf.clone(), sign)? {
-                    // if staging has no items left, remove it and free up the
-                    // allocated resources
+                    // if staging has no items left,
+                    // ▶ remove the staging bucket
+                    // ▶ remove the migration manager
                     if bucket_lock.get_inserts()? == 0 {
                         drop(bucket_lock);
                         self.staging_bucket = None;
+                        self.mgr = None;
 
                         let index_lock = self.write_lock(&self.index)?;
                         let meta = index_lock.metadata_mut();
@@ -319,6 +347,7 @@ impl<P: AsRef<Path>> Router<P> {
                 }
             }
         }
+
         {
             let bucket_lock = self.write_lock(&self.bucket)?;
             let val = bucket_lock.del(kbuf, sign)?;
@@ -334,11 +363,17 @@ impl<P: AsRef<Path>> Router<P> {
                     drop(bucket_lock);
                     self.swap_with_staging()?;
                 } else if self.staging_bucket.is_some() {
-                    // Both live and staging are empty, so remove staging.
                     drop(bucket_lock);
+
+                    // As both live and staging are empty,
+                    // ▶ remove the staging bucket
+                    // ▶ remove the migration manager
                     self.staging_bucket = None;
+                    self.mgr = None;
+
                     let index_lock = self.write_lock(&self.index)?;
                     let meta = index_lock.metadata_mut();
+
                     meta.staging_capacity = AtomicUsize::new(0);
                     meta.staged_entries = AtomicUsize::new(0);
                 }
@@ -361,12 +396,16 @@ impl<P: AsRef<Path>> Router<P> {
     }
 
     fn swap_with_staging(&mut self) -> InternalResult<()> {
+        // FIXME: Using the `SwapGuard` is not a good approach! Need a better
+        // way to fix the issue!
         struct SwapGuard(Arc<AtomicBool>);
+
         impl Drop for SwapGuard {
             fn drop(&mut self) {
                 self.0.store(false, Ordering::Release);
             }
         }
+
         self.swap_in_progress.store(true, Ordering::Release);
         let _guard = SwapGuard(self.swap_in_progress.clone());
 
@@ -383,21 +422,31 @@ impl<P: AsRef<Path>> Router<P> {
         //
         // NOTE: A write lock is required because `Bucket::flush` requires write lock to the
         // underlying [Bucket].
+        //
+        // NOTE: Locks are temp and dropped right away
+        //
         self.write_lock(&staging_bucket)?.flush()?;
         self.write_lock(&self.bucket)?.flush()?;
 
-        let old_bucket = std::mem::replace(&mut self.bucket, staging_bucket);
-
+        // NOTE:
+        //
         // On Windows, a memory-mapped file generally cannot be deleted or renamed
-        // while it is mapped. We must drop the `old_bucket` to unmap its file
-        // before proceeding with filesystem operations. The `swap_in_progress`
-        // flag prevents other threads from accessing the inconsistent state.
-        drop(old_bucket);
+        // while it is mapped.
+        //
+        // The "old_bucket" must be dropped to unmap its file before proceeding
+        // with rename/delete operations.
+        //
+        // Read more here, "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-deletefile"
+        //
+        // Also, the `swap_in_progress` flag prevents other threads from accessing the
+        // inconsistent state.
+        //
+        let _ = std::mem::replace(&mut self.bucket, staging_bucket);
 
         std::fs::remove_file(&bucket_path)?;
         std::fs::rename(&staging_path, &bucket_path)?;
 
-        // Lock the index to safely update metadata.
+        // Write-lock the index to safely update metadata
         let index_lock = self.write_lock(&self.index)?;
 
         let new_cap = index_lock.get_staging_capacity();
@@ -411,14 +460,16 @@ impl<P: AsRef<Path>> Router<P> {
 
         // Flush the updated index metadata to disk.
         index_lock.mmap.flush()?;
-
         drop(index_lock);
+
+        // Assign new and updated buckets to [Router]
         self.bucket = Arc::new(RwLock::new(new_bucket));
+        self.staging_bucket = None;
 
         Ok(())
     }
 
-    /// Acquire a read‑lock on *any* Arc<RwLock<T>>, mapping poison → TurboError.
+    /// Acquire a read‑lock on `Arc<RwLock<T>>`, mapping poison error => InternalError.
     fn read_lock<'a, T>(
         &'a self,
         lk: &'a Arc<RwLock<T>>,
@@ -426,7 +477,7 @@ impl<P: AsRef<Path>> Router<P> {
         Ok(lk.read()?)
     }
 
-    /// Acquire a write‑lock on *any* Arc<RwLock<T>>, mapping poison → TurboError.
+    /// Acquire a write‑lock on `Arc<RwLock<T>>`, mapping poison error => InternalError.
     fn write_lock<'a, T>(
         &'a self,
         lk: &'a Arc<RwLock<T>>,
@@ -450,10 +501,11 @@ impl MigrationManager {
         index: Arc<RwLock<Index>>,
         live: Arc<RwLock<Bucket>>,
         staging: Arc<RwLock<Bucket>>,
-    ) -> Self {
+    ) -> InternalResult<Self> {
         let (tx, rx): (Sender<MigrationCmd>, Receiver<MigrationCmd>) = unbounded();
+
         let handle = thread::Builder::new()
-            .name("turbocache-migrator".into())
+            .name("tc-bucket-migration".into())
             .spawn(move || {
                 while let Ok(cmd) = rx.recv() {
                     match cmd {
@@ -479,31 +531,37 @@ impl MigrationManager {
                                 }
                             }
                         }
+
                         MigrationCmd::Shutdown => break,
                     }
                 }
-            })
-            .expect("failed to spawn migrator");
+            })?;
 
-        MigrationManager {
+        Ok(MigrationManager {
             tx,
             handle: Arc::new(Mutex::new(Some(handle))),
-        }
+        })
     }
 
     #[inline]
-    fn enqueue(&self, batch_size: usize) {
-        // we ignore send errors on shutdown path
-        let _ = self.tx.send(MigrationCmd::Batch(batch_size));
+    fn enqueue(&self, batch_size: usize) -> InternalResult<()> {
+        self.tx.send(MigrationCmd::Batch(batch_size))?;
+
+        Ok(())
     }
 
     #[inline]
-    fn shutdown(&self) {
-        let _ = self.tx.send(MigrationCmd::Shutdown);
+    fn shutdown(&self) -> InternalResult<()> {
+        self.tx.send(MigrationCmd::Shutdown)?;
 
         if let Some(h) = self.handle.lock().unwrap().take() {
-            let _ = h.join();
+            match h.join() {
+                Ok(_) => {}
+                Err(e) => return Err(InternalError::LockPoisoned(format!("{:?}", e))),
+            }
         }
+
+        Ok(())
     }
 }
 
