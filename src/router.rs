@@ -6,14 +6,16 @@ use crate::{
     },
     hash::TurboHasher,
 };
+use crossbeam::channel::{unbounded, Receiver, Sender};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
+    thread::{self, JoinHandle},
 };
 
 #[repr(C, align(8))]
@@ -376,11 +378,13 @@ impl<P: AsRef<Path>> Router<P> {
             .take()
             .expect("swap_in_staging called with no staging_bucket");
 
-        // Acquire a read lock to flush the staging bucket's data to disk, ensuring
+        // Acquire a write lock to flush both the bucket's data to disk, ensuring
         // that all pending writes are durable before we rename the file.
-        // NOTE: This assumes `Bucket` has a visible `flush` method, similar to `Index`.
-        // NOTE: A read lock is sufficient because `Bucket::flush` only requires `&self`.
-        self.read_lock(&staging_bucket)?.flush_mmap()?;
+        //
+        // NOTE: A write lock is required because `Bucket::flush` requires write lock to the
+        // underlying [Bucket].
+        self.write_lock(&staging_bucket)?.flush()?;
+        self.write_lock(&self.bucket)?.flush()?;
 
         let old_bucket = std::mem::replace(&mut self.bucket, staging_bucket);
 
@@ -428,6 +432,78 @@ impl<P: AsRef<Path>> Router<P> {
         lk: &'a Arc<RwLock<T>>,
     ) -> InternalResult<RwLockWriteGuard<'a, T>> {
         Ok(lk.write()?)
+    }
+}
+
+enum MigrationCmd {
+    Batch(usize),
+    Shutdown,
+}
+
+struct MigrationManager {
+    tx: Sender<MigrationCmd>,
+    handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl MigrationManager {
+    pub fn new(
+        index: Arc<RwLock<Index>>,
+        live: Arc<RwLock<Bucket>>,
+        staging: Arc<RwLock<Bucket>>,
+    ) -> Self {
+        let (tx, rx): (Sender<MigrationCmd>, Receiver<MigrationCmd>) = unbounded();
+        let handle = thread::Builder::new()
+            .name("turbocache-migrator".into())
+            .spawn(move || {
+                while let Ok(cmd) = rx.recv() {
+                    match cmd {
+                        MigrationCmd::Batch(n) => {
+                            let mut moved = 0;
+
+                            let idx = index.write().unwrap();
+                            let live_b = live.write().unwrap();
+                            let stag_b = staging.write().unwrap();
+
+                            let mut start = idx.get_staged_entries();
+
+                            while moved < n {
+                                if let Ok(Some(item)) = live_b.iter_del(&mut start) {
+                                    let sign = TurboHasher::new(&item.0).0;
+
+                                    if stag_b.set(item, sign).is_ok() {
+                                        idx.update_staged_entries(1);
+                                        moved += 1;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        MigrationCmd::Shutdown => break,
+                    }
+                }
+            })
+            .expect("failed to spawn migrator");
+
+        MigrationManager {
+            tx,
+            handle: Arc::new(Mutex::new(Some(handle))),
+        }
+    }
+
+    #[inline]
+    fn enqueue(&self, batch_size: usize) {
+        // we ignore send errors on shutdown path
+        let _ = self.tx.send(MigrationCmd::Batch(batch_size));
+    }
+
+    #[inline]
+    fn shutdown(&self) {
+        let _ = self.tx.send(MigrationCmd::Shutdown);
+
+        if let Some(h) = self.handle.lock().unwrap().take() {
+            let _ = h.join();
+        }
     }
 }
 

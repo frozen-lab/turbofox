@@ -7,6 +7,7 @@ use core::slice;
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
+    io::Write,
     mem::size_of,
     path::Path,
     sync::{
@@ -476,8 +477,14 @@ impl Bucket {
         Ok(lock.get_inserted())
     }
 
-    pub fn flush_mmap(&self) -> InternalResult<()> {
-        self.read_lock()?.mmap.flush()?;
+    /// Intermediately flush buckets data to disk
+    ///
+    /// NOTE: Requires write lock to the bucket
+    pub fn flush(&self) -> InternalResult<()> {
+        let mut write_lock = self.write_lock()?;
+
+        write_lock.mmap.flush()?;
+        write_lock.file.flush()?;
 
         Ok(())
     }
