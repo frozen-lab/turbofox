@@ -39,7 +39,7 @@ fn bench_set(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1)); // calculating ops/sec
 
     group.bench_function("set", |b| {
-        let mut cache = create_db(true);
+        let mut cache = create_db(false);
 
         b.iter_batched(
             || {

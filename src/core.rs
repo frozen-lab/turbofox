@@ -70,12 +70,6 @@ impl From<std::io::Error> for InternalError {
     }
 }
 
-impl<T> From<crossbeam::channel::SendError<T>> for InternalError {
-    fn from(e: crossbeam::channel::SendError<T>) -> Self {
-        InternalError::LockPoisoned(e.to_string())
-    }
-}
-
 impl<T> From<PoisonError<T>> for InternalError {
     fn from(e: PoisonError<T>) -> Self {
         InternalError::LockPoisoned(e.to_string())
