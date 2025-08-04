@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::PoisonError;
 
 pub(crate) const VERSION: u32 = 0;
@@ -18,8 +18,9 @@ pub type TurboResult<T> = Result<T, TurboError>;
 pub(crate) type InternalResult<T> = Result<T, InternalError>;
 
 /// Configurations for `TurboCache`
-pub(crate) struct TurboConfig<P: AsRef<Path>> {
-    pub dirpath: P,
+#[derive(Clone)]
+pub(crate) struct TurboConfig {
+    pub dirpath: PathBuf,
     pub initial_capacity: usize,
 }
 

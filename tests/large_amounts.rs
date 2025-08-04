@@ -27,7 +27,7 @@ fn test_with_large_amounts() {
     let tmp = TempDir::new().unwrap();
     let dataset = gen_dataset();
 
-    let mut cache = TurboCache::new(tmp.path(), INIT_CAP).unwrap();
+    let mut cache = TurboCache::new(tmp.path().to_path_buf(), INIT_CAP).unwrap();
 
     // set all the items
     for (k, v) in &dataset {

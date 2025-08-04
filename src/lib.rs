@@ -31,7 +31,7 @@ mod router;
 use core::{InternalError, InternalResult, TurboConfig};
 use router::Router;
 use std::{
-    path::Path,
+    path::PathBuf,
     sync::{Arc, RwLock},
 };
 
@@ -61,11 +61,11 @@ pub use core::{TurboError, TurboResult};
 /// }
 /// ```
 #[derive(Clone)]
-pub struct TurboCache<P: AsRef<Path>> {
-    router: Arc<RwLock<Router<P>>>,
+pub struct TurboCache {
+    router: Arc<RwLock<Router>>,
 }
 
-impl<P: AsRef<Path>> TurboCache<P> {
+impl TurboCache {
     /// Open (or create) a cache rooted at `dirpath`, with the given initial capacity.
     ///
     /// ### Errors
@@ -82,7 +82,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     /// let tmp = TempDir::new().unwrap();
     /// let cache = TurboCache::new(tmp.path(), 32).unwrap();
     /// ```
-    pub fn new(dirpath: P, initial_capacity: usize) -> TurboResult<Self> {
+    pub fn new(dirpath: PathBuf, initial_capacity: usize) -> TurboResult<Self> {
         let config = TurboConfig {
             initial_capacity,
             dirpath,
@@ -239,7 +239,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     }
 
     // Acquire the read lock for [Router] while mapping a poison error into [TurboError]
-    fn read_lock(&self) -> InternalResult<std::sync::RwLockReadGuard<'_, Router<P>>> {
+    fn read_lock(&self) -> InternalResult<std::sync::RwLockReadGuard<'_, Router>> {
         Ok(self
             .router
             .read()
@@ -247,7 +247,7 @@ impl<P: AsRef<Path>> TurboCache<P> {
     }
 
     // Acquire the write lock for [Router] while mapping a poison error into [TurboError]
-    fn write_lock(&self) -> InternalResult<std::sync::RwLockWriteGuard<'_, Router<P>>> {
+    fn write_lock(&self) -> InternalResult<std::sync::RwLockWriteGuard<'_, Router>> {
         Ok(self
             .router
             .write()
@@ -261,9 +261,7 @@ mod tests {
     use std::collections::HashSet;
     use tempfile::TempDir;
 
-    fn collect_pairs<P: AsRef<std::path::Path>>(
-        cache: &TurboCache<P>,
-    ) -> HashSet<(Vec<u8>, Vec<u8>)> {
+    fn collect_pairs(cache: &TurboCache) -> HashSet<(Vec<u8>, Vec<u8>)> {
         cache
             .iter()
             .unwrap()
@@ -274,7 +272,7 @@ mod tests {
     #[test]
     fn basic_set_get_del() {
         let tmp = TempDir::new().unwrap();
-        let mut cache = TurboCache::new(tmp.path(), 16).unwrap();
+        let mut cache = TurboCache::new(tmp.path().to_path_buf(), 16).unwrap();
 
         assert!(cache.get(b"foo".to_vec()).unwrap().is_none());
 
@@ -290,7 +288,7 @@ mod tests {
     #[test]
     fn iter_on_empty_cache() {
         let tmp = TempDir::new().unwrap();
-        let cache = TurboCache::new(tmp.path(), 8).unwrap();
+        let cache = TurboCache::new(tmp.path().to_path_buf(), 8).unwrap();
 
         // empty cache → iter yields nothing
         assert!(cache.iter().unwrap().next().is_none());
@@ -299,7 +297,7 @@ mod tests {
     #[test]
     fn iter_after_simple_inserts() {
         let tmp = TempDir::new().unwrap();
-        let mut cache = TurboCache::new(tmp.path(), 100).unwrap();
+        let mut cache = TurboCache::new(tmp.path().to_path_buf(), 100).unwrap();
 
         let inputs = vec![
             (b"a".to_vec(), b"1".to_vec()),
@@ -322,7 +320,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         // small capacity so that `threshold = (cap * 4) / 5` floors to 1
-        let mut cache = TurboCache::new(tmp.path(), 2).unwrap();
+        let mut cache = TurboCache::new(tmp.path().to_path_buf(), 2).unwrap();
 
         // Insert 5 items → forces staging, partial migrations, and at least one final swap
         let all: Vec<_> = (0..5).map(|i| (vec![i], vec![i + 100])).collect();
@@ -346,7 +344,7 @@ mod tests {
     #[test]
     fn delete_via_public_api_and_iter() {
         let tmp = TempDir::new().unwrap();
-        let mut cache = TurboCache::new(tmp.path(), 4).unwrap();
+        let mut cache = TurboCache::new(tmp.path().to_path_buf(), 4).unwrap();
 
         cache.set(b"x".to_vec(), b"10".to_vec()).unwrap();
         cache.set(b"y".to_vec(), b"20".to_vec()).unwrap();

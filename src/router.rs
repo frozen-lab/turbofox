@@ -138,8 +138,8 @@ impl Index {
     }
 }
 
-pub(crate) struct Router<P: AsRef<Path>> {
-    config: TurboConfig<P>,
+pub(crate) struct Router {
+    config: TurboConfig,
     index: Arc<RwLock<Index>>,
     bucket: Arc<RwLock<Bucket>>,
     staging_bucket: Option<Arc<RwLock<Bucket>>>,
@@ -152,22 +152,22 @@ pub(crate) struct Router<P: AsRef<Path>> {
     queue: Queue,
 }
 
-impl<P: AsRef<Path>> Router<P> {
-    pub fn new(config: TurboConfig<P>) -> InternalResult<Self> {
+impl Router {
+    pub fn new(config: TurboConfig) -> InternalResult<Self> {
         // make sure the dir exists
-        std::fs::create_dir_all(config.dirpath.as_ref())?;
+        std::fs::create_dir_all(&config.dirpath)?;
 
-        let index_path = config.dirpath.as_ref().join(INDEX_NAME);
+        let index_path = config.dirpath.join(INDEX_NAME);
         let index = Index::new(&index_path, config.initial_capacity)?;
 
-        let bucket_path = config.dirpath.as_ref().join(BUCKET_NAME);
+        let bucket_path = config.dirpath.join(BUCKET_NAME);
         let bucket = Bucket::new(&bucket_path, index.get_capacity())?;
 
         let num_entries = bucket.get_inserts()?;
         let threshold = index.get_threshold();
 
         let staging_bucket: Option<Arc<RwLock<Bucket>>> = if num_entries >= threshold {
-            let bucket_path = config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
+            let bucket_path = config.dirpath.join(STAGING_BUCKET_NAME);
             let bucket = Bucket::new(&bucket_path, index.get_staging_capacity())?;
 
             Some(Arc::new(RwLock::new(bucket)))
@@ -175,7 +175,7 @@ impl<P: AsRef<Path>> Router<P> {
             None
         };
 
-        let queue_path = config.dirpath.as_ref().join(QUEUE_NAME);
+        let queue_path = config.dirpath.join(QUEUE_NAME);
         let queue = Queue::open(queue_path, config.initial_capacity)?;
 
         Ok(Self {
@@ -223,16 +223,32 @@ impl<P: AsRef<Path>> Router<P> {
         if let Some(staging) = &self.staging_bucket {
             self.write_lock(staging)?.set(pair, sign)?;
 
-            // spawn therad to migrate pairs batch from live to staging bucket
-            let tx = Self::spawn_migration_thread(
-                Arc::clone(&self.index),
-                Arc::clone(&self.bucket),
-                Arc::clone(self.staging_bucket.as_ref().unwrap()),
-                Arc::clone(&self.mgr_flag),
-            )?;
+            // check if live bucket is empty, if not then proceed for migration
+            if let Ok(b) = self.bucket.try_write() {
+                if b.get_inserts()? == 0 {
+                    // spawn therad to swap buckets
+                    let tx = Self::spawn_bucket_swap_thread(
+                        self.config.clone(),
+                        Arc::clone(&self.index),
+                        Arc::clone(&self.bucket),
+                        Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                        Arc::clone(&self.swap_flag),
+                    )?;
 
-            // store the handle for graceful shutdown
-            self.mgr_thread = Some(tx);
+                    self.swap_thread = Some(tx);
+                }
+            } else {
+                // spawn therad to migrate pairs batch from live to staging bucket
+                let tx = Self::spawn_migration_thread(
+                    Arc::clone(&self.index),
+                    Arc::clone(&self.bucket),
+                    Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                    Arc::clone(&self.mgr_flag),
+                )?;
+
+                // store the handle for graceful shutdown
+                self.mgr_thread = Some(tx);
+            }
 
             return Ok(());
         }
@@ -252,10 +268,7 @@ impl<P: AsRef<Path>> Router<P> {
                 let current_cap = index_lock.get_capacity();
                 let new_cap = Index::calc_new_cap(current_cap);
 
-                let staging = Bucket::new(
-                    &self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME),
-                    new_cap,
-                )?;
+                let staging = Bucket::new(&self.config.dirpath.join(STAGING_BUCKET_NAME), new_cap)?;
                 index_lock.set_staging_capacity(new_cap);
 
                 drop(bucket_lock);
@@ -334,7 +347,17 @@ impl<P: AsRef<Path>> Router<P> {
             if bucket_lock.get_inserts()? == 0 {
                 if staging_inserts > 0 {
                     drop(bucket_lock);
-                    self.swap_with_staging()?;
+
+                    // spawn therad to swap buckets
+                    let tx = Self::spawn_bucket_swap_thread(
+                        self.config.clone(),
+                        Arc::clone(&self.index),
+                        Arc::clone(&self.bucket),
+                        Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                        Arc::clone(&self.swap_flag),
+                    )?;
+
+                    self.swap_thread = Some(tx);
                 } else if self.staging_bucket.is_some() {
                     drop(bucket_lock);
 
@@ -366,78 +389,6 @@ impl<P: AsRef<Path>> Router<P> {
         Ok(inserts)
     }
 
-    fn swap_with_staging(&mut self) -> InternalResult<()> {
-        self.swap_flag.store(true, Ordering::Release);
-
-        struct SwapGuard(Arc<AtomicBool>);
-
-        impl Drop for SwapGuard {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::Release);
-            }
-        }
-
-        let _guard = SwapGuard(self.swap_flag.clone());
-
-        let bucket_path = self.config.dirpath.as_ref().join(BUCKET_NAME);
-        let staging_path = self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
-
-        let staging_bucket = self
-            .staging_bucket
-            .take()
-            .expect("swap_in_staging called with no staging_bucket");
-
-        // Acquire a write lock to flush both the bucket's data to disk, ensuring
-        // that all pending writes are durable before we rename the file.
-        //
-        // NOTE: A write lock is required because `Bucket::flush` requires write lock to the
-        // underlying [Bucket].
-        //
-        // NOTE: Locks are temp and dropped right away
-        //
-        self.write_lock(&staging_bucket)?.flush()?;
-        self.write_lock(&self.bucket)?.flush()?;
-
-        // NOTE:
-        //
-        // On Windows, a memory-mapped file generally cannot be deleted or renamed
-        // while it is mapped.
-        //
-        // The "old_bucket" must be dropped to unmap its file before proceeding
-        // with rename/delete operations.
-        //
-        // Read more here, "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-deletefile"
-        //
-        // Also, the `swap_in_progress` flag prevents other threads from accessing the
-        // inconsistent state.
-        //
-        let _ = std::mem::replace(&mut self.bucket, staging_bucket);
-
-        std::fs::remove_file(&bucket_path)?;
-        std::fs::rename(&staging_path, &bucket_path)?;
-
-        // Write-lock the index to safely update metadata
-        let index_lock = self.write_lock(&self.index)?;
-
-        let new_cap = index_lock.get_staging_capacity();
-        let new_bucket = Bucket::new(&bucket_path, new_cap)?;
-        let meta = index_lock.metadata_mut();
-
-        meta.capacity = AtomicUsize::new(new_cap);
-        meta.staging_capacity = AtomicUsize::new(0);
-        meta.threshold = AtomicUsize::new(Index::calc_threshold(new_cap));
-
-        // Flush the updated index metadata to disk.
-        index_lock.mmap.flush()?;
-        drop(index_lock);
-
-        // Assign new and updated buckets to [Router]
-        self.bucket = Arc::new(RwLock::new(new_bucket));
-        self.staging_bucket = None;
-
-        Ok(())
-    }
-
     /// Acquire a read‑lock on `Arc<RwLock<T>>`, mapping poison error => InternalError.
     fn read_lock<'a, T>(
         &'a self,
@@ -452,6 +403,98 @@ impl<P: AsRef<Path>> Router<P> {
         lk: &'a Arc<RwLock<T>>,
     ) -> InternalResult<RwLockWriteGuard<'a, T>> {
         Ok(lk.write()?)
+    }
+
+    fn spawn_bucket_swap_thread(
+        config: TurboConfig,
+        index: Arc<RwLock<Index>>,
+        live_bucket: Arc<RwLock<Bucket>>,
+        staging_bucket: Arc<RwLock<Bucket>>,
+        swap_flag: Arc<AtomicBool>,
+    ) -> InternalResult<JoinHandle<()>> {
+        // a custom mechanism to set the flag when this block
+        // is dropped w/ solidarity or upon error
+        struct SwapGuard(Arc<AtomicBool>);
+
+        impl Drop for SwapGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+
+        // thread handle
+        let handle = thread::Builder::new()
+            .name("tc-bucket-swap".into())
+            .spawn(move || {
+                // update the swap flag
+                swap_flag.store(true, Ordering::Release);
+                let _guard = SwapGuard(swap_flag);
+
+                for _ in 0..5 {
+                    match (
+                        live_bucket.try_write(),
+                        staging_bucket.try_write(),
+                        index.try_write(),
+                    ) {
+                        (Ok(mut live), Ok(mut staged), Ok(idx)) => {
+                            let bp = config.dirpath.join(BUCKET_NAME);
+                            let sp = config.dirpath.join(STAGING_BUCKET_NAME);
+
+                            // Flush both the bucket's data to disk, ensuring
+                            // that all pending writes are durable before we rename the file.
+                            let _ = live.flush();
+                            let _ = staged.flush();
+
+                            // NOTE:
+                            //
+                            // On Windows, a memory-mapped file generally cannot be deleted or renamed
+                            // while it is mapped.
+                            //
+                            // The "old_bucket" must be dropped to unmap its file before proceeding
+                            // with rename/delete operations.
+                            //
+                            // Read more here, "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-deletefile"
+                            //
+                            std::mem::swap(&mut *live, &mut *staged);
+
+                            let _ = std::fs::remove_file(&bp);
+                            let _ = std::fs::rename(&sp, &bp);
+
+                            let new_cap = idx.get_staging_capacity();
+
+                            match Bucket::new(&bp, new_cap) {
+                                Ok(new_bucket) => {
+                                    *live = new_bucket;
+                                }
+                                Err(_) => {
+                                    // Failed to recreate live bucket, abort cleanly
+                                    break;
+                                }
+                            }
+
+                            let meta = idx.metadata_mut();
+
+                            meta.capacity.store(new_cap, Ordering::Relaxed);
+                            meta.staging_capacity.store(0, Ordering::Relaxed);
+                            meta.threshold
+                                .store(Index::calc_threshold(new_cap), Ordering::Relaxed);
+
+                            // supress the error if any
+                            let _ = idx.mmap.flush();
+
+                            // success ;)
+                            break;
+                        }
+
+                        // couldn’t get the locks, sleep & retry
+                        _ => {
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                }
+            })?;
+
+        Ok(handle)
     }
 
     fn spawn_migration_thread(
@@ -532,7 +575,7 @@ impl<P: AsRef<Path>> Router<P> {
     }
 }
 
-impl<P: AsRef<Path>> Drop for Router<P> {
+impl Drop for Router {
     // graceful shutdown for [Router]
     fn drop(&mut self) {
         if let Some(tx) = self.mgr_thread.take() {
@@ -565,7 +608,7 @@ enum IterState {
     Done,
 }
 
-impl<P: AsRef<Path>> super::Router<P> {
+impl super::Router {
     pub fn iter(&self) -> InternalResult<RouterIter<'_>> {
         while self.swap_flag.load(Ordering::Acquire) {
             std::thread::yield_now();
@@ -674,7 +717,7 @@ mod iter_tests {
     use std::collections::HashSet;
     use tempfile::TempDir;
 
-    fn make_router(cap: usize) -> (TempDir, Router<std::path::PathBuf>) {
+    fn make_router(cap: usize) -> (TempDir, Router) {
         let tmp = TempDir::new().expect("tempdir");
         let dir = tmp.path().to_path_buf();
 
@@ -689,7 +732,7 @@ mod iter_tests {
     }
 
     /// collect all kv pairs from router.iter() into a HashSet
-    fn collect_pairs<P: AsRef<std::path::Path>>(router: &Router<P>) -> HashSet<(Vec<u8>, Vec<u8>)> {
+    fn collect_pairs(router: &Router) -> HashSet<(Vec<u8>, Vec<u8>)> {
         router
             .iter()
             .unwrap()
@@ -795,7 +838,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn make_router(cap: usize) -> (TempDir, Router<std::path::PathBuf>) {
+    fn make_router(cap: usize) -> (TempDir, Router) {
         let tmp = TempDir::new().expect("tempdir");
         let dir = tmp.path().to_path_buf();
 
