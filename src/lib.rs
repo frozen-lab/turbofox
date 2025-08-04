@@ -25,6 +25,7 @@
 mod bucket;
 mod core;
 mod hash;
+mod queue;
 mod router;
 
 use core::{InternalError, InternalResult, TurboConfig};

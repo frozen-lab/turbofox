@@ -8,6 +8,7 @@ repository = "https://github.com/frozen-lab/turbocache"
 keywords = ["key-value", "database", "persistent", "store", "db"]
 
 [dependencies]
+byteorder = "1.5.0"
 memmap2 = "0.9.7"
 twox-hash = {version = "2.1.1", features = ["xxhash32"]}
 
