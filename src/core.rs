@@ -7,6 +7,7 @@ pub(crate) const MAGIC: [u8; 4] = *b"TCv0";
 pub(crate) const BUCKET_NAME: &str = "default_bucket";
 pub(crate) const STAGING_BUCKET_NAME: &str = "staging_bucket";
 pub(crate) const INDEX_NAME: &str = "tc_index";
+pub(crate) const QUEUE_NAME: &str = "tc_queue";
 
 /// A custom type for Key-Value pair object
 pub(crate) type KVPair = (Vec<u8>, Vec<u8>);

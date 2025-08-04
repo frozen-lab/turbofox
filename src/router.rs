@@ -1,10 +1,11 @@
 use crate::{
     bucket::Bucket,
     core::{
-        InternalResult, KVPair, TurboConfig, BUCKET_NAME, INDEX_NAME, MAGIC, STAGING_BUCKET_NAME,
-        VERSION,
+        InternalResult, KVPair, TurboConfig, BUCKET_NAME, INDEX_NAME, MAGIC, QUEUE_NAME,
+        STAGING_BUCKET_NAME, VERSION,
     },
     hash::TurboHasher,
+    queue::Queue,
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::{
@@ -12,7 +13,6 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{channel, Sender},
         Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
     thread::{self, JoinHandle},
@@ -143,8 +143,13 @@ pub(crate) struct Router<P: AsRef<Path>> {
     index: Arc<RwLock<Index>>,
     bucket: Arc<RwLock<Bucket>>,
     staging_bucket: Option<Arc<RwLock<Bucket>>>,
-    swap_in_progress: Arc<AtomicBool>,
-    mgr: Option<MigrationManager>,
+    swap_flag: Arc<AtomicBool>,
+    swap_thread: Option<JoinHandle<()>>,
+    mgr_flag: Arc<AtomicBool>,
+    mgr_thread: Option<JoinHandle<()>>,
+    queue_dump_flag: Arc<AtomicBool>,
+    queue_thread: Option<JoinHandle<()>>,
+    queue: Queue,
 }
 
 impl<P: AsRef<Path>> Router<P> {
@@ -170,27 +175,65 @@ impl<P: AsRef<Path>> Router<P> {
             None
         };
 
+        let queue_path = config.dirpath.as_ref().join(QUEUE_NAME);
+        let queue = Queue::open(queue_path, config.initial_capacity)?;
+
         Ok(Self {
             config,
+            queue,
+            staging_bucket,
+            mgr_thread: None,
+            swap_thread: None,
+            queue_thread: None,
             index: Arc::new(RwLock::new(index)),
             bucket: Arc::new(RwLock::new(bucket)),
-            swap_in_progress: Arc::new(AtomicBool::new(false)),
-            staging_bucket,
-            mgr: None,
+            mgr_flag: Arc::new(AtomicBool::new(false)),
+            swap_flag: Arc::new(AtomicBool::new(false)),
+            queue_dump_flag: Arc::new(AtomicBool::new(false)),
         })
     }
 
     pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
-        // wait if the swapping is in progress
-        while self.swap_in_progress.load(Ordering::Acquire) {
+        // NOTE: if queue is being unloaded the operation is blocked,
+        // cause anyways this operation can not obtain lock over
+        // [Queue] if it's already is obtained by other process
+        while self.queue_dump_flag.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
 
+        if self.mgr_flag.load(Ordering::Acquire) {
+            self.queue.push(&pair)?;
+
+            return Ok(());
+        }
+
+        if self.swap_flag.load(Ordering::Acquire) {
+            self.queue.push(&pair)?;
+
+            return Ok(());
+        }
+
+        self.internal_set(pair)
+    }
+
+    fn internal_set(&mut self, pair: KVPair) -> InternalResult<()> {
         let sign = TurboHasher::new(&pair.0).0;
 
         // if staging is available, write directly to it
         if let Some(staging) = &self.staging_bucket {
             self.write_lock(staging)?.set(pair, sign)?;
+
+            // spawn therad to migrate pairs batch from live to staging bucket
+            let tx = Self::spawn_migration_thread(
+                Arc::clone(&self.index),
+                Arc::clone(&self.bucket),
+                Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                Arc::clone(&self.mgr_flag),
+            )?;
+
+            // store the handle for graceful shutdown
+            self.mgr_thread = Some(tx);
+
             return Ok(());
         }
 
@@ -204,36 +247,22 @@ impl<P: AsRef<Path>> Router<P> {
             let inserts = bucket_lock.get_inserts()?;
             let threshold = index_lock.get_threshold();
 
-            // If we've reached the [threshold],
-            //   ▶ Create staging bucket
-            //   ▶ Creeate the migration manager
+            // If we've reached the [threshold], create the staging bucket
             if inserts >= threshold {
                 let current_cap = index_lock.get_capacity();
                 let new_cap = Index::calc_new_cap(current_cap);
-                index_lock.set_staging_capacity(new_cap);
 
                 let staging = Bucket::new(
                     &self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME),
                     new_cap,
                 )?;
+                index_lock.set_staging_capacity(new_cap);
 
                 drop(bucket_lock);
                 drop(index_lock);
 
                 let staging_arc = Arc::new(RwLock::new(staging));
                 self.staging_bucket = Some(staging_arc.clone());
-
-                //
-                // spawn migration manager
-                //
-                let mgr = MigrationManager::spawn(
-                    Arc::clone(&self.index),
-                    Arc::clone(&self.bucket),
-                    staging_arc,
-                    Arc::clone(&self.swap_in_progress),
-                )?;
-
-                self.mgr = Some(mgr);
             }
 
             Ok(())
@@ -242,7 +271,7 @@ impl<P: AsRef<Path>> Router<P> {
 
     pub fn get(&self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
         // wait if the swapping is in progress
-        while self.swap_in_progress.load(Ordering::Acquire) {
+        while self.swap_flag.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
 
@@ -263,7 +292,7 @@ impl<P: AsRef<Path>> Router<P> {
 
     pub fn del(&mut self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
         // wait if the swapping is in progress
-        while self.swap_in_progress.load(Ordering::Acquire) {
+        while self.swap_flag.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
 
@@ -338,14 +367,8 @@ impl<P: AsRef<Path>> Router<P> {
     }
 
     fn swap_with_staging(&mut self) -> InternalResult<()> {
-        if let Some(mgr) = self.mgr.take() {
-            mgr.stop();
-        }
+        self.swap_flag.store(true, Ordering::Release);
 
-        self.swap_in_progress.store(true, Ordering::Release);
-
-        // FIXME: Using the `SwapGuard` is not a good approach! Need a better
-        // way to fix the issue!
         struct SwapGuard(Arc<AtomicBool>);
 
         impl Drop for SwapGuard {
@@ -354,7 +377,7 @@ impl<P: AsRef<Path>> Router<P> {
             }
         }
 
-        let _guard = SwapGuard(self.swap_in_progress.clone());
+        let _guard = SwapGuard(self.swap_flag.clone());
 
         let bucket_path = self.config.dirpath.as_ref().join(BUCKET_NAME);
         let staging_path = self.config.dirpath.as_ref().join(STAGING_BUCKET_NAME);
@@ -430,73 +453,99 @@ impl<P: AsRef<Path>> Router<P> {
     ) -> InternalResult<RwLockWriteGuard<'a, T>> {
         Ok(lk.write()?)
     }
-}
 
-struct MigrationManager {
-    stop_tx: Sender<()>,
-    handle: JoinHandle<()>,
-}
-
-impl MigrationManager {
-    fn spawn(
+    fn spawn_migration_thread(
         index: Arc<RwLock<Index>>,
         live_bucket: Arc<RwLock<Bucket>>,
         staging_bucket: Arc<RwLock<Bucket>>,
-        swap_flag: Arc<AtomicBool>,
-    ) -> InternalResult<Self> {
-        let (stop_tx, stop_rx) = channel();
+        mgr_flag: Arc<AtomicBool>,
+    ) -> InternalResult<JoinHandle<()>> {
+        // a custom mechanism to set the flag when this
+        // is dropped w/ solidarity or upon error
+        struct MgrGuard(Arc<AtomicBool>);
 
-        let handle = thread::spawn(move || {
-            let mut cursor = 0;
+        impl Drop for MgrGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
 
-            loop {
-                if swap_flag.load(Ordering::Acquire) || stop_rx.try_recv().is_ok() {
-                    break;
-                }
+        // thread handle
+        let handle = thread::Builder::new()
+            .name("tc-batch-migrator".into())
+            .spawn(move || {
+                // update the migration flag
+                mgr_flag.store(true, Ordering::Release);
+                let _guard = MgrGuard(mgr_flag);
 
-                let idx = index.write().unwrap();
-                let live = live_bucket.write().unwrap();
-                let stag = staging_bucket.write().unwrap();
-
-                // migration block
-                {
-                    let cap = idx.get_capacity();
-                    let batch_sz = (cap / 4).max(1);
-
-                    for _ in 0..batch_sz {
-                        match live.iter_del(&mut cursor) {
-                            Ok(Some((k, v))) => {
-                                let sig = TurboHasher::new(&k).0;
-
-                                // unwrap is OK here because errors are fatal for migration
-                                stag.set((k, v), sig).unwrap();
-                            }
-                            // no more live items
-                            Ok(None) => break,
-                            Err(_) => {
-                                break;
-                            }
-                        }
-                    }
+                // Compute batch size = `max(1, 25% of capacity)`
+                let batch_size = match index.read() {
+                    Ok(idx) => (idx.get_capacity() / 4).max(1),
+                    // unable to obtain the lock
+                    Err(_) => return,
                 };
 
-                let inserts = live.get_inserts().unwrap();
+                let mut migrated = 0;
 
-                // migration is complete
-                if inserts == 0 {
-                    break;
+                // TODO: Track this cursor in `Router`, so we
+                // could optimize the lookps in bucket, obtain
+                // the read lock and update the value after
+                // the migration
+                let mut cursor = 0usize;
+
+                // Try to acquire read locks to both buckets,
+                // but back off if contention or after fixed tries
+                for _ in 0..5 {
+                    match (live_bucket.try_write(), staging_bucket.try_write()) {
+                        (Ok(live), Ok(staged)) => {
+                            while migrated < batch_size {
+                                match live.iter_del(&mut cursor) {
+                                    Ok(Some((k, v))) => {
+                                        let sig = TurboHasher::new(&k).0;
+
+                                        // absorb error if any!
+                                        //
+                                        // FIXME/HACK: Here we end up skipping the pair,
+                                        // so there is potential data loss
+                                        let _ = staged.set((k, v), sig);
+
+                                        migrated += 1;
+                                    }
+                                    // bucket is empty, migration is done
+                                    _ => break,
+                                }
+                            }
+
+                            // done with this batch
+                            break;
+                        }
+
+                        // couldn’t get the locks, sleep & retry
+                        _ => {
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    }
                 }
+            })?;
 
-                thread::sleep(Duration::from_millis(10));
-            }
-        });
-
-        Ok(MigrationManager { stop_tx, handle })
+        Ok(handle)
     }
+}
 
-    fn stop(self) {
-        let _ = self.stop_tx.send(());
-        let _ = self.handle.join();
+impl<P: AsRef<Path>> Drop for Router<P> {
+    // graceful shutdown for [Router]
+    fn drop(&mut self) {
+        if let Some(tx) = self.mgr_thread.take() {
+            let _ = tx.join();
+        }
+
+        if let Some(tx) = self.swap_thread.take() {
+            let _ = tx.join();
+        }
+
+        if let Some(tx) = self.queue_thread.take() {
+            let _ = tx.join();
+        }
     }
 }
 
@@ -518,7 +567,7 @@ enum IterState {
 
 impl<P: AsRef<Path>> super::Router<P> {
     pub fn iter(&self) -> InternalResult<RouterIter<'_>> {
-        while self.swap_in_progress.load(Ordering::Acquire) {
+        while self.swap_flag.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
 
