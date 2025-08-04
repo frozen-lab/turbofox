@@ -80,7 +80,7 @@ impl TurboCache {
     /// use turbocache::TurboCache;
     ///
     /// let tmp = TempDir::new().unwrap();
-    /// let cache = TurboCache::new(tmp.path(), 32).unwrap();
+    /// let cache = TurboCache::new(tmp.path().to_path_buf(), 32).unwrap();
     /// ```
     pub fn new(dirpath: PathBuf, initial_capacity: usize) -> TurboResult<Self> {
         let config = TurboConfig {
@@ -110,7 +110,7 @@ impl TurboCache {
     /// use turbocache::TurboCache;
     ///
     /// let tmp = TempDir::new().unwrap();
-    /// let mut cache = TurboCache::new(tmp.path(), 8).unwrap();
+    /// let mut cache = TurboCache::new(tmp.path().to_path_buf(), 8).unwrap();
     ///
     /// cache.set(b"apple".to_vec(), b"red".to_vec()).unwrap();
     /// assert_eq!(cache.get(b"apple".to_vec()).unwrap(), Some(b"red".to_vec()));
@@ -134,7 +134,7 @@ impl TurboCache {
     /// use turbocache::TurboCache;
     ///
     /// let tmp = TempDir::new().unwrap();
-    /// let mut cache = TurboCache::new(tmp.path(), 8).unwrap();
+    /// let mut cache = TurboCache::new(tmp.path().to_path_buf(), 8).unwrap();
     ///
     /// cache.set(b"k".to_vec(), b"v".to_vec()).unwrap();
     ///
@@ -160,7 +160,7 @@ impl TurboCache {
     /// use turbocache::TurboCache;
     ///
     /// let tmp = TempDir::new().unwrap();
-    /// let mut cache = TurboCache::new(tmp.path(), 8).unwrap();
+    /// let mut cache = TurboCache::new(tmp.path().to_path_buf(), 8).unwrap();
     ///
     /// cache.set(b"foo".to_vec(), b"bar".to_vec()).unwrap();
     /// let old = cache.del(b"foo".to_vec()).unwrap();
@@ -193,7 +193,7 @@ impl TurboCache {
     /// use std::collections::HashSet;
     ///
     /// let tmp = TempDir::new().unwrap();
-    /// let mut cache = TurboCache::new(tmp.path(), 3).unwrap();
+    /// let mut cache = TurboCache::new(tmp.path().to_path_buf(), 3).unwrap();
     ///
     /// cache.set(b"x".to_vec(), b"1".to_vec()).unwrap();
     /// cache.set(b"y".to_vec(), b"2".to_vec()).unwrap();
@@ -225,7 +225,7 @@ impl TurboCache {
     /// use turbocache::TurboCache;
     ///
     /// let tmp = TempDir::new().unwrap();
-    /// let mut cache = TurboCache::new(tmp.path(), 3).unwrap();
+    /// let mut cache = TurboCache::new(tmp.path().to_path_buf(), 3).unwrap();
     ///
     /// cache.set(b"x".to_vec(), b"1".to_vec()).unwrap();
     /// cache.set(b"y".to_vec(), b"2".to_vec()).unwrap();
