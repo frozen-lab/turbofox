@@ -13,7 +13,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -143,13 +143,25 @@ pub(crate) struct Router {
     index: Arc<RwLock<Index>>,
     bucket: Arc<RwLock<Bucket>>,
     staging_bucket: Option<Arc<RwLock<Bucket>>>,
+
+    // Swapping
+    swap_mutex: Mutex<()>,
+    swap_cvar: Arc<Condvar>,
     swap_flag: Arc<AtomicBool>,
     swap_thread: Option<JoinHandle<()>>,
+
+    // Migration
+    mgr_mutex: Mutex<()>,
+    mgr_cvar: Arc<Condvar>,
     mgr_flag: Arc<AtomicBool>,
     mgr_thread: Option<JoinHandle<()>>,
+
+    // Queue
+    queue: Queue,
+    queue_mutex: Mutex<()>,
+    queue_cvar: Arc<Condvar>,
     queue_dump_flag: Arc<AtomicBool>,
     queue_thread: Option<JoinHandle<()>>,
-    queue: Queue,
 }
 
 impl Router {
@@ -185,6 +197,12 @@ impl Router {
             mgr_thread: None,
             swap_thread: None,
             queue_thread: None,
+            swap_mutex: Mutex::new(()),
+            mgr_mutex: Mutex::new(()),
+            queue_mutex: Mutex::new(()),
+            mgr_cvar: Arc::new(Condvar::new()),
+            swap_cvar: Arc::new(Condvar::new()),
+            queue_cvar: Arc::new(Condvar::new()),
             index: Arc::new(RwLock::new(index)),
             bucket: Arc::new(RwLock::new(bucket)),
             mgr_flag: Arc::new(AtomicBool::new(false)),
@@ -194,12 +212,16 @@ impl Router {
     }
 
     pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
-        // NOTE: if queue is being unloaded the operation is blocked,
-        // cause anyways this operation can not obtain lock over
-        // [Queue] if it's already is obtained by other process
-        while self.queue_dump_flag.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        // block the operation if queue dump is in progress
+        // w/o any CPU burn
+        let queue_guard = self.queue_mutex.lock().unwrap();
+        let qg = self.queue_cvar.wait_while(queue_guard, |_| {
+            self.queue_dump_flag.load(Ordering::Acquire)
+        })?;
+        drop(qg);
+
+        // NOTE: The operation is queueed w/o blocking and provides optimistic
+        // confirmation
 
         if self.mgr_flag.load(Ordering::Acquire) {
             self.queue.push(&pair)?;
@@ -233,8 +255,10 @@ impl Router {
                         Arc::clone(&self.bucket),
                         Arc::clone(self.staging_bucket.as_ref().unwrap()),
                         Arc::clone(&self.swap_flag),
+                        Arc::clone(&self.swap_cvar),
                     )?;
 
+                    // store the handle for graceful shutdown
                     self.swap_thread = Some(tx);
                 }
             } else {
@@ -244,6 +268,7 @@ impl Router {
                     Arc::clone(&self.bucket),
                     Arc::clone(self.staging_bucket.as_ref().unwrap()),
                     Arc::clone(&self.mgr_flag),
+                    Arc::clone(&self.mgr_cvar),
                 )?;
 
                 // store the handle for graceful shutdown
@@ -276,6 +301,18 @@ impl Router {
 
                 let staging_arc = Arc::new(RwLock::new(staging));
                 self.staging_bucket = Some(staging_arc.clone());
+
+                // spawn therad to migrate pairs batch from live to staging bucket
+                let tx = Self::spawn_migration_thread(
+                    Arc::clone(&self.index),
+                    Arc::clone(&self.bucket),
+                    Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                    Arc::clone(&self.mgr_flag),
+                    Arc::clone(&self.mgr_cvar),
+                )?;
+
+                // store the handle for graceful shutdown
+                self.mgr_thread = Some(tx);
             }
 
             Ok(())
@@ -283,24 +320,45 @@ impl Router {
     }
 
     pub fn get(&self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
-        // block till queue is being dumped
-        while self.queue_dump_flag.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        // Block this operation if **queue dump** is in progress w/o any CPU burn
+        let queue_guard = self.queue_mutex.lock().unwrap();
+        let qg = self.queue_cvar.wait_while(queue_guard, |_| {
+            self.queue_dump_flag.load(Ordering::Acquire)
+        })?;
+        drop(qg);
 
-        // block till the migration is happening
-        while self.mgr_flag.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        // Block this operation if **migration** is in progress w/o any CPU burn
+        let mgr_guard = self.mgr_mutex.lock().unwrap();
+        let mg = self
+            .mgr_cvar
+            .wait_while(mgr_guard, |_| self.mgr_flag.load(Ordering::Acquire))?;
+        drop(mg);
 
-        // block till the bucket swap is happening
-        while self.swap_flag.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        // Block this operation if **bucket swap** is in progress w/o any CPU burn
+        let swap_guard = self.swap_mutex.lock().unwrap();
+        let sg = self
+            .swap_cvar
+            .wait_while(swap_guard, |_| self.swap_flag.load(Ordering::Acquire))?;
+        drop(sg);
+
+        // perform the operation
 
         let sign = TurboHasher::new(&kbuf).0;
 
         if let Some(bucket) = &self.staging_bucket {
+            // spawn therad to migrate pairs batch from live to staging bucket
+            //
+            // HACK: As we can not mutate the `Self` here, we can not store the
+            // thread-handle for graceful closure! Even on graceful shutdown,
+            // it'll be inturepted
+            let _ = Self::spawn_migration_thread(
+                Arc::clone(&self.index),
+                Arc::clone(&self.bucket),
+                Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                Arc::clone(&self.mgr_flag),
+                Arc::clone(&self.mgr_cvar),
+            )?;
+
             let bucket_lock = self.read_lock(bucket)?;
 
             if let Some(val) = bucket_lock.get(kbuf.clone(), sign)? {
@@ -314,20 +372,28 @@ impl Router {
     }
 
     pub fn del(&mut self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
-        // block till queue is being dumped
-        while self.queue_dump_flag.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        // Block this operation if **queue dump** is in progress w/o any CPU burn
+        let queue_guard = self.queue_mutex.lock().unwrap();
+        let qg = self.queue_cvar.wait_while(queue_guard, |_| {
+            self.queue_dump_flag.load(Ordering::Acquire)
+        })?;
+        drop(qg);
 
-        // block till the migration is happening
-        while self.mgr_flag.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        // Block this operation if **migration** is in progress w/o any CPU burn
+        let mgr_guard = self.mgr_mutex.lock().unwrap();
+        let mg = self
+            .mgr_cvar
+            .wait_while(mgr_guard, |_| self.mgr_flag.load(Ordering::Acquire))?;
+        drop(mg);
 
-        // block till the bucket swap is happening
-        while self.swap_flag.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        // Block this operation if **bucket swap** is in progress w/o any CPU burn
+        let swap_guard = self.swap_mutex.lock().unwrap();
+        let sg = self
+            .swap_cvar
+            .wait_while(swap_guard, |_| self.swap_flag.load(Ordering::Acquire))?;
+        drop(sg);
+
+        // perform the operation
 
         let sign = TurboHasher::new(&kbuf).0;
 
@@ -338,15 +404,33 @@ impl Router {
                 if let Some(val) = bucket_lock.del(kbuf.clone(), sign)? {
                     // if staging has no items left,
                     // ▶ remove the staging bucket
-                    // ▶ remove the migration manager
                     if bucket_lock.get_inserts()? == 0 {
                         drop(bucket_lock);
                         self.staging_bucket = None;
+
+                        // close the migration handle
+                        if let Some(tx) = self.mgr_thread.take() {
+                            let _ = tx.join();
+                        }
 
                         let index_lock = self.write_lock(&self.index)?;
                         let meta = index_lock.metadata_mut();
 
                         meta.staging_capacity = AtomicUsize::new(0);
+                    } else {
+                        drop(bucket_lock);
+
+                        // spawn therad to migrate pairs batch from live to staging bucket
+                        let tx = Self::spawn_migration_thread(
+                            Arc::clone(&self.index),
+                            Arc::clone(&self.bucket),
+                            Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                            Arc::clone(&self.mgr_flag),
+                            Arc::clone(&self.mgr_cvar),
+                        )?;
+
+                        // store the handle for graceful shutdown
+                        self.mgr_thread = Some(tx);
                     }
 
                     return Ok(Some(val));
@@ -368,23 +452,28 @@ impl Router {
                 if staging_inserts > 0 {
                     drop(bucket_lock);
 
-                    // spawn therad to swap buckets
-                    let tx = Self::spawn_bucket_swap_thread(
-                        self.config.clone(),
+                    // spawn therad to migrate pairs batch from live to staging bucket
+                    let tx = Self::spawn_migration_thread(
                         Arc::clone(&self.index),
                         Arc::clone(&self.bucket),
                         Arc::clone(self.staging_bucket.as_ref().unwrap()),
-                        Arc::clone(&self.swap_flag),
+                        Arc::clone(&self.mgr_flag),
+                        Arc::clone(&self.mgr_cvar),
                     )?;
 
-                    self.swap_thread = Some(tx);
+                    // store the handle for graceful shutdown
+                    self.mgr_thread = Some(tx);
                 } else if self.staging_bucket.is_some() {
                     drop(bucket_lock);
 
                     // As both live and staging are empty,
                     // ▶ remove the staging bucket
-                    // ▶ remove the migration manager
                     self.staging_bucket = None;
+
+                    // close the migration handle
+                    if let Some(tx) = self.mgr_thread.take() {
+                        let _ = tx.join();
+                    }
 
                     let index_lock = self.write_lock(&self.index)?;
                     let meta = index_lock.metadata_mut();
@@ -425,20 +514,50 @@ impl Router {
         Ok(lk.write()?)
     }
 
+    fn spawn_queue_dump_thread(
+        queue: Arc<RwLock<Queue>>,
+        queue_flag: Arc<AtomicBool>,
+        queue_cvar: Arc<Condvar>,
+    ) -> InternalResult<JoinHandle<()>> {
+        // a custom mechanism to set the flag when this block
+        // is dropped w/ solidarity or upon error
+        struct SwapGuard(Arc<AtomicBool>, Arc<Condvar>);
+
+        impl Drop for SwapGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+                self.1.notify_all();
+            }
+        }
+
+        // thread handle
+        let handle = thread::Builder::new()
+            .name("tc-bucket-swap".into())
+            .spawn(move || {
+                // update the swap flag
+                queue_flag.store(true, Ordering::Release);
+                let _guard = SwapGuard(queue_flag, queue_cvar);
+            })?;
+
+        Ok(handle)
+    }
+
     fn spawn_bucket_swap_thread(
         config: TurboConfig,
         index: Arc<RwLock<Index>>,
         live_bucket: Arc<RwLock<Bucket>>,
         staging_bucket: Arc<RwLock<Bucket>>,
         swap_flag: Arc<AtomicBool>,
+        swap_cvar: Arc<Condvar>,
     ) -> InternalResult<JoinHandle<()>> {
         // a custom mechanism to set the flag when this block
         // is dropped w/ solidarity or upon error
-        struct SwapGuard(Arc<AtomicBool>);
+        struct SwapGuard(Arc<AtomicBool>, Arc<Condvar>);
 
         impl Drop for SwapGuard {
             fn drop(&mut self) {
                 self.0.store(false, Ordering::Release);
+                self.1.notify_all();
             }
         }
 
@@ -448,7 +567,7 @@ impl Router {
             .spawn(move || {
                 // update the swap flag
                 swap_flag.store(true, Ordering::Release);
-                let _guard = SwapGuard(swap_flag);
+                let _guard = SwapGuard(swap_flag, swap_cvar);
 
                 for _ in 0..5 {
                     match (
@@ -560,14 +679,16 @@ impl Router {
         live_bucket: Arc<RwLock<Bucket>>,
         staging_bucket: Arc<RwLock<Bucket>>,
         mgr_flag: Arc<AtomicBool>,
+        mgr_cvar: Arc<Condvar>,
     ) -> InternalResult<JoinHandle<()>> {
         // a custom mechanism to set the flag when this
         // is dropped w/ solidarity or upon error
-        struct MgrGuard(Arc<AtomicBool>);
+        struct MgrGuard(Arc<AtomicBool>, Arc<Condvar>);
 
         impl Drop for MgrGuard {
             fn drop(&mut self) {
                 self.0.store(false, Ordering::Release);
+                self.1.notify_all();
             }
         }
 
@@ -577,7 +698,7 @@ impl Router {
             .spawn(move || {
                 // update the migration flag
                 mgr_flag.store(true, Ordering::Release);
-                let _guard = MgrGuard(mgr_flag);
+                let _guard = MgrGuard(mgr_flag, mgr_cvar);
 
                 // Compute batch size = `max(1, 25% of capacity)`
                 let batch_size = match index.read() {
@@ -926,125 +1047,125 @@ mod tests {
         assert!(router.get(key).unwrap().is_none());
     }
 
-    // #[test]
-    // fn triggers_staging_and_swaps() {
-    //     // capacity=4 → threshold = 3
-    //     let (_tmp, mut router) = make_router(4);
-    //     let inputs: Vec<_> = (0..6).map(|i| (vec![i], vec![i + 100])).collect();
+    #[test]
+    fn triggers_staging_and_swaps() {
+        // capacity=4 → threshold = 3
+        let (_tmp, mut router) = make_router(4);
+        let inputs: Vec<_> = (0..6).map(|i| (vec![i], vec![i + 100])).collect();
 
-    //     let threshold = router.read_lock(&router.index).unwrap().get_threshold();
-    //     assert_eq!(threshold, 3);
+        let threshold = router.read_lock(&router.index).unwrap().get_threshold();
+        assert_eq!(threshold, 3);
 
-    //     for i in 0..(threshold - 1) {
-    //         router.set(inputs[i].clone()).unwrap();
+        for i in 0..(threshold - 1) {
+            router.set(inputs[i].clone()).unwrap();
 
-    //         assert!(
-    //             router.staging_bucket.is_none(),
-    //             "#{} should not have staging",
-    //             i
-    //         );
-    //     }
+            assert!(
+                router.staging_bucket.is_none(),
+                "#{} should not have staging",
+                i
+            );
+        }
 
-    //     // hitting threshold: staging must appear
-    //     router.set(inputs[threshold - 1].clone()).unwrap();
-    //     assert!(
-    //         router.staging_bucket.is_some(),
-    //         "staging must exist once inserts == threshold"
-    //     );
+        // hitting threshold: staging must appear
+        router.set(inputs[threshold - 1].clone()).unwrap();
+        assert!(
+            router.staging_bucket.is_some(),
+            "staging must exist once inserts == threshold"
+        );
 
-    //     let (cap_before, stag_cap) = {
-    //         let index_lock = router.read_lock(&router.index).unwrap();
-    //         (index_lock.get_capacity(), index_lock.get_staging_capacity())
-    //     };
+        let (cap_before, stag_cap) = {
+            let index_lock = router.read_lock(&router.index).unwrap();
+            (index_lock.get_capacity(), index_lock.get_staging_capacity())
+        };
 
-    //     assert_eq!(stag_cap, cap_before * 2, "staging_capacity doubled");
+        assert_eq!(stag_cap, cap_before * 2, "staging_capacity doubled");
 
-    //     // keep inserting to force migration & final swap
-    //     for p in inputs.iter().skip(threshold) {
-    //         router.set(p.clone()).unwrap();
-    //     }
+        // keep inserting to force migration & final swap
+        for p in inputs.iter().skip(threshold) {
+            router.set(p.clone()).unwrap();
+        }
 
-    //     // now all items (6) should be in the new live bucket
-    //     for (k, v) in inputs.into_iter() {
-    //         let got = router.get(k.clone()).unwrap().expect("found");
+        // now all items (6) should be in the new live bucket
+        for (k, v) in inputs.into_iter() {
+            let got = router.get(k.clone()).unwrap().expect("found");
 
-    //         assert_eq!(got, v);
-    //     }
+            assert_eq!(got, v);
+        }
 
-    //     assert!(
-    //         router.staging_bucket.is_none(),
-    //         "staging should be None after swap"
-    //     );
-    //     assert_eq!(
-    //         router.read_lock(&router.index).unwrap().get_capacity(),
-    //         stag_cap
-    //     );
-    // }
+        assert!(
+            router.staging_bucket.is_none(),
+            "staging should be None after swap"
+        );
+        assert_eq!(
+            router.read_lock(&router.index).unwrap().get_capacity(),
+            stag_cap
+        );
+    }
 
-    // #[test]
-    // fn delete_triggers_swap_when_live_empty() {
-    //     // capacity=2, threshold=1 → staging immediately
-    //     let (_tmp, mut router) = make_router(2);
+    #[test]
+    fn delete_triggers_swap_when_live_empty() {
+        // capacity=2, threshold=1 → staging immediately
+        let (_tmp, mut router) = make_router(2);
 
-    //     // insert 1 → staging
-    //     router.set((b"a".to_vec(), b"1".to_vec())).unwrap();
-    //     assert!(router.staging_bucket.is_some());
+        // insert 1 → staging
+        router.set((b"a".to_vec(), b"1".to_vec())).unwrap();
+        assert!(router.staging_bucket.is_some());
 
-    //     // insert second into staging then delete both
-    //     router.set((b"b".to_vec(), b"2".to_vec())).unwrap();
-    //     router.del(b"a".to_vec()).unwrap();
+        // insert second into staging then delete both
+        router.set((b"b".to_vec(), b"2".to_vec())).unwrap();
+        router.del(b"a".to_vec()).unwrap();
 
-    //     // just one entry, under the threshold
-    //     assert!(router.staging_bucket.is_none());
+        // just one entry, under the threshold
+        assert!(router.staging_bucket.is_none());
 
-    //     // after draining, staging_bucket should be None, capacity reset
-    //     let _ = router.del(b"b".to_vec()).unwrap();
-    //     assert!(router.staging_bucket.is_none());
+        // after draining, staging_bucket should be None, capacity reset
+        let _ = router.del(b"b".to_vec()).unwrap();
+        assert!(router.staging_bucket.is_none());
 
-    //     // and get returns None
-    //     assert!(router.get(b"a".to_vec()).unwrap().is_none());
-    //     assert!(router.get(b"b".to_vec()).unwrap().is_none());
-    // }
+        // and get returns None
+        assert!(router.get(b"a".to_vec()).unwrap().is_none());
+        assert!(router.get(b"b".to_vec()).unwrap().is_none());
+    }
 
-    // #[test]
-    // fn persistence_of_index_and_bucket() {
-    //     let tmp = TempDir::new().unwrap();
-    //     let path = tmp.path().to_path_buf();
+    #[test]
+    fn persistence_of_index_and_bucket() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().to_path_buf();
 
-    //     {
-    //         let config = TurboConfig {
-    //             dirpath: path.clone(),
-    //             initial_capacity: 8,
-    //         };
-    //         let mut router = Router::new(config).unwrap();
+        {
+            let config = TurboConfig {
+                dirpath: path.clone(),
+                initial_capacity: 8,
+            };
+            let mut router = Router::new(config).unwrap();
 
-    //         router.set((b"x".to_vec(), b"100".to_vec())).unwrap();
+            router.set((b"x".to_vec(), b"100".to_vec())).unwrap();
 
-    //         // force staging
-    //         for i in 0..10 {
-    //             router.set((vec![i], vec![i + 1])).unwrap();
-    //         }
+            // force staging
+            for i in 0..10 {
+                router.set((vec![i], vec![i + 1])).unwrap();
+            }
 
-    //         // record the updated capacity
-    //         let cap_after = router.read_lock(&router.index).unwrap().get_capacity();
+            // record the updated capacity
+            let cap_after = router.read_lock(&router.index).unwrap().get_capacity();
 
-    //         assert!(cap_after > 8);
-    //     }
+            assert!(cap_after > 8);
+        }
 
-    //     let config = TurboConfig {
-    //         dirpath: path,
-    //         initial_capacity: 8,
-    //     };
-    //     let router2 = Router::new(config).unwrap();
+        let config = TurboConfig {
+            dirpath: path,
+            initial_capacity: 8,
+        };
+        let router2 = Router::new(config).unwrap();
 
-    //     // capacity must persist
-    //     let cap_persisted = router2.read_lock(&router2.index).unwrap().get_capacity();
-    //     assert!(cap_persisted > 8);
+        // capacity must persist
+        let cap_persisted = router2.read_lock(&router2.index).unwrap().get_capacity();
+        assert!(cap_persisted > 8);
 
-    //     // data must still be there
-    //     let got = router2.get(b"x".to_vec()).unwrap().unwrap();
-    //     assert_eq!(got, b"100".to_vec());
-    // }
+        // data must still be there
+        let got = router2.get(b"x".to_vec()).unwrap().unwrap();
+        assert_eq!(got, b"100".to_vec());
+    }
 
     #[test]
     fn get_and_del_nonexistent() {
@@ -1132,34 +1253,34 @@ mod tests {
         assert_eq!(r2.read_lock(&r2.index).unwrap().get_capacity(), 16); // should have the new cap
     }
 
-    // #[test]
-    // fn rapid_delete_insert_cycle() {
-    //     let (_tmp, mut router) = make_router(2);
+    #[test]
+    fn rapid_delete_insert_cycle() {
+        let (_tmp, mut router) = make_router(2);
 
-    //     // force staging by inserting two, which should also trigger a swap
-    //     router.set((b"a".to_vec(), b"1".to_vec())).unwrap();
-    //     router.set((b"b".to_vec(), b"2".to_vec())).unwrap();
-    //     router.set((b"c".to_vec(), b"3".to_vec())).unwrap();
+        // force staging by inserting two, which should also trigger a swap
+        router.set((b"a".to_vec(), b"1".to_vec())).unwrap();
+        router.set((b"b".to_vec(), b"2".to_vec())).unwrap();
+        router.set((b"c".to_vec(), b"3".to_vec())).unwrap();
 
-    //     // Even After the swap, the staging bucket should be there
-    //     assert!(router.staging_bucket.is_some());
+        // Even After the swap, the staging bucket should be there
+        assert!(router.staging_bucket.is_some());
 
-    //     // delete 3 keys => back to no staging
-    //     router.del(b"a".to_vec()).unwrap();
-    //     router.del(b"b".to_vec()).unwrap();
-    //     router.del(b"c".to_vec()).unwrap();
+        // delete 3 keys => back to no staging
+        router.del(b"a".to_vec()).unwrap();
+        router.del(b"b".to_vec()).unwrap();
+        router.del(b"c".to_vec()).unwrap();
 
-    //     assert!(router.staging_bucket.is_none());
+        assert!(router.staging_bucket.is_none());
 
-    //     // The new capacity is 4, so the threshold is 3.
-    //     // Insert again => staging should re-appear at threshold
-    //     router.set((b"d".to_vec(), b"4".to_vec())).unwrap();
-    //     router.set((b"e".to_vec(), b"5".to_vec())).unwrap();
-    //     router.set((b"f".to_vec(), b"6".to_vec())).unwrap();
+        // The new capacity is 4, so the threshold is 3.
+        // Insert again => staging should re-appear at threshold
+        router.set((b"d".to_vec(), b"4".to_vec())).unwrap();
+        router.set((b"e".to_vec(), b"5".to_vec())).unwrap();
+        router.set((b"f".to_vec(), b"6".to_vec())).unwrap();
 
-    //     assert!(router.staging_bucket.is_some());
-    //     assert_eq!(router.get_inserts().unwrap(), 3);
-    // }
+        assert!(router.staging_bucket.is_some());
+        assert_eq!(router.get_inserts().unwrap(), 3);
+    }
 
     #[test]
     fn delete_cycle_capacity_is_either_initial_or_doubled_and_invariants_hold() {
