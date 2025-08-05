@@ -1,11 +1,10 @@
 use crate::{
     bucket::Bucket,
     core::{
-        InternalResult, KVPair, TurboConfig, BUCKET_NAME, INDEX_NAME, MAGIC, QUEUE_NAME,
-        STAGING_BUCKET_NAME, VERSION,
+        InternalResult, KVPair, TurboConfig, BUCKET_NAME, INDEX_NAME, MAGIC, STAGING_BUCKET_NAME,
+        VERSION,
     },
     hash::TurboHasher,
-    queue::Queue,
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::{
@@ -155,13 +154,6 @@ pub(crate) struct Router {
     mgr_cvar: Arc<Condvar>,
     mgr_flag: Arc<AtomicBool>,
     mgr_thread: Option<JoinHandle<()>>,
-
-    // Queue
-    queue: Queue,
-    queue_mutex: Mutex<()>,
-    queue_cvar: Arc<Condvar>,
-    queue_dump_flag: Arc<AtomicBool>,
-    queue_thread: Option<JoinHandle<()>>,
 }
 
 impl Router {
@@ -187,50 +179,42 @@ impl Router {
             None
         };
 
-        let queue_path = config.dirpath.join(QUEUE_NAME);
-        let queue = Queue::open(queue_path, config.initial_capacity)?;
-
         Ok(Self {
             config,
-            queue,
             staging_bucket,
             mgr_thread: None,
             swap_thread: None,
-            queue_thread: None,
             swap_mutex: Mutex::new(()),
             mgr_mutex: Mutex::new(()),
-            queue_mutex: Mutex::new(()),
             mgr_cvar: Arc::new(Condvar::new()),
             swap_cvar: Arc::new(Condvar::new()),
-            queue_cvar: Arc::new(Condvar::new()),
             index: Arc::new(RwLock::new(index)),
             bucket: Arc::new(RwLock::new(bucket)),
             mgr_flag: Arc::new(AtomicBool::new(false)),
             swap_flag: Arc::new(AtomicBool::new(false)),
-            queue_dump_flag: Arc::new(AtomicBool::new(false)),
         })
     }
 
     pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
         // block the operation if queue dump is in progress
         // w/o any CPU burn
-        let queue_guard = self.queue_mutex.lock().unwrap();
-        let qg = self.queue_cvar.wait_while(queue_guard, |_| {
-            self.queue_dump_flag.load(Ordering::Acquire)
-        })?;
-        drop(qg);
+        // let queue_guard = self.queue_mutex.lock().unwrap();
+        // let qg = self.queue_cvar.wait_while(queue_guard, |_| {
+        //     self.queue_dump_flag.load(Ordering::Acquire)
+        // })?;
+        // drop(qg);
 
         // NOTE: The operation is queueed w/o blocking and provides optimistic
         // confirmation
 
         if self.mgr_flag.load(Ordering::Acquire) {
-            self.queue.push(&pair)?;
+            // self.queue.push(&pair)?;
 
             return Ok(());
         }
 
         if self.swap_flag.load(Ordering::Acquire) {
-            self.queue.push(&pair)?;
+            // self.queue.push(&pair)?;
 
             return Ok(());
         }
@@ -321,11 +305,11 @@ impl Router {
 
     pub fn get(&self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
         // Block this operation if **queue dump** is in progress w/o any CPU burn
-        let queue_guard = self.queue_mutex.lock().unwrap();
-        let qg = self.queue_cvar.wait_while(queue_guard, |_| {
-            self.queue_dump_flag.load(Ordering::Acquire)
-        })?;
-        drop(qg);
+        // let queue_guard = self.queue_mutex.lock().unwrap();
+        // let qg = self.queue_cvar.wait_while(queue_guard, |_| {
+        //     self.queue_dump_flag.load(Ordering::Acquire)
+        // })?;
+        // drop(qg);
 
         // Block this operation if **migration** is in progress w/o any CPU burn
         let mgr_guard = self.mgr_mutex.lock().unwrap();
@@ -373,11 +357,11 @@ impl Router {
 
     pub fn del(&mut self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
         // Block this operation if **queue dump** is in progress w/o any CPU burn
-        let queue_guard = self.queue_mutex.lock().unwrap();
-        let qg = self.queue_cvar.wait_while(queue_guard, |_| {
-            self.queue_dump_flag.load(Ordering::Acquire)
-        })?;
-        drop(qg);
+        // let queue_guard = self.queue_mutex.lock().unwrap();
+        // let qg = self.queue_cvar.wait_while(queue_guard, |_| {
+        //     self.queue_dump_flag.load(Ordering::Acquire)
+        // })?;
+        // drop(qg);
 
         // Block this operation if **migration** is in progress w/o any CPU burn
         let mgr_guard = self.mgr_mutex.lock().unwrap();
@@ -512,34 +496,6 @@ impl Router {
         lk: &'a Arc<RwLock<T>>,
     ) -> InternalResult<RwLockWriteGuard<'a, T>> {
         Ok(lk.write()?)
-    }
-
-    fn spawn_queue_dump_thread(
-        queue: Arc<RwLock<Queue>>,
-        queue_flag: Arc<AtomicBool>,
-        queue_cvar: Arc<Condvar>,
-    ) -> InternalResult<JoinHandle<()>> {
-        // a custom mechanism to set the flag when this block
-        // is dropped w/ solidarity or upon error
-        struct SwapGuard(Arc<AtomicBool>, Arc<Condvar>);
-
-        impl Drop for SwapGuard {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::Release);
-                self.1.notify_all();
-            }
-        }
-
-        // thread handle
-        let handle = thread::Builder::new()
-            .name("tc-bucket-swap".into())
-            .spawn(move || {
-                // update the swap flag
-                queue_flag.store(true, Ordering::Release);
-                let _guard = SwapGuard(queue_flag, queue_cvar);
-            })?;
-
-        Ok(handle)
     }
 
     fn spawn_bucket_swap_thread(
@@ -762,10 +718,6 @@ impl Drop for Router {
         }
 
         if let Some(tx) = self.swap_thread.take() {
-            let _ = tx.join();
-        }
-
-        if let Some(tx) = self.queue_thread.take() {
             let _ = tx.join();
         }
     }
