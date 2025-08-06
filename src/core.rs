@@ -63,6 +63,9 @@ pub(crate) enum InternalError {
 
     /// Invalid buffer or shard file
     InvalidFile,
+
+    /// Implies that the underlying bucket is FULL
+    BucketFull,
 }
 
 impl From<std::io::Error> for InternalError {
@@ -85,6 +88,7 @@ impl std::fmt::Display for InternalError {
             InternalError::Io(_) => write!(f, ""),
             InternalError::LockPoisoned(_) => write!(f, ""),
             InternalError::InvalidFile => write!(f, ""),
+            InternalError::BucketFull => write!(f, ""),
         }
     }
 }

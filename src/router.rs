@@ -196,28 +196,23 @@ impl Router {
     }
 
     pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
-        // block the operation if queue dump is in progress
-        // w/o any CPU burn
-        // let queue_guard = self.queue_mutex.lock().unwrap();
-        // let qg = self.queue_cvar.wait_while(queue_guard, |_| {
-        //     self.queue_dump_flag.load(Ordering::Acquire)
-        // })?;
-        // drop(qg);
+        // NOTE: This operation is blocked if either of migration
+        // or bucket swap is in progress, this happens w/o any
+        // CPU burn
 
-        // NOTE: The operation is queueed w/o blocking and provides optimistic
-        // confirmation
+        // blcoking for migration
+        let mgr_guard = self.mgr_mutex.lock()?;
+        let mg = self
+            .mgr_cvar
+            .wait_while(mgr_guard, |_| self.mgr_flag.load(Ordering::Acquire))?;
+        drop(mg);
 
-        if self.mgr_flag.load(Ordering::Acquire) {
-            // self.queue.push(&pair)?;
-
-            return Ok(());
-        }
-
-        if self.swap_flag.load(Ordering::Acquire) {
-            // self.queue.push(&pair)?;
-
-            return Ok(());
-        }
+        // blcoking for bucket swap
+        let swap_guard = self.swap_mutex.lock()?;
+        let sg = self
+            .swap_cvar
+            .wait_while(swap_guard, |_| self.swap_flag.load(Ordering::Acquire))?;
+        drop(sg);
 
         self.internal_set(pair)
     }
@@ -227,10 +222,43 @@ impl Router {
 
         // if staging is available, write directly to it
         if let Some(staging) = &self.staging_bucket {
-            self.write_lock(staging)?.set(pair, sign)?;
+            let live_lock = self.read_lock(&self.bucket)?;
+            let staging_lock = self.write_lock(staging)?;
 
-            // check if live bucket is empty, if not then proceed for migration
-            if let Ok(b) = self.bucket.try_write() {
+            let live_inserts = live_lock.get_inserts()?;
+            let staging_inserts = staging_lock.get_inserts()?;
+
+            // HACK: If for some reasons, we are unable to migrate from live
+            // to staging bucket before staging is full, we must wait indefinitely
+            // till the migration is DONE!
+            //
+            // ISSUE: If at any state staging is full, the whole system will be under
+            // contention
+            //
+            // NOTE: This is a blocking operation and waits for "migration thread" to
+            // be completely executed to avoid any contention
+            if live_inserts + 1 >= staging_inserts {
+                // spawn therad to migrate pairs batch from live to staging bucket
+                let tx = Self::spawn_migration_thread(
+                    Arc::clone(&self.index),
+                    Arc::clone(&self.bucket),
+                    Arc::clone(self.staging_bucket.as_ref().unwrap()),
+                    Arc::clone(&self.mgr_flag),
+                    Arc::clone(&self.mgr_cvar),
+                    true,
+                )?;
+
+                // block the main thread till the thread is completely executed
+                let _ = tx.join();
+            }
+
+            staging_lock.set(pair, sign)?;
+            drop(staging_lock);
+            drop(live_lock);
+
+            // check if live bucket is empty, if true, trigger the swap
+            // otherwise, spawn the migration thread
+            if let Ok(b) = self.bucket.try_read() {
                 if b.get_inserts()? == 0 {
                     // spawn therad to swap buckets
                     let tx = Self::spawn_bucket_swap_thread(
@@ -253,6 +281,7 @@ impl Router {
                     Arc::clone(self.staging_bucket.as_ref().unwrap()),
                     Arc::clone(&self.mgr_flag),
                     Arc::clone(&self.mgr_cvar),
+                    false,
                 )?;
 
                 // store the handle for graceful shutdown
@@ -269,10 +298,11 @@ impl Router {
 
             bucket_lock.set(pair, sign)?;
 
+            // NOTE: If we've reached the [threshold], create the staging bucket
+
             let inserts = bucket_lock.get_inserts()?;
             let threshold = index_lock.get_threshold();
 
-            // If we've reached the [threshold], create the staging bucket
             if inserts >= threshold {
                 let current_cap = index_lock.get_capacity();
                 let new_cap = Index::calc_new_cap(current_cap);
@@ -286,13 +316,14 @@ impl Router {
                 let staging_arc = Arc::new(RwLock::new(staging));
                 self.staging_bucket = Some(staging_arc.clone());
 
-                // spawn therad to migrate pairs batch from live to staging bucket
+                // spawn therad to migrate first pairs batch from live to staging bucket
                 let tx = Self::spawn_migration_thread(
                     Arc::clone(&self.index),
                     Arc::clone(&self.bucket),
                     Arc::clone(self.staging_bucket.as_ref().unwrap()),
                     Arc::clone(&self.mgr_flag),
                     Arc::clone(&self.mgr_cvar),
+                    false,
                 )?;
 
                 // store the handle for graceful shutdown
@@ -341,6 +372,7 @@ impl Router {
                 Arc::clone(self.staging_bucket.as_ref().unwrap()),
                 Arc::clone(&self.mgr_flag),
                 Arc::clone(&self.mgr_cvar),
+                false,
             )?;
 
             let bucket_lock = self.read_lock(bucket)?;
@@ -411,6 +443,7 @@ impl Router {
                             Arc::clone(self.staging_bucket.as_ref().unwrap()),
                             Arc::clone(&self.mgr_flag),
                             Arc::clone(&self.mgr_cvar),
+                            false,
                         )?;
 
                         // store the handle for graceful shutdown
@@ -443,6 +476,7 @@ impl Router {
                         Arc::clone(self.staging_bucket.as_ref().unwrap()),
                         Arc::clone(&self.mgr_flag),
                         Arc::clone(&self.mgr_cvar),
+                        false,
                     )?;
 
                     // store the handle for graceful shutdown
@@ -636,6 +670,7 @@ impl Router {
         staging_bucket: Arc<RwLock<Bucket>>,
         mgr_flag: Arc<AtomicBool>,
         mgr_cvar: Arc<Condvar>,
+        full_migration: bool,
     ) -> InternalResult<JoinHandle<()>> {
         // a custom mechanism to set the flag when this
         // is dropped w/ solidarity or upon error
@@ -657,8 +692,16 @@ impl Router {
                 let _guard = MgrGuard(mgr_flag, mgr_cvar);
 
                 // Compute batch size = `max(1, 25% of capacity)`
+                //
+                // NOTE: If [full_migration] is requested, then batch is the entire cap
                 let batch_size = match index.read() {
-                    Ok(idx) => (idx.get_capacity() / 4).max(1),
+                    Ok(idx) => {
+                        if full_migration {
+                            idx.get_capacity()
+                        } else {
+                            (idx.get_capacity() / 4).max(1)
+                        }
+                    }
                     // unable to obtain the lock
                     Err(_) => return,
                 };
