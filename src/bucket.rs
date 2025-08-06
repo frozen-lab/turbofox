@@ -175,7 +175,8 @@ impl BucketFile {
             idx = (idx + 1) % self.capacity;
         }
 
-        Err(InternalError::BucketFull)
+        // Err(InternalError::BucketFull)
+        panic!("Bucket is full, {idx}, {:?}", self.file)
     }
 
     /// Returns an immutable reference to [Meta]
