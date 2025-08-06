@@ -335,28 +335,27 @@ impl Router {
     }
 
     pub fn get(&self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
-        // Block this operation if **queue dump** is in progress w/o any CPU burn
-        // let queue_guard = self.queue_mutex.lock().unwrap();
-        // let qg = self.queue_cvar.wait_while(queue_guard, |_| {
-        //     self.queue_dump_flag.load(Ordering::Acquire)
-        // })?;
-        // drop(qg);
+        // NOTE: This operation is blocked if either of migration
+        // or bucket swap is in progress, this happens w/o any
+        // CPU burn
 
-        // Block this operation if **migration** is in progress w/o any CPU burn
-        let mgr_guard = self.mgr_mutex.lock().unwrap();
+        // blcoking for migration
+        let mgr_guard = self.mgr_mutex.lock()?;
         let mg = self
             .mgr_cvar
             .wait_while(mgr_guard, |_| self.mgr_flag.load(Ordering::Acquire))?;
         drop(mg);
 
-        // Block this operation if **bucket swap** is in progress w/o any CPU burn
-        let swap_guard = self.swap_mutex.lock().unwrap();
+        // blcoking for bucket swap
+        let swap_guard = self.swap_mutex.lock()?;
         let sg = self
             .swap_cvar
             .wait_while(swap_guard, |_| self.swap_flag.load(Ordering::Acquire))?;
         drop(sg);
 
+        //
         // perform the operation
+        //
 
         let sign = TurboHasher::new(&kbuf).0;
 
@@ -388,28 +387,27 @@ impl Router {
     }
 
     pub fn del(&mut self, kbuf: Vec<u8>) -> InternalResult<Option<Vec<u8>>> {
-        // Block this operation if **queue dump** is in progress w/o any CPU burn
-        // let queue_guard = self.queue_mutex.lock().unwrap();
-        // let qg = self.queue_cvar.wait_while(queue_guard, |_| {
-        //     self.queue_dump_flag.load(Ordering::Acquire)
-        // })?;
-        // drop(qg);
+        // NOTE: This operation is blocked if either of migration
+        // or bucket swap is in progress, this happens w/o any
+        // CPU burn
 
-        // Block this operation if **migration** is in progress w/o any CPU burn
-        let mgr_guard = self.mgr_mutex.lock().unwrap();
+        // blcoking for migration
+        let mgr_guard = self.mgr_mutex.lock()?;
         let mg = self
             .mgr_cvar
             .wait_while(mgr_guard, |_| self.mgr_flag.load(Ordering::Acquire))?;
         drop(mg);
 
-        // Block this operation if **bucket swap** is in progress w/o any CPU burn
-        let swap_guard = self.swap_mutex.lock().unwrap();
+        // blcoking for bucket swap
+        let swap_guard = self.swap_mutex.lock()?;
         let sg = self
             .swap_cvar
             .wait_while(swap_guard, |_| self.swap_flag.load(Ordering::Acquire))?;
         drop(sg);
 
+        //
         // perform the operation
+        //
 
         let sign = TurboHasher::new(&kbuf).0;
 

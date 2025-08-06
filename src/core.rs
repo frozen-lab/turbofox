@@ -37,6 +37,9 @@ pub enum TurboError {
     /// Lock was poisoned because another thread panicked while holding it.
     LockPoisoned(String),
 
+    /// DB under contention, must be clear before any "set" operations
+    Contention,
+
     /// Unknown error
     Unknown,
 }
@@ -48,6 +51,7 @@ impl std::fmt::Display for TurboError {
             TurboError::KeyTooLarge(size) => write!(f, "Key size ({}) is too large", size),
             TurboError::ValueTooLarge(size) => write!(f, "Value size ({}) is too large", size),
             TurboError::LockPoisoned(e) => write!(f, "Lock poisoned due to an error, [e]: {e}"),
+            TurboError::Contention => write!(f, "TurboCache has reached contention :("),
             TurboError::Unknown => write!(f, "Some unknown error occurred"),
         }
     }
@@ -98,7 +102,9 @@ impl From<InternalError> for TurboError {
         match err {
             InternalError::Io(e) => TurboError::Io(e),
             InternalError::LockPoisoned(e) => TurboError::LockPoisoned(e),
-            _ => TurboError::Unknown,
+            InternalError::BucketFull => TurboError::Contention,
+            InternalError::InvalidFile => TurboError::Contention,
+            // _ => TurboError::Unknown,
         }
     }
 }
