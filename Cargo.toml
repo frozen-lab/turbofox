@@ -7,3 +7,5 @@ license = "MIT"
 repository = "https://github.com/frozen-lab/turbocache"
 keywords = ["key-value", "database", "persistent", "store", "frozen-lab"]
 
+[dependencies]
+memmap2 = "0.9.7"
