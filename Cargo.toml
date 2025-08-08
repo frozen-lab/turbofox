@@ -9,3 +9,6 @@ keywords = ["key-value", "database", "persistent", "store", "frozen-lab"]
 
 [dependencies]
 memmap2 = "0.9.7"
+
+[dev-dependencies]
+tempfile = "3.20.0"

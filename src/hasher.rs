@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 /// Used as a tombstone state for a signature for deleated entries in [Bucket]
 pub(crate) const TOMBSTONE_SIGN: u32 = 1u32;
 
