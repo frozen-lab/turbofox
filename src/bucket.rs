@@ -157,7 +157,7 @@ impl BucketFile {
     }
 
     /// Write a [KVPair] to the bucket and get [PairOffset]
-    fn write_slot(&self, pair: KVPair) -> InternalResult<PairOffset> {
+    fn write_slot(&self, pair: &KVPair) -> InternalResult<PairOffset> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
         let blen = klen + vlen;
@@ -359,7 +359,7 @@ mod bucket_file_tests {
         {
             let mut bucket = BucketFile::open(tmp.path(), TEST_CAP).unwrap();
             let kv = (b"foo".to_vec(), b"bar".to_vec());
-            let po = bucket.write_slot(kv.clone()).unwrap();
+            let po = bucket.write_slot(&kv).unwrap();
 
             bucket.set_po(0, po);
             bucket.set_signature(0, 12345);
@@ -386,7 +386,7 @@ mod bucket_file_tests {
 
         let kv = (b"key1".to_vec(), b"value1".to_vec());
         let sign = 0xDEADBEEF;
-        let po = bucket.write_slot(kv.clone()).unwrap();
+        let po = bucket.write_slot(&kv).unwrap();
 
         bucket.set_po(3, po);
         bucket.set_signature(3, sign);
@@ -483,7 +483,7 @@ impl Bucket {
         Ok(file)
     }
 
-    pub fn set(&self, pair: KVPair) -> InternalResult<bool> {
+    pub fn set(&self, pair: &KVPair) -> InternalResult<bool> {
         let sign = Hasher::new(&pair.0).0;
         let mut file = self.write_lock()?;
         let meta = file.metadata_mut();
@@ -498,7 +498,7 @@ impl Bucket {
         let (idx, is_new) = file.lookup_slot(start_idx, signs, sign, &pair.0)?;
 
         if is_new {
-            meta.inserts.fetch_add(1, Ordering::Acquire);
+            meta.inserts.fetch_add(1, Ordering::SeqCst);
         }
 
         let po = file.write_slot(pair)?;
@@ -603,21 +603,21 @@ impl Bucket {
         let signs = file.get_signatures_slice();
         let cap = file.capacity;
 
-        while idx + 1 < cap {
-            // update the iter index for next lookup
-            file.increment_iter_idx();
+        while idx < cap {
+            let cur_idx = idx;
 
-            match signs[idx] {
-                EMPTY_SIGN | TOMBSTONE_SIGN => {
-                    idx += 1;
-                    continue;
-                }
+            // increment for the next iteration
+            file.increment_iter_idx();
+            idx += 1;
+
+            match signs[cur_idx] {
+                EMPTY_SIGN | TOMBSTONE_SIGN => continue,
                 _ => {
-                    let p_offset = file.get_po(idx);
+                    let p_offset = file.get_po(cur_idx);
                     let pair = file.read_slot(&p_offset)?;
 
                     meta.inserts.fetch_sub(1, Ordering::SeqCst);
-                    file.set_signature(idx, TOMBSTONE_SIGN);
+                    file.set_signature(cur_idx, TOMBSTONE_SIGN);
 
                     return Ok(Some(pair));
                 }
@@ -663,6 +663,12 @@ impl Bucket {
     }
 }
 
+impl Drop for Bucket {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Seek, SeekFrom, Write};
@@ -690,7 +696,7 @@ mod tests {
         assert_eq!(bucket.get(key.clone()).unwrap(), None);
 
         // insert and get
-        bucket.set((key.clone(), val.clone())).unwrap();
+        bucket.set(&(key.clone(), val.clone())).unwrap();
         assert_eq!(bucket.get(key.clone()).unwrap(), Some(val.clone()));
     }
 
@@ -701,7 +707,7 @@ mod tests {
         let key = b"alpha".to_vec();
         let val = b"beta".to_vec();
 
-        bucket.set((key.clone(), val.clone())).unwrap();
+        bucket.set(&(key.clone(), val.clone())).unwrap();
         let got = bucket.del(key.clone()).unwrap();
 
         // check returned value and try fetching again
@@ -710,7 +716,7 @@ mod tests {
 
         // re-insert same key again
         let newval = b"gamma".to_vec();
-        bucket.set((key.clone(), newval.clone())).unwrap();
+        bucket.set(&(key.clone(), newval.clone())).unwrap();
 
         assert_eq!(bucket.get(key.clone()).unwrap(), Some(newval));
     }
@@ -725,7 +731,7 @@ mod tests {
             let key = s.as_bytes().to_vec();
             let val = (s.to_uppercase()).as_bytes().to_vec();
 
-            bucket.set((key.clone(), val.clone())).unwrap();
+            bucket.set(&(key.clone(), val.clone())).unwrap();
             inserted.push((key, val));
         }
 
@@ -765,7 +771,7 @@ mod tests {
         {
             let bucket = Bucket::new(&path, CAP).unwrap();
 
-            bucket.set((key.clone(), val.clone())).unwrap();
+            bucket.set(&(key.clone(), val.clone())).unwrap();
         }
 
         // second session
@@ -811,8 +817,8 @@ mod tests {
 
         let key = b"dup".to_vec();
 
-        bucket.set((key.clone(), b"one".to_vec())).unwrap();
-        bucket.set((key.clone(), b"two".to_vec())).unwrap();
+        bucket.set(&(key.clone(), b"one".to_vec())).unwrap();
+        bucket.set(&(key.clone(), b"two".to_vec())).unwrap();
 
         assert_eq!(bucket.get(key.clone()).unwrap(), Some(b"two".to_vec()));
     }
@@ -824,19 +830,19 @@ mod tests {
         // empty key, non-empty value
         let k1 = vec![];
 
-        bucket.set((k1.clone(), b"V".to_vec())).unwrap();
+        bucket.set(&(k1.clone(), b"V".to_vec())).unwrap();
         assert_eq!(bucket.get(k1.clone()).unwrap(), Some(b"V".to_vec()));
 
         // non-empty key, empty value
         let k2 = b"K".to_vec();
 
-        bucket.set((k2.clone(), vec![])).unwrap();
+        bucket.set(&(k2.clone(), vec![])).unwrap();
         assert_eq!(bucket.get(k2.clone()).unwrap(), Some(vec![]));
 
         // both empty
         let k3 = vec![];
 
-        bucket.set((k3.clone(), vec![])).unwrap();
+        bucket.set(&(k3.clone(), vec![])).unwrap();
         assert_eq!(bucket.get(k3.clone()).unwrap(), Some(vec![]));
     }
 
@@ -862,7 +868,7 @@ mod tests {
             let key1 = b"A".to_vec(); // len = 1
             let val1 = b"111".to_vec(); // len = 3
 
-            bucket.set((key1, val1)).unwrap();
+            bucket.set(&(key1, val1)).unwrap();
 
             // NOTE: Bucket is dropped! So mmap will be flushed on drop
         }
@@ -874,7 +880,7 @@ mod tests {
             let key2 = b"B".to_vec();
             let val2 = b"2222".to_vec(); // length = 4
 
-            bucket.set((key2.clone(), val2.clone())).unwrap();
+            bucket.set(&(key2.clone(), val2.clone())).unwrap();
 
             let got = bucket.get(key2).unwrap();
             assert_eq!(got, Some(val2));
@@ -908,7 +914,7 @@ mod tests {
             let key = knum.to_be_bytes().to_vec();
             let val = vnum.to_be_bytes().to_vec();
 
-            bucket.set((key.clone(), val.clone())).unwrap();
+            bucket.set(&(key.clone(), val.clone())).unwrap();
             entries.push((key, val));
         }
 

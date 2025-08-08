@@ -13,8 +13,8 @@ use std::{
 pub(crate) struct Metadata {
     version: u32,
     magic: [u8; 4],
-    capacity: AtomicUsize,
-    staging_capacity: AtomicUsize,
+    pub(crate) capacity: AtomicUsize,
+    pub(crate) staging_capacity: AtomicUsize,
 }
 
 pub(crate) struct Index {
@@ -95,8 +95,21 @@ impl Index {
     }
 
     #[inline]
-    pub fn calc_new_cap(cap: usize) -> usize {
+    pub const fn calc_new_cap(cap: usize) -> usize {
         cap.saturating_mul(2)
+    }
+
+    #[inline]
+    pub fn flush(&mut self) -> InternalResult<()> {
+        let _ = self.mmap.flush()?;
+
+        Ok(())
+    }
+}
+
+impl Drop for Index {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
