@@ -202,7 +202,6 @@ impl Router {
 
     fn internal_set(bucket: &Arc<RwLock<Bucket>>, pair: &KVPair) -> InternalResult<bool> {
         let write_lock = bucket.write()?;
-
         return write_lock.set(pair);
     }
 
@@ -344,10 +343,14 @@ impl MgrManager {
 
                 // migrate pairs from live -> staging
                 if let Ok(live) = live_bucket.write() {
-                    loop {
+                    let live_cap = live.get_capacity().unwrap_or(0);
+                    let mut batch_size = live_cap.saturating_mul(1) / 4;
+
+                    while batch_size > 0 {
                         match live.iter_del() {
                             Ok(Some(pair)) => {
                                 let _ = Router::internal_set(&staging_bucket, &pair);
+                                batch_size -= 1;
                                 continue;
                             }
                             // migration is done

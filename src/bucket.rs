@@ -640,6 +640,12 @@ impl Bucket {
         Ok(file.threshold)
     }
 
+    pub fn get_capacity(&self) -> InternalResult<usize> {
+        let file = self.read_lock()?;
+
+        Ok(file.capacity)
+    }
+
     /// Flush buckets data to disk
     ///
     /// NOTE: Requires write lock to the bucket
