@@ -670,16 +670,280 @@ impl Drop for Bucket {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io::{Seek, SeekFrom, Write};
-
+mod bucket_concurrency_tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::common::{create_temp_dir, gen_dataset};
+
+    fn create_bucket_with_cap(cap: usize) -> Bucket {
+        let dir = create_temp_dir();
+        let path = dir.path().join("bucket_conc.temp");
+
+        Bucket::new(&path, cap).expect("New bucket instance")
+    }
+
+    #[test]
+    fn concurrent_gets() {
+        let count = 400usize;
+        let cap = 2048usize;
+        let dataset = gen_dataset(count);
+        let bucket = create_bucket_with_cap(cap);
+
+        for p in &dataset {
+            assert!(bucket.set(p).unwrap(), "pre-insert should succeed");
+        }
+
+        let shared = std::sync::Arc::new(bucket);
+        let num_threads = 12usize;
+        let reads_per_thread = 300usize;
+        let mut handles = Vec::with_capacity(num_threads);
+
+        for t in 0..num_threads {
+            let b = std::sync::Arc::clone(&shared);
+            let keys = dataset.clone();
+
+            let handle = std::thread::spawn(move || {
+                for i in 0..reads_per_thread {
+                    let idx = (t * reads_per_thread + i) % keys.len();
+                    let (k, v) = &keys[idx];
+                    let got = b.get(k.clone()).expect("get ok");
+                    assert_eq!(got.expect("value present"), *v);
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(shared.get_inserted_count().unwrap(), count);
+    }
+
+    #[test]
+    fn concurrent_deletes_partitioned() {
+        let count = 600usize;
+        let cap = 4096usize;
+        let dataset = gen_dataset(count);
+        let bucket = create_bucket_with_cap(cap);
+
+        for p in &dataset {
+            assert!(bucket.set(p).unwrap());
+        }
+
+        let shared = std::sync::Arc::new(bucket);
+        let num_threads = 8usize;
+        let chunk = (count + num_threads - 1) / num_threads;
+        let mut handles = Vec::with_capacity(num_threads);
+
+        for t in 0..num_threads {
+            let b = std::sync::Arc::clone(&shared);
+
+            let slice: Vec<Vec<u8>> = dataset
+                .iter()
+                .skip(t * chunk)
+                .take(chunk)
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            let handle = std::thread::spawn(move || {
+                for key in slice {
+                    let _ = b.del(key).expect("del ok");
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(shared.get_inserted_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn concurrent_iter_del_workers() {
+        let count = 500usize;
+        let cap = 2048usize;
+        let dataset = gen_dataset(count);
+        let bucket = create_bucket_with_cap(cap);
+
+        for p in &dataset {
+            assert!(bucket.set(p).unwrap());
+        }
+
+        let shared = std::sync::Arc::new(bucket);
+        let num_workers = 6usize;
+        let mut handles = Vec::with_capacity(num_workers);
+
+        for _ in 0..num_workers {
+            let b = std::sync::Arc::clone(&shared);
+
+            let handle = std::thread::spawn(move || {
+                loop {
+                    match b.iter_del() {
+                        Ok(Some(_pair)) => continue, // removed one, keep going
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(shared.get_inserted_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn mixed_set_get_del_workload() {
+        let initial_count = 300usize;
+        let new_count = 150usize;
+        let cap = 4096usize;
+
+        let initial_dataset = gen_dataset(initial_count);
+        let bucket = create_bucket_with_cap(cap);
+
+        for p in &initial_dataset {
+            assert!(bucket.set(p).unwrap());
+        }
+
+        let shared = std::sync::Arc::new(bucket);
+        let num_getters = 10usize;
+        let getter_iters = 400usize;
+
+        let initial_keys: Vec<Vec<u8>> = initial_dataset.iter().map(|(k, _)| k.clone()).collect();
+        let mut handles = vec![];
+
+        for g in 0..num_getters {
+            let b = std::sync::Arc::clone(&shared);
+            let keys = initial_keys.clone();
+
+            let handle = std::thread::spawn(move || {
+                for i in 0..getter_iters {
+                    let idx = (g * getter_iters + i) % keys.len();
+
+                    let _ = b.get(keys[idx].clone());
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        let num_del_threads = 6usize;
+        let del_chunk = (initial_count + num_del_threads - 1) / num_del_threads;
+
+        for t in 0..num_del_threads {
+            let b = std::sync::Arc::clone(&shared);
+            let slice: Vec<Vec<u8>> = initial_dataset
+                .iter()
+                .skip(t * del_chunk)
+                .take(del_chunk)
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            let handle = std::thread::spawn(move || {
+                for k in slice {
+                    let _ = b.del(k).unwrap();
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        let num_set_threads = 4usize;
+        let per_thread = (new_count + num_set_threads - 1) / num_set_threads;
+
+        for t in 0..num_set_threads {
+            let b = std::sync::Arc::clone(&shared);
+
+            let start = t * per_thread;
+            let end = ((t + 1) * per_thread).min(new_count);
+            let mut pairs = Vec::with_capacity(end - start);
+
+            for i in start..end {
+                let key_val = (10_000_000usize + i) as u32; // offset far away from initial keys
+                let key = key_val.to_be_bytes().to_vec();
+                let v = key.clone();
+
+                pairs.push((key, v));
+            }
+
+            let handle = std::thread::spawn(move || {
+                for p in pairs {
+                    let _ = b.set(&p).unwrap();
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(shared.get_inserted_count().unwrap(), new_count);
+    }
+
+    #[test]
+    fn concurrent_set_upserts_do_not_double_count() {
+        let unique_keys = 50usize;
+        let upserts_per_thread = 500usize;
+        let threads = 8usize;
+        let cap = 4096usize;
+
+        let mut pairs = Vec::with_capacity(unique_keys);
+
+        for i in 0..unique_keys {
+            let key_val = (3000 + i) as u32;
+            let key = key_val.to_be_bytes().to_vec();
+            let val = key.clone();
+
+            pairs.push((key, val));
+        }
+
+        let bucket = create_bucket_with_cap(cap);
+        let shared = std::sync::Arc::new(bucket);
+        let mut handles = Vec::new();
+
+        for _ in 0..threads {
+            let b = std::sync::Arc::clone(&shared);
+            let p_clone = pairs.clone();
+
+            let handle = std::thread::spawn(move || {
+                for _ in 0..upserts_per_thread {
+                    for p in &p_clone {
+                        let _ = b.set(p).unwrap();
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(shared.get_inserted_count().unwrap(), unique_keys);
+    }
+}
+
+#[cfg(test)]
+mod bucket_tests {
+    use super::*;
+    use crate::common::create_temp_dir;
+    use std::io::{Seek, SeekFrom, Write};
 
     const CAP: usize = 8;
 
     fn create_bucket() -> Bucket {
-        let dir = tempdir().expect("temp directory");
+        let dir = create_temp_dir();
         let path = dir.path().join("bucket.temp");
 
         Bucket::new(&path, CAP).expect("New bucket instance")
@@ -761,7 +1025,7 @@ mod tests {
 
     #[test]
     fn test_persistence_across_reopen() {
-        let dir = tempdir().expect("temp directory");
+        let dir = create_temp_dir();
         let path = dir.path().join("bucket.temp");
 
         let key = b"k".to_vec();
@@ -785,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_invalid_magic_or_version() {
-        let dir = tempdir().expect("tempdir");
+        let dir = create_temp_dir();
         let path = dir.path().join("bucket.dat");
 
         // create a bucket normally
@@ -858,7 +1122,7 @@ mod tests {
 
     #[test]
     fn test_file_offset_continues_after_reopen() {
-        let dir = tempdir().unwrap();
+        let dir = create_temp_dir();
         let path = dir.path().join("offset.temp");
 
         // first session: write 3 bytes
@@ -892,7 +1156,7 @@ mod tests {
         const CAP: usize = 50;
         const NUM: usize = 40; // 80% of CAP
 
-        let dir = tempdir().unwrap();
+        let dir = create_temp_dir();
         let path = dir.path().join("random.temp");
         let bucket = Bucket::new(&path, CAP).unwrap();
 
