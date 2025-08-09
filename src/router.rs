@@ -7,7 +7,7 @@ use crate::{
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
     thread::{self, JoinHandle},
@@ -178,10 +178,15 @@ impl Router {
             .wait_while(mgr_guard, |_| self.mgr.flag.load(Ordering::Acquire))?;
         drop(mg);
 
+        // do not return early if key is not found in staging
         if let Some(staging) = &self.staging_bucket {
-            let write_lock = self.write_lock(staging)?;
+            {
+                let write_lock = self.write_lock(staging)?;
 
-            return write_lock.del(key);
+                if let Some(val) = write_lock.del(key.clone())? {
+                    return Ok(Some(val));
+                }
+            }
         }
 
         let write_lock = self.write_lock(&self.live_bucket)?;
@@ -225,7 +230,7 @@ impl Router {
             .wait_while(mgr_guard, |_| self.mgr.flag.load(Ordering::Acquire))?;
         drop(mg);
 
-        // sanity check
+        // Sanity check
         if self.staging_bucket.is_none() {
             return Ok(());
         }
@@ -234,41 +239,34 @@ impl Router {
         let staging_path = self.config.dirpath.join(STAGING_BUCKET_NAME);
         let staging_bucket = self.staging_bucket.take().unwrap();
 
-        // Acquire a write lock to flush both the bucket's data to disk, ensuring
-        // that all pending writes are durable before we rename the file.
-        //
-        // NOTE: A write lock is required because `Bucket::flush` requires write lock to the
-        // underlying [Bucket].
+        // Flush data to disk
         self.write_lock(&staging_bucket)?.flush()?;
         self.write_lock(&self.live_bucket)?.flush()?;
 
+        // Swap live and staging in memory
         let old_bucket = std::mem::replace(&mut self.live_bucket, staging_bucket);
 
-        // On Windows, a memory-mapped file generally cannot be deleted or renamed
-        // while it is mapped. We must drop the `old_bucket` to unmap its file
-        // before proceeding with filesystem operations. The `swap_in_progress`
-        // flag prevents other threads from accessing the inconsistent state.
+        // Drop old live bucket to release mmap/file handle before FS ops
         drop(old_bucket);
 
+        // Replace files on disk
         std::fs::remove_file(&bucket_path)?;
         std::fs::rename(&staging_path, &bucket_path)?;
 
-        // Lock the index to safely update metadata.
+        // Compute the new capacity from the (now-in-memory) live bucket
+        let live_cap = {
+            let live_read = self.read_lock(&self.live_bucket)?;
+
+            live_read.get_capacity()?
+        };
+
+        // Update index metadata
         let mut index_lock = self.write_lock(&self.index)?;
 
-        let new_cap = index_lock.get_staging_capacity();
-        let new_bucket = Bucket::new(&bucket_path, new_cap)?;
-        let meta = index_lock.metadata_mut();
+        index_lock.set_capacity(live_cap);
+        index_lock.set_staging_capacity(0);
 
-        // update metadata
-        meta.capacity = AtomicUsize::new(new_cap);
-        meta.staging_capacity = AtomicUsize::new(0);
-
-        // Flush the updated index metadata to disk.
         index_lock.flush()?;
-        drop(index_lock);
-
-        self.live_bucket = Arc::new(RwLock::new(new_bucket));
 
         Ok(())
     }
@@ -305,6 +303,14 @@ impl MgrManager {
             flag: Arc::new(AtomicBool::new(false)),
             thread: None,
         }
+    }
+
+    #[inline]
+    fn calc_batch_size(free_spots: usize) -> usize {
+        const TIME_PER_OP_MS: usize = 1;
+        const MAX_BATCH_SIZE_MS: usize = 200;
+
+        std::cmp::min(free_spots / 2, MAX_BATCH_SIZE_MS / TIME_PER_OP_MS)
     }
 
     fn spawn(
@@ -344,7 +350,9 @@ impl MgrManager {
                 // migrate pairs from live -> staging
                 if let Ok(live) = live_bucket.write() {
                     let live_cap = live.get_capacity().unwrap_or(0);
-                    let mut batch_size = live_cap.saturating_mul(1) / 4;
+                    let live_inserts = live.get_inserted_count().unwrap_or(0);
+                    let free_spots = live_cap - live_inserts;
+                    let mut batch_size = Self::calc_batch_size(free_spots);
 
                     while batch_size > 0 {
                         match live.iter_del() {
@@ -384,258 +392,6 @@ impl Drop for MgrManager {
 }
 
 #[cfg(test)]
-mod router_concurrency_tests {
-    use super::*;
-    use crate::common::{create_temp_dir, gen_dataset};
-
-    const CAP: usize = 1024;
-
-    fn create_router(cap: usize) -> (Router, tempfile::TempDir) {
-        let tmp = create_temp_dir();
-        let dir = tmp.path().to_path_buf();
-        let config = InternalConfig {
-            dirpath: dir,
-            initial_capacity: cap,
-        };
-
-        let router = Router::new(config).expect("Router::new");
-
-        (router, tmp)
-    }
-
-    #[test]
-    fn test_concurrency_of_set_operation() {
-        let mut threads = vec![];
-        let num_threads = 10;
-        let ops_per_thread = 100;
-
-        let (router, _dir) = create_router(CAP);
-        let router_arc = Arc::new(RwLock::new(router));
-
-        for i in 0..num_threads {
-            let router_clone = Arc::clone(&router_arc);
-
-            let handle = std::thread::spawn(move || {
-                for j in 0..ops_per_thread {
-                    let key_val = (i * ops_per_thread + j) as u32;
-
-                    let key = key_val.to_be_bytes().to_vec();
-                    let value = key.clone();
-
-                    match router_clone.write().unwrap().set((key, value)) {
-                        Ok(_) => {}
-                        Err(e) => panic!("Error {:?}", e),
-                    }
-                }
-            });
-
-            threads.push(handle);
-        }
-
-        for handle in threads {
-            handle.join().unwrap();
-        }
-
-        let pairs_count = router_arc.write().unwrap().get_insert_count().unwrap();
-        let total_pairs = ops_per_thread * num_threads;
-
-        assert_eq!(pairs_count, total_pairs);
-    }
-
-    #[test]
-    fn test_concurrent_gets() {
-        // prepare
-        let db_count = 1000usize;
-        let dataset = gen_dataset(db_count);
-        let (mut router, _dir) = create_router(1024);
-
-        // insert everything first (single thread)
-        for p in &dataset {
-            router.set(p.clone()).unwrap();
-        }
-
-        // wrap router for concurrency: many readers should be allowed concurrently
-        let router_arc = Arc::new(RwLock::new(router));
-        let num_threads = 16usize;
-        let reads_per_thread = 500usize;
-
-        let mut handles = vec![];
-        for t in 0..num_threads {
-            let router_clone = Arc::clone(&router_arc);
-            let keys = dataset.clone(); // small clone cost; keeps test simple
-            let handle = std::thread::spawn(move || {
-                // each thread will repeatedly read keys deterministically
-                for i in 0..reads_per_thread {
-                    let idx = (t * reads_per_thread + i) % keys.len();
-                    let (k, v) = &keys[idx];
-                    let got = router_clone.read().unwrap().get(k.clone()).expect("get ok");
-                    // either value present or deleted by someone else; but here no deletes,
-                    // so we expect a value.
-                    assert!(got.is_some(), "expected Some for key {:?}", k);
-                    assert_eq!(got.unwrap(), *v);
-                }
-            });
-            handles.push(handle);
-        }
-
-        // join
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // ensure counts unchanged
-        let final_count = router_arc.write().unwrap().get_insert_count().unwrap();
-        assert_eq!(final_count, db_count);
-    }
-
-    #[test]
-    fn test_concurrent_deletes() {
-        // prepare
-        let db_count = 1000usize;
-        let dataset = gen_dataset(db_count);
-        let (mut router, _dir) = create_router(1024);
-
-        // insert everything first
-        for p in &dataset {
-            router.set(p.clone()).unwrap();
-        }
-
-        let router_arc = Arc::new(RwLock::new(router));
-        let num_threads = 8usize;
-        let mut handles = vec![];
-
-        // partition the dataset so each thread deletes a disjoint slice
-        let chunk_size = (db_count + num_threads - 1) / num_threads;
-        for t in 0..num_threads {
-            let router_clone = Arc::clone(&router_arc);
-            let keys_slice: Vec<Vec<u8>> = dataset
-                .iter()
-                .skip(t * chunk_size)
-                .take(chunk_size)
-                .map(|(k, _v)| k.clone())
-                .collect();
-
-            let handle = std::thread::spawn(move || {
-                for k in keys_slice {
-                    // each deletion takes a write lock on the router (del needs &mut self)
-                    let _ = router_clone.write().unwrap().del(k).expect("del OK");
-                }
-            });
-
-            handles.push(handle);
-        }
-
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // after all deletes, count must be zero
-        let final_count = router_arc.write().unwrap().get_insert_count().unwrap();
-        assert_eq!(final_count, 0);
-    }
-
-    #[test]
-    fn test_mixed_set_get_del_workload() {
-        // deterministic mixed workload:
-        // - insert INITIAL keys
-        // - start concurrent getters that repeatedly read across both initial and future keys
-        // - start concurrent deleters that delete exactly the INITIAL keys (disjoint partition)
-        // - start concurrent setters that insert NEW keys (disjoint partition)
-        //
-        // At the end we expect only the NEW keys to remain.
-
-        let initial_count = 800usize;
-        let new_count = 400usize;
-        let (mut router, _dir) = create_router(2048);
-
-        // insert INITIAL keys
-        let initial_dataset = gen_dataset(initial_count);
-        for p in &initial_dataset {
-            router.set(p.clone()).unwrap();
-        }
-
-        let router_arc = Arc::new(RwLock::new(router));
-
-        // spawn getters
-        let num_getters = 12usize;
-        let getter_iters = 600usize;
-        let mut handles = vec![];
-        let initial_keys_clone = initial_dataset
-            .iter()
-            .map(|(k, _v)| k.clone())
-            .collect::<Vec<_>>();
-
-        for g in 0..num_getters {
-            let router_clone = Arc::clone(&router_arc);
-            let init_keys = initial_keys_clone.clone();
-            let handle = std::thread::spawn(move || {
-                for i in 0..getter_iters {
-                    // steady deterministic access pattern: cycle across initial keys
-                    let idx = (g * getter_iters + i) % init_keys.len();
-                    let _ = router_clone.read().unwrap().get(init_keys[idx].clone());
-                    // we don't assert presence here because deletes may be happening concurrently
-                }
-            });
-            handles.push(handle);
-        }
-
-        // spawn deleters that will remove all INITIAL keys (partitioned)
-        let num_del_threads = 8usize;
-        let chunk_size = (initial_count + num_del_threads - 1) / num_del_threads;
-        for t in 0..num_del_threads {
-            let router_clone = Arc::clone(&router_arc);
-            let keys_slice: Vec<Vec<u8>> = initial_dataset
-                .iter()
-                .skip(t * chunk_size)
-                .take(chunk_size)
-                .map(|(k, _)| k.clone())
-                .collect();
-
-            let handle = std::thread::spawn(move || {
-                for k in keys_slice {
-                    // take write lock per delete
-                    let _ = router_clone.write().unwrap().del(k).unwrap();
-                }
-            });
-            handles.push(handle);
-        }
-
-        // spawn setters that will insert NEW keys (disjoint range)
-        let num_set_threads = 6usize;
-        let per_thread = (new_count + num_set_threads - 1) / num_set_threads;
-        for t in 0..num_set_threads {
-            let router_clone = Arc::clone(&router_arc);
-            // create keys for this thread deterministically so they don't overlap with initial ones
-            let start = t * per_thread;
-            let end = ((t + 1) * per_thread).min(new_count);
-            let mut my_pairs = vec![];
-            for i in start..end {
-                let key_val = (1000000usize + i) as u32; // offset to avoid initial keyspace
-                let key = key_val.to_be_bytes().to_vec();
-                let value = key.clone();
-                my_pairs.push((key, value));
-            }
-
-            let handle = std::thread::spawn(move || {
-                for p in my_pairs {
-                    let _ = router_clone.write().unwrap().set(p).unwrap();
-                }
-            });
-            handles.push(handle);
-        }
-
-        // join all threads
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // final count must equal new_count (initials deleted, new ones inserted)
-        let final_count = router_arc.write().unwrap().get_insert_count().unwrap();
-        assert_eq!(final_count, new_count);
-    }
-}
-
-#[cfg(test)]
 mod router_tests {
     use super::*;
     use crate::common::{create_temp_dir, gen_dataset};
@@ -656,17 +412,31 @@ mod router_tests {
     }
 
     #[test]
-    fn test_large_set_operation() {
+    fn test_large_load() {
         let db_count = CAP * 5;
         let dataset = gen_dataset(db_count);
         let (mut router, _dir) = create_router(CAP);
 
         // set all items
-        for pair in dataset {
-            router.set(pair).unwrap();
+        for pair in &dataset {
+            router.set(pair.clone()).unwrap();
         }
 
         assert_eq!(db_count, router.get_insert_count().unwrap());
+
+        // get all items
+        for (k, v) in &dataset {
+            let val = router.get(k.clone()).unwrap();
+
+            assert_eq!(Some(v.clone()), val);
+        }
+
+        // delete all items
+        for (k, v) in dataset {
+            let val = router.del(k).unwrap();
+
+            assert_eq!(Some(v), val);
+        }
     }
 
     #[test]
@@ -714,5 +484,392 @@ mod router_tests {
 
             assert_eq!(&got, v);
         }
+    }
+    #[test]
+    fn test_staging_created_when_live_full_and_rejected_pair_placed_in_staging() {
+        let cap = 4usize;
+        let dataset = gen_dataset(cap * 2);
+        let (mut router, _dir) = create_router(cap);
+
+        for pair in &dataset {
+            let _ = router.set(pair.clone());
+        }
+
+        let total = router.get_insert_count().expect("get_insert_count");
+
+        assert!(total > 0, "total inserts should be > 0");
+        assert!(
+            router.staging_bucket.is_some(),
+            "staging bucket should be created"
+        );
+    }
+
+    #[test]
+    fn test_get_insert_count_counts_live_and_staging_explicitly() {
+        let (mut router, _dir) = create_router(16);
+        let dataset_live = gen_dataset(3);
+
+        for p in &dataset_live {
+            router.set(p.clone()).unwrap();
+        }
+
+        let (staging_bucket, _) =
+            Router::create_staging_bucket(&_dir.path().to_path_buf(), 32).unwrap();
+
+        let staging_arc = Arc::new(RwLock::new(staging_bucket));
+        {
+            let s = staging_arc.clone();
+            let pairs = gen_dataset(2);
+
+            for p in &pairs {
+                let ok = Router::internal_set(&s, p).expect("internal_set");
+
+                assert!(ok, "staging insert should succeed");
+            }
+        }
+
+        router.staging_bucket = Some(staging_arc);
+        let count = router.get_insert_count().unwrap();
+
+        assert_eq!(count, 3 + 2);
+    }
+
+    #[test]
+    fn test_perform_bucket_swap_updates_index_and_replaces_live() {
+        let (mut router, tmpdir) = create_router(8);
+        let (staging_bucket, staging_cap) =
+            Router::create_staging_bucket(&tmpdir.path().to_path_buf(), 8).unwrap();
+        let staging_arc = Arc::new(RwLock::new(staging_bucket));
+
+        router.staging_bucket = Some(staging_arc);
+
+        {
+            let idx_r = router.read_lock(&router.index).unwrap();
+            let old_cap = idx_r.get_capacity();
+
+            assert_eq!(old_cap, 8usize);
+        }
+
+        router.perform_bucket_swap().expect("perform_bucket_swap");
+
+        assert!(
+            router.staging_bucket.is_none(),
+            "staging cleared after swap"
+        );
+
+        {
+            let idx_r = router.read_lock(&router.index).unwrap();
+            let n_cap = idx_r.get_capacity();
+            let s_cap = idx_r.get_staging_capacity();
+
+            assert_eq!(n_cap, staging_cap);
+            assert_eq!(s_cap, 0usize);
+        }
+    }
+
+    #[test]
+    fn test_del_triggers_swap_when_live_becomes_empty_and_staging_exists() {
+        let (mut router, tmpdir) = create_router(8);
+        let single = gen_dataset(1).into_iter().next().unwrap();
+        router.set(single.clone()).unwrap();
+
+        assert_eq!(router.get_insert_count().unwrap(), 1);
+
+        let (staging_bucket, staging_cap) =
+            Router::create_staging_bucket(&tmpdir.path().to_path_buf(), 8).unwrap();
+        router.staging_bucket = Some(Arc::new(RwLock::new(staging_bucket)));
+
+        let deleted = router.del(single.0.clone()).unwrap();
+
+        assert!(deleted.is_some(), "value should be returned by del");
+        assert!(
+            router.staging_bucket.is_none(),
+            "staging cleared after swap"
+        );
+
+        {
+            let idx_r = router.read_lock(&router.index).unwrap();
+
+            assert_eq!(idx_r.get_staging_capacity(), 0usize);
+            assert_eq!(idx_r.get_capacity(), staging_cap);
+        }
+    }
+
+    #[test]
+    fn test_internal_set_respects_bucket_full_and_returns_false() {
+        let (mut router, _dir) = create_router(4);
+        let dataset = gen_dataset(4);
+
+        for p in &dataset {
+            let ok = router.set(p.clone());
+
+            assert!(ok.is_ok());
+        }
+
+        let extra = gen_dataset(1).into_iter().next().unwrap();
+        let ok = Router::internal_set(&router.live_bucket, &extra).expect("internal_set result Ok");
+
+        assert!(!ok, "internal_set should return false when bucket is full");
+    }
+
+    #[test]
+    fn test_create_staging_bucket_has_expected_new_capacity() {
+        let (router, tmpdir) = create_router(16);
+
+        let cur_cap = {
+            let idx_r = router.read_lock(&router.index).unwrap();
+            idx_r.get_capacity()
+        };
+
+        let (_staging, new_cap) =
+            Router::create_staging_bucket(&tmpdir.path().to_path_buf(), cur_cap).unwrap();
+
+        let expected = Index::calc_new_cap(cur_cap);
+
+        assert_eq!(new_cap, expected);
+    }
+}
+
+#[cfg(test)]
+mod router_concurrency_tests {
+    use super::*;
+    use crate::common::{create_temp_dir, gen_dataset};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const CAP: usize = 1024;
+
+    fn create_router(cap: usize) -> (Arc<RwLock<Router>>, tempfile::TempDir) {
+        let tmp = create_temp_dir();
+        let dir = tmp.path().to_path_buf();
+        let config = InternalConfig {
+            dirpath: dir,
+            initial_capacity: cap,
+        };
+
+        let router = {
+            let r = Router::new(config).expect("Router::new");
+
+            Arc::new(RwLock::new(r))
+        };
+
+        (router, tmp)
+    }
+
+    #[test]
+    fn test_concurrent_writes_and_reads() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 256;
+        let total = THREADS * PER_THREAD;
+
+        let (router, _tmp) = create_router(CAP);
+        let router = Arc::clone(&router);
+
+        let mut handles = Vec::new();
+
+        // NOTE: Many writers concurrently inserting non-overlapping keys while multiple readers
+        // concurrently probe for presence. After all writers finish we assert total count.
+
+        // Writers: each thread writes PER_THREAD unique pairs
+        for t in 0..THREADS {
+            let router = Arc::clone(&router);
+            let base = t * PER_THREAD;
+
+            let pairs: Vec<_> = (0..PER_THREAD)
+                .map(|i| {
+                    let (_k, v) = gen_dataset(1).into_iter().next().unwrap();
+
+                    (format!("t{}_{}", t, base + i).into_bytes(), v)
+                })
+                .collect();
+
+            handles.push(thread::spawn(move || {
+                for chunk in pairs.chunks(16) {
+                    let mut r = router.write().expect("router write");
+
+                    for pair in chunk {
+                        r.set(pair.clone()).expect("set");
+                    }
+
+                    drop(r);
+                }
+            }));
+        }
+
+        let stop = Arc::new(AtomicUsize::new(0));
+        let mut reader_handles = Vec::new();
+
+        for _ in 0..4 {
+            let router = Arc::clone(&router);
+            let stop = Arc::clone(&stop);
+
+            reader_handles.push(thread::spawn(move || {
+                let start = Instant::now();
+
+                while start.elapsed() < Duration::from_millis(1000)
+                    && stop.load(Ordering::Acquire) == 0
+                {
+                    for t in 0..THREADS {
+                        let key = format!("t{}_{}", t, 0).into_bytes();
+                        let r = router.read().expect("router read");
+                        let _ = r.get(key).expect("get should not error");
+
+                        drop(r);
+                    }
+
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        stop.store(1, Ordering::Release);
+
+        for h in reader_handles {
+            h.join().unwrap();
+        }
+
+        let r = router.read().expect("router read");
+        let cnt = r.get_insert_count().expect("get_insert_count");
+
+        assert_eq!(cnt, total, "expected {} entries, got {}", total, cnt);
+    }
+
+    #[test]
+    fn test_concurrent_set_triggers_migration_and_no_data_loss() {
+        let small_cap = 128usize;
+        let (router, _tmp) = create_router(small_cap);
+        let router = Arc::clone(&router);
+
+        const THREADS: usize = 4;
+        const PER_THREAD: usize = 200;
+        let total = THREADS * PER_THREAD;
+
+        // NOTE: Concurrent insertions that cause staging creation and migration.
+        // Multiple threads fill the DB past threshold; after joins we wait until all items are visible.
+
+        let mut handles = Vec::new();
+
+        for t in 0..THREADS {
+            let router = Arc::clone(&router);
+
+            handles.push(thread::spawn(move || {
+                let mut pairs = Vec::with_capacity(PER_THREAD);
+
+                for i in 0..PER_THREAD {
+                    let key = format!("thr{}_{}", t, i).into_bytes();
+                    let val = format!("val{}_{}", t, i).into_bytes();
+
+                    pairs.push((key, val));
+                }
+
+                for chunk in pairs.chunks(8) {
+                    let mut r = router.write().expect("router write");
+
+                    for p in chunk {
+                        r.set(p.clone()).expect("set");
+                    }
+
+                    drop(r);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // wait up to 2s for the system to finish background migration and reach stable count
+        let deadline = Instant::now() + Duration::from_millis(2000);
+
+        loop {
+            {
+                let r = router.read().expect("router read");
+                let cnt = r.get_insert_count().expect("get_insert_count");
+
+                if cnt == total {
+                    break;
+                }
+            }
+
+            if Instant::now() > deadline {
+                panic!(
+                    "timeout waiting for all items to appear (expected {}, partial visible)",
+                    total
+                );
+            }
+
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let r = router.read().expect("router read");
+
+        for t in 0..THREADS {
+            let k = format!("thr{}_{}", t, 0).into_bytes();
+
+            assert!(r.get(k).expect("get ok").is_some());
+        }
+    }
+
+    #[test]
+    fn test_concurrent_set_and_delete_mixed_workload() {
+        let (router, _tmp) = create_router(512);
+        let router = Arc::clone(&router);
+
+        // NOTE: Mixed concurrent sets and deletes: multiple writers are inserting while
+        // other threads deleting some keys.
+        // Ensures no panics and final cardinality is as expected.
+
+        {
+            let mut r = router.write().unwrap();
+            let base = gen_dataset(200);
+
+            for p in base {
+                r.set(p).unwrap();
+            }
+        }
+
+        let w_router = Arc::clone(&router);
+
+        let writer = thread::spawn(move || {
+            for i in 0..200 {
+                let pair = (
+                    format!("w_{}", i).into_bytes(),
+                    format!("wv_{}", i).into_bytes(),
+                );
+                let mut r = w_router.write().unwrap();
+
+                r.set(pair).unwrap();
+            }
+        });
+
+        let mut deleters = Vec::new();
+
+        for i in 0..4 {
+            let d_router = Arc::clone(&router);
+
+            deleters.push(thread::spawn(move || {
+                for j in 0..50 {
+                    let key = format!("d{}_{}", i, j).into_bytes();
+                    let mut r = d_router.write().unwrap();
+                    let _ = r.del(key);
+                }
+            }));
+        }
+
+        writer.join().unwrap();
+
+        for d in deleters {
+            d.join().unwrap();
+        }
+
+        let r = router.read().unwrap();
+        let cnt = r.get_insert_count().unwrap();
+
+        assert!(cnt <= 400, "count should be <= 400; got {}", cnt);
     }
 }

@@ -79,19 +79,26 @@ impl Index {
 
     #[inline]
     pub fn get_capacity(&self) -> usize {
-        self.metadata().capacity.load(Ordering::Acquire)
+        self.metadata().capacity.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn set_capacity(&self, new_cap: usize) {
+        self.metadata_mut()
+            .capacity
+            .store(new_cap, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn get_staging_capacity(&self) -> usize {
-        self.metadata().staging_capacity.load(Ordering::Acquire)
+        self.metadata().staging_capacity.load(Ordering::SeqCst)
     }
 
     #[inline]
     pub fn set_staging_capacity(&self, new_cap: usize) {
         self.metadata_mut()
             .staging_capacity
-            .store(new_cap, Ordering::Release);
+            .store(new_cap, Ordering::SeqCst);
     }
 
     #[inline]
