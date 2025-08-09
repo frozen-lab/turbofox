@@ -1,6 +1,6 @@
 use crate::{
     bucket::Bucket,
-    constants::{KVPair, Key, DEFAULT_BUCKET_NAME, INDEX_NAME, STAGING_BUCKET_NAME},
+    common::{KVPair, Key, DEFAULT_BUCKET_NAME, INDEX_NAME, STAGING_BUCKET_NAME},
     index::Index,
     types::{InternalConfig, InternalError, InternalResult},
 };
@@ -381,32 +381,14 @@ impl Drop for MgrManager {
 }
 
 #[cfg(test)]
-mod router_tests {
+mod router_concurrency_tests {
     use super::*;
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    use tempfile::TempDir;
+    use crate::common::create_temp_dir;
 
-    const KEY_LEN: usize = 32;
-    const VAL_LEN: usize = 128;
-    const SEED: u64 = 42;
     const CAP: usize = 1024;
 
-    fn gen_dataset(size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let mut rng = StdRng::seed_from_u64(SEED);
-
-        (0..size)
-            .map(|_| {
-                let key = (0..KEY_LEN).map(|_| rng.random()).collect();
-                let val = (0..VAL_LEN).map(|_| rng.random()).collect();
-
-                (key, val)
-            })
-            .collect()
-    }
-
-    fn create_router(cap: usize) -> (Router, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
+    fn create_router(cap: usize) -> (Router, tempfile::TempDir) {
+        let tmp = create_temp_dir();
         let dir = tmp.path().to_path_buf();
         let config = InternalConfig {
             dirpath: dir,
@@ -416,20 +398,6 @@ mod router_tests {
         let router = Router::new(config).expect("Router::new");
 
         (router, tmp)
-    }
-
-    #[test]
-    fn test_large_set_operation() {
-        let db_count = CAP * 5;
-        let dataset = gen_dataset(db_count);
-        let (mut router, _dir) = create_router(CAP);
-
-        // set all items
-        for pair in dataset {
-            router.set(pair).unwrap();
-        }
-
-        assert_eq!(db_count, router.get_insert_count().unwrap());
     }
 
     #[test]
@@ -469,5 +437,107 @@ mod router_tests {
         let total_pairs = ops_per_thread * num_threads;
 
         assert_eq!(pairs_count, total_pairs);
+    }
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+    use crate::common::{create_temp_dir, gen_dataset};
+
+    const CAP: usize = 1024;
+
+    fn create_router(cap: usize) -> (Router, tempfile::TempDir) {
+        let tmp = create_temp_dir();
+        let dir = tmp.path().to_path_buf();
+        let config = InternalConfig {
+            dirpath: dir,
+            initial_capacity: cap,
+        };
+
+        let router = Router::new(config).expect("Router::new");
+
+        (router, tmp)
+    }
+
+    #[test]
+    fn test_large_set_operation() {
+        let db_count = CAP * 5;
+        let dataset = gen_dataset(db_count);
+        let (mut router, _dir) = create_router(CAP);
+
+        // set all items
+        for pair in dataset {
+            router.set(pair).unwrap();
+        }
+
+        assert_eq!(db_count, router.get_insert_count().unwrap());
+    }
+
+    #[test]
+    fn test_set_get_del_cycle() {
+        let (mut router, _dir) = create_router(16);
+
+        let key = b"hello".to_vec();
+        let value = b"world".to_vec();
+        let pair = (key.clone(), value.clone());
+
+        router.set(pair).expect("set should succeed");
+        let got = router
+            .get(key.clone())
+            .expect("get result")
+            .expect("value present");
+
+        assert_eq!(got, value);
+        assert_eq!(router.get_insert_count().unwrap(), 1);
+
+        let deleted = router
+            .del(key.clone())
+            .expect("del result")
+            .expect("deleted value");
+
+        assert_eq!(deleted, b"world".to_vec());
+        assert!(router.get(key).unwrap().is_none());
+        assert_eq!(router.get_insert_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_bulk_set_and_spot_checks() {
+        let db_count = 500usize;
+        let dataset = gen_dataset(db_count);
+        let (mut router, _dir) = create_router(128);
+
+        for pair in &dataset {
+            router.set(pair.clone()).unwrap();
+        }
+
+        assert_eq!(db_count, router.get_insert_count().unwrap());
+
+        for i in [0, db_count / 3, db_count - 1].iter() {
+            let (k, v) = &dataset[*i];
+            let got = router.get(k.clone()).unwrap().expect("value present");
+
+            assert_eq!(&got, v);
+        }
+    }
+
+    #[test]
+    fn test_staging_creation_and_index_updated_when_live_fills() {
+        let small_cap = 8usize;
+        let total_inserts = 50usize;
+        let dataset = gen_dataset(total_inserts);
+        let (mut router, _dir) = create_router(small_cap);
+
+        for pair in dataset {
+            router.set(pair).unwrap();
+        }
+
+        // NOTE: All entries are migrated all at once while
+        // blocking the `Router::set()` operation
+        assert!(
+            router.staging_bucket.is_none(),
+            "staging bucket should exist after overflow"
+        );
+        assert_eq!(router.get_insert_count().unwrap(), total_inserts);
     }
 }

@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    constants::{KVPair, Key, MAGIC, VERSION},
+    common::{KVPair, Key, MAGIC, VERSION},
     hasher::{Hasher, EMPTY_SIGN, TOMBSTONE_SIGN},
     types::{InternalError, InternalResult},
 };

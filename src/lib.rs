@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 mod bucket;
-mod constants;
+mod common;
 mod hasher;
 mod index;
 mod router;

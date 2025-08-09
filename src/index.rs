@@ -1,5 +1,5 @@
 use crate::{
-    constants::{MAGIC, VERSION},
+    common::{MAGIC, VERSION},
     types::InternalResult,
 };
 use memmap2::{MmapMut, MmapOptions};
