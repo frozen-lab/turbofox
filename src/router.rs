@@ -1,6 +1,6 @@
 use crate::{
     bucket::Bucket,
-    constants::{KVPair, DEFAULT_BUCKET_NAME, INDEX_NAME, STAGING_BUCKET_NAME},
+    constants::{KVPair, Key, DEFAULT_BUCKET_NAME, INDEX_NAME, STAGING_BUCKET_NAME},
     index::Index,
     types::{InternalConfig, InternalError, InternalResult},
 };
@@ -142,6 +142,62 @@ impl Router {
         }
 
         Ok(())
+    }
+
+    /// Fetch a value from [TurboCache]
+    ///
+    /// NOTE: This operation is only blocked for migration to take place
+    pub fn get(&self, key: Key) -> InternalResult<Option<Vec<u8>>> {
+        // blcoking for migration
+        let mgr_guard = self.mgr.mutex.lock()?;
+        let mg = self
+            .mgr
+            .cvar
+            .wait_while(mgr_guard, |_| self.mgr.flag.load(Ordering::Acquire))?;
+        drop(mg);
+
+        if let Some(staging) = &self.staging_bucket {
+            let read_lock = self.read_lock(staging)?;
+
+            return read_lock.get(key);
+        }
+
+        self.read_lock(&self.live_bucket)?.get(key)
+    }
+
+    /// Delete a [KvPair] from [TurboCache]
+    ///
+    /// NOTE: This operation is blocked for both the migration thread and
+    /// bucket swapping
+    pub fn del(&mut self, key: Key) -> InternalResult<Option<Vec<u8>>> {
+        // blcoking for migration
+        let mgr_guard = self.mgr.mutex.lock()?;
+        let mg = self
+            .mgr
+            .cvar
+            .wait_while(mgr_guard, |_| self.mgr.flag.load(Ordering::Acquire))?;
+        drop(mg);
+
+        if let Some(staging) = &self.staging_bucket {
+            let write_lock = self.write_lock(staging)?;
+
+            return write_lock.del(key);
+        }
+
+        let write_lock = self.write_lock(&self.live_bucket)?;
+        let del_val = write_lock.del(key)?;
+        let live_count = write_lock.get_inserted_count()?;
+
+        drop(write_lock);
+
+        // If `live_bucket` is empty, we need to swap the buckts
+        //
+        // NOTE: This is a blocking operation and will block current operation
+        if live_count == 0 {
+            self.perform_bucket_swap()?;
+        }
+
+        Ok(del_val)
     }
 
     fn internal_set(bucket: &Arc<RwLock<Bucket>>, pair: &KVPair) -> InternalResult<bool> {
@@ -334,6 +390,7 @@ mod router_tests {
     const KEY_LEN: usize = 32;
     const VAL_LEN: usize = 128;
     const SEED: u64 = 42;
+    const CAP: usize = 1024;
 
     fn gen_dataset(size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut rng = StdRng::seed_from_u64(SEED);
@@ -363,8 +420,6 @@ mod router_tests {
 
     #[test]
     fn test_large_set_operation() {
-        const CAP: usize = 1024;
-
         let db_count = CAP * 5;
         let dataset = gen_dataset(db_count);
         let (mut router, _dir) = create_router(CAP);
@@ -375,5 +430,44 @@ mod router_tests {
         }
 
         assert_eq!(db_count, router.get_insert_count().unwrap());
+    }
+
+    #[test]
+    fn test_concurrency_of_set_operation() {
+        let mut threads = vec![];
+        let num_threads = 10;
+        let ops_per_thread = 100;
+
+        let (router, _dir) = create_router(CAP);
+        let router_arc = Arc::new(RwLock::new(router));
+
+        for i in 0..num_threads {
+            let router_clone = Arc::clone(&router_arc);
+
+            let handle = std::thread::spawn(move || {
+                for j in 0..ops_per_thread {
+                    let key_val = (i * ops_per_thread + j) as u32;
+
+                    let key = key_val.to_be_bytes().to_vec();
+                    let value = key.clone();
+
+                    match router_clone.write().unwrap().set((key, value)) {
+                        Ok(_) => {}
+                        Err(e) => panic!("Error {:?}", e),
+                    }
+                }
+            });
+
+            threads.push(handle);
+        }
+
+        for handle in threads {
+            handle.join().unwrap();
+        }
+
+        let pairs_count = router_arc.write().unwrap().get_insert_count().unwrap();
+        let total_pairs = ops_per_thread * num_threads;
+
+        assert_eq!(pairs_count, total_pairs);
     }
 }
