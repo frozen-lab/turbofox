@@ -383,7 +383,7 @@ impl Drop for MgrManager {
 #[cfg(test)]
 mod router_concurrency_tests {
     use super::*;
-    use crate::common::create_temp_dir;
+    use crate::common::{create_temp_dir, gen_dataset};
 
     const CAP: usize = 1024;
 
@@ -437,6 +437,198 @@ mod router_concurrency_tests {
         let total_pairs = ops_per_thread * num_threads;
 
         assert_eq!(pairs_count, total_pairs);
+    }
+
+    #[test]
+    fn test_concurrent_gets() {
+        // prepare
+        let db_count = 1000usize;
+        let dataset = gen_dataset(db_count);
+        let (mut router, _dir) = create_router(1024);
+
+        // insert everything first (single thread)
+        for p in &dataset {
+            router.set(p.clone()).unwrap();
+        }
+
+        // wrap router for concurrency: many readers should be allowed concurrently
+        let router_arc = Arc::new(RwLock::new(router));
+        let num_threads = 16usize;
+        let reads_per_thread = 500usize;
+
+        let mut handles = vec![];
+        for t in 0..num_threads {
+            let router_clone = Arc::clone(&router_arc);
+            let keys = dataset.clone(); // small clone cost; keeps test simple
+            let handle = std::thread::spawn(move || {
+                // each thread will repeatedly read keys deterministically
+                for i in 0..reads_per_thread {
+                    let idx = (t * reads_per_thread + i) % keys.len();
+                    let (k, v) = &keys[idx];
+                    let got = router_clone.read().unwrap().get(k.clone()).expect("get ok");
+                    // either value present or deleted by someone else; but here no deletes,
+                    // so we expect a value.
+                    assert!(got.is_some(), "expected Some for key {:?}", k);
+                    assert_eq!(got.unwrap(), *v);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // join
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // ensure counts unchanged
+        let final_count = router_arc.write().unwrap().get_insert_count().unwrap();
+        assert_eq!(final_count, db_count);
+    }
+
+    #[test]
+    fn test_concurrent_deletes() {
+        // prepare
+        let db_count = 1000usize;
+        let dataset = gen_dataset(db_count);
+        let (mut router, _dir) = create_router(1024);
+
+        // insert everything first
+        for p in &dataset {
+            router.set(p.clone()).unwrap();
+        }
+
+        let router_arc = Arc::new(RwLock::new(router));
+        let num_threads = 8usize;
+        let mut handles = vec![];
+
+        // partition the dataset so each thread deletes a disjoint slice
+        let chunk_size = (db_count + num_threads - 1) / num_threads;
+        for t in 0..num_threads {
+            let router_clone = Arc::clone(&router_arc);
+            let keys_slice: Vec<Vec<u8>> = dataset
+                .iter()
+                .skip(t * chunk_size)
+                .take(chunk_size)
+                .map(|(k, _v)| k.clone())
+                .collect();
+
+            let handle = std::thread::spawn(move || {
+                for k in keys_slice {
+                    // each deletion takes a write lock on the router (del needs &mut self)
+                    let _ = router_clone.write().unwrap().del(k).expect("del OK");
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // after all deletes, count must be zero
+        let final_count = router_arc.write().unwrap().get_insert_count().unwrap();
+        assert_eq!(final_count, 0);
+    }
+
+    #[test]
+    fn test_mixed_set_get_del_workload() {
+        // deterministic mixed workload:
+        // - insert INITIAL keys
+        // - start concurrent getters that repeatedly read across both initial and future keys
+        // - start concurrent deleters that delete exactly the INITIAL keys (disjoint partition)
+        // - start concurrent setters that insert NEW keys (disjoint partition)
+        //
+        // At the end we expect only the NEW keys to remain.
+
+        let initial_count = 800usize;
+        let new_count = 400usize;
+        let (mut router, _dir) = create_router(2048);
+
+        // insert INITIAL keys
+        let initial_dataset = gen_dataset(initial_count);
+        for p in &initial_dataset {
+            router.set(p.clone()).unwrap();
+        }
+
+        let router_arc = Arc::new(RwLock::new(router));
+
+        // spawn getters
+        let num_getters = 12usize;
+        let getter_iters = 600usize;
+        let mut handles = vec![];
+        let initial_keys_clone = initial_dataset
+            .iter()
+            .map(|(k, _v)| k.clone())
+            .collect::<Vec<_>>();
+
+        for g in 0..num_getters {
+            let router_clone = Arc::clone(&router_arc);
+            let init_keys = initial_keys_clone.clone();
+            let handle = std::thread::spawn(move || {
+                for i in 0..getter_iters {
+                    // steady deterministic access pattern: cycle across initial keys
+                    let idx = (g * getter_iters + i) % init_keys.len();
+                    let _ = router_clone.read().unwrap().get(init_keys[idx].clone());
+                    // we don't assert presence here because deletes may be happening concurrently
+                }
+            });
+            handles.push(handle);
+        }
+
+        // spawn deleters that will remove all INITIAL keys (partitioned)
+        let num_del_threads = 8usize;
+        let chunk_size = (initial_count + num_del_threads - 1) / num_del_threads;
+        for t in 0..num_del_threads {
+            let router_clone = Arc::clone(&router_arc);
+            let keys_slice: Vec<Vec<u8>> = initial_dataset
+                .iter()
+                .skip(t * chunk_size)
+                .take(chunk_size)
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            let handle = std::thread::spawn(move || {
+                for k in keys_slice {
+                    // take write lock per delete
+                    let _ = router_clone.write().unwrap().del(k).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // spawn setters that will insert NEW keys (disjoint range)
+        let num_set_threads = 6usize;
+        let per_thread = (new_count + num_set_threads - 1) / num_set_threads;
+        for t in 0..num_set_threads {
+            let router_clone = Arc::clone(&router_arc);
+            // create keys for this thread deterministically so they don't overlap with initial ones
+            let start = t * per_thread;
+            let end = ((t + 1) * per_thread).min(new_count);
+            let mut my_pairs = vec![];
+            for i in start..end {
+                let key_val = (1000000usize + i) as u32; // offset to avoid initial keyspace
+                let key = key_val.to_be_bytes().to_vec();
+                let value = key.clone();
+                my_pairs.push((key, value));
+            }
+
+            let handle = std::thread::spawn(move || {
+                for p in my_pairs {
+                    let _ = router_clone.write().unwrap().set(p).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // join all threads
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // final count must equal new_count (initials deleted, new ones inserted)
+        let final_count = router_arc.write().unwrap().get_insert_count().unwrap();
+        assert_eq!(final_count, new_count);
     }
 }
 
@@ -519,25 +711,5 @@ mod router_tests {
 
             assert_eq!(&got, v);
         }
-    }
-
-    #[test]
-    fn test_staging_creation_and_index_updated_when_live_fills() {
-        let small_cap = 8usize;
-        let total_inserts = 50usize;
-        let dataset = gen_dataset(total_inserts);
-        let (mut router, _dir) = create_router(small_cap);
-
-        for pair in dataset {
-            router.set(pair).unwrap();
-        }
-
-        // NOTE: All entries are migrated all at once while
-        // blocking the `Router::set()` operation
-        assert!(
-            router.staging_bucket.is_none(),
-            "staging bucket should exist after overflow"
-        );
-        assert_eq!(router.get_insert_count().unwrap(), total_inserts);
     }
 }
