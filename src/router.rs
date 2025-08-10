@@ -5,12 +5,15 @@ use crate::{
     types::{InternalConfig, InternalError, InternalResult},
 };
 use std::{
+    fs::{self, OpenOptions},
+    io::Write,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
     thread::{self, JoinHandle},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) struct Router {
@@ -70,6 +73,8 @@ impl Router {
     /// or bucket swap is in progress, this happens w/o any
     /// CPU burn
     pub fn set(&mut self, pair: KVPair) -> InternalResult<()> {
+        self.mgr.wait_for_migration()?;
+
         // blcoking for migration
         let mgr_guard = self.mgr.mutex.lock()?;
         let mg = self
@@ -87,7 +92,7 @@ impl Router {
             drop(lock);
 
             if count == 0 {
-                self.perform_bucket_swap()?;
+                SwapManager::perform_bucket_swap(self)?;
             }
         }
 
@@ -148,13 +153,7 @@ impl Router {
     ///
     /// NOTE: This operation is only blocked for migration to take place
     pub fn get(&self, key: Key) -> InternalResult<Option<Vec<u8>>> {
-        // blcoking for migration
-        let mgr_guard = self.mgr.mutex.lock()?;
-        let mg = self
-            .mgr
-            .cvar
-            .wait_while(mgr_guard, |_| self.mgr.flag.load(Ordering::Acquire))?;
-        drop(mg);
+        self.mgr.wait_for_migration()?;
 
         if let Some(staging) = &self.staging_bucket {
             let read_lock = self.read_lock(staging)?;
@@ -170,13 +169,7 @@ impl Router {
     /// NOTE: This operation is blocked for both the migration thread and
     /// bucket swapping
     pub fn del(&mut self, key: Key) -> InternalResult<Option<Vec<u8>>> {
-        // blcoking for migration
-        let mgr_guard = self.mgr.mutex.lock()?;
-        let mg = self
-            .mgr
-            .cvar
-            .wait_while(mgr_guard, |_| self.mgr.flag.load(Ordering::Acquire))?;
-        drop(mg);
+        self.mgr.wait_for_migration()?;
 
         // do not return early if key is not found in staging
         if let Some(staging) = &self.staging_bucket {
@@ -199,7 +192,7 @@ impl Router {
         //
         // NOTE: This is a blocking operation and will block current operation
         if live_count == 0 {
-            self.perform_bucket_swap()?;
+            SwapManager::perform_bucket_swap(self)?;
         }
 
         Ok(del_val)
@@ -207,6 +200,7 @@ impl Router {
 
     fn internal_set(bucket: &Arc<RwLock<Bucket>>, pair: &KVPair) -> InternalResult<bool> {
         let write_lock = bucket.write()?;
+
         return write_lock.set(pair);
     }
 
@@ -219,56 +213,6 @@ impl Router {
         let bucket = Bucket::new(path, new_cap)?;
 
         Ok((bucket, new_cap))
-    }
-
-    fn perform_bucket_swap(&mut self) -> InternalResult<()> {
-        // Wait until any migration finishes
-        let mgr_guard = self.mgr.mutex.lock()?;
-        let mg = self
-            .mgr
-            .cvar
-            .wait_while(mgr_guard, |_| self.mgr.flag.load(Ordering::Acquire))?;
-        drop(mg);
-
-        // Sanity check
-        if self.staging_bucket.is_none() {
-            return Ok(());
-        }
-
-        let bucket_path = self.config.dirpath.join(DEFAULT_BUCKET_NAME);
-        let staging_path = self.config.dirpath.join(STAGING_BUCKET_NAME);
-        let staging_bucket = self.staging_bucket.take().unwrap();
-
-        // Flush data to disk
-        self.write_lock(&staging_bucket)?.flush()?;
-        self.write_lock(&self.live_bucket)?.flush()?;
-
-        // Swap live and staging in memory
-        let old_bucket = std::mem::replace(&mut self.live_bucket, staging_bucket);
-
-        // Drop old live bucket to release mmap/file handle before FS ops
-        drop(old_bucket);
-
-        // Replace files on disk
-        std::fs::remove_file(&bucket_path)?;
-        std::fs::rename(&staging_path, &bucket_path)?;
-
-        // Compute the new capacity from the (now-in-memory) live bucket
-        let live_cap = {
-            let live_read = self.read_lock(&self.live_bucket)?;
-
-            live_read.get_capacity()?
-        };
-
-        // Update index metadata
-        let mut index_lock = self.write_lock(&self.index)?;
-
-        index_lock.set_capacity(live_cap);
-        index_lock.set_staging_capacity(0);
-
-        index_lock.flush()?;
-
-        Ok(())
     }
 
     /// Acquire a read‑lock on `Arc<RwLock<T>>`, mapping poison error => InternalError.
@@ -381,13 +325,169 @@ impl MgrManager {
 
         Ok(())
     }
+
+    pub fn wait_for_migration(&self) -> InternalResult<()> {
+        let guard = self.mutex.lock()?;
+        let _sg = self
+            .cvar
+            .wait_while(guard, |_| self.flag.load(Ordering::Acquire))?;
+
+        Ok(())
+    }
+
+    pub fn join(&mut self) {
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Drop for MgrManager {
     fn drop(&mut self) {
-        if let Some(tx) = self.thread.take() {
-            let _ = tx.join();
+        self.join();
+    }
+}
+
+struct SwapManager;
+
+impl SwapManager {
+    fn fsync_dir<P: AsRef<Path>>(dir: &P) -> InternalResult<()> {
+        let dir_file = OpenOptions::new().read(true).open(dir)?;
+        dir_file.sync_all()?;
+
+        return Ok(());
+    }
+
+    fn write_swap_journal<P: AsRef<Path>>(journal_path: &P, contents: &str) -> InternalResult<()> {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(journal_path)?;
+
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+
+        Ok(())
+    }
+
+    fn atomic_rename_with_backup<P: AsRef<Path>>(
+        dir: &P,
+        live: &P,
+        staging: &P,
+        backup: &std::path::Path,
+    ) -> InternalResult<()> {
+        // If a previous backup exists, remove it first
+        //
+        // NOTE: We must also ensure dir entry removal is durable
+        // before proceeding
+        if backup.exists() {
+            fs::remove_file(backup)?;
+            Self::fsync_dir(dir)?;
         }
+
+        // [POSIX] Atomic renamem, `live => backup`
+        fs::rename(live, backup)?;
+
+        // [POSIX] Atomic renamem, `staging => live`
+        fs::rename(staging, live)?;
+
+        Self::fsync_dir(dir)?;
+        Ok(())
+    }
+
+    fn perform_bucket_swap(router: &mut Router) -> InternalResult<()> {
+        // sanity check
+        if router.staging_bucket.is_none() {
+            return Ok(());
+        }
+
+        router.mgr.wait_for_migration()?;
+
+        let bucket_path = router.config.dirpath.join(DEFAULT_BUCKET_NAME);
+        let staging_path = router.config.dirpath.join(STAGING_BUCKET_NAME);
+
+        // NOTE: We create a timestamped backup name to reduce risk of accidental
+        // overwrites at times of crashes
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(1))
+            .as_secs();
+
+        let backup_name = format!("{}.bak.{}", DEFAULT_BUCKET_NAME, ts);
+        let backup_path = router.config.dirpath.join(backup_name);
+
+        // NOTE: We Take the staging bucket out cause we must swap it w/
+        // (in-memory) `live_bucket`
+        let staging_bucket = router.staging_bucket.take().unwrap();
+
+        // README: We obtain 'write-locks' and flush/sync both in-mem buckets to disk
+        {
+            router.write_lock(&staging_bucket)?.flush()?;
+            router.write_lock(&router.live_bucket)?.flush()?;
+        }
+
+        // HACK: Write a swap journal so startup can recover if we crash mid-swap.
+        let journal_path = router.config.dirpath.join("swap_journal");
+        let journal_contents = format!(
+            r#"{{"op":"swap","live":"{}","staging":"{}","backup":"{}","ts":{}}}"#,
+            bucket_path.display(),
+            staging_path.display(),
+            backup_path.display(),
+            ts
+        );
+        Self::write_swap_journal(&journal_path, &journal_contents)?;
+
+        let old_bucket = std::mem::replace(&mut router.live_bucket, staging_bucket);
+
+        // FIX: For WIN32, a memory-mapped file generally cannot be deleted or renamed while it is
+        // mapped. We must drop the `old_bucket` to unmap its file before proceeding with filesystem
+        // operations. Read more at -> `https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-deletefile`
+        drop(old_bucket);
+
+        // Perform atomic renames on disk,
+        //     live => backup, staging => live
+        //
+        // NOTE: This sequence is safer cause onn failure, we still have
+        // the journal describing intent.
+        //
+        // FIXME: If rename fails, we need an attempt to restore the in-memory state
+        // of the [Router] to avoid the inconsistent state.
+        Self::atomic_rename_with_backup(
+            &router.config.dirpath,
+            &bucket_path,
+            &staging_path,
+            &backup_path,
+        )?;
+
+        {
+            let live_cap = {
+                let live_read = router.read_lock(&router.live_bucket)?;
+
+                live_read.get_capacity()?
+            };
+
+            let mut index_lock = router.write_lock(&router.index)?;
+            index_lock.set_capacity(live_cap);
+            index_lock.set_staging_capacity(0);
+
+            index_lock.flush()?;
+        }
+
+        // NOTE: We must remove swap journal and remove the backup after successful swap
+        {
+            if backup_path.exists() {
+                let _ = fs::remove_file(&backup_path);
+            }
+
+            if journal_path.exists() {
+                let _ = fs::remove_file(&journal_path);
+            }
+        }
+
+        let _ = Self::fsync_dir(&router.config.dirpath);
+
+        Ok(())
     }
 }
 
@@ -550,7 +650,7 @@ mod router_tests {
             assert_eq!(old_cap, 8usize);
         }
 
-        router.perform_bucket_swap().expect("perform_bucket_swap");
+        SwapManager::perform_bucket_swap(&mut router).expect("perform_bucket_swap");
 
         assert!(
             router.staging_bucket.is_none(),
