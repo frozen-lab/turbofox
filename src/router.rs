@@ -7,13 +7,13 @@ use crate::{
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) struct Router {
@@ -28,6 +28,9 @@ impl Router {
     pub fn new(config: InternalConfig) -> InternalResult<Self> {
         // make sure the dir exists
         std::fs::create_dir_all(&config.dirpath)?;
+
+        // crash recovery for atomic bucket swap operation
+        SwapManager::startup_recover(&config.dirpath)?;
 
         let index_path = config.dirpath.join(INDEX_NAME);
         let index = Index::open(&index_path, config.initial_capacity)?;
@@ -411,7 +414,7 @@ impl SwapManager {
         // overwrites at times of crashes
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(1))
+            .unwrap_or_default()
             .as_secs();
 
         let backup_name = format!("{}.bak.{}", DEFAULT_BUCKET_NAME, ts);
@@ -488,6 +491,224 @@ impl SwapManager {
         let _ = Self::fsync_dir(&router.config.dirpath);
 
         Ok(())
+    }
+
+    fn startup_recover<P: AsRef<Path>>(dir: &P) -> InternalResult<()> {
+        let journal_path = dir.as_ref().join("swap_journal");
+        let live_path = dir.as_ref().join(DEFAULT_BUCKET_NAME);
+        let staging_path = dir.as_ref().join(STAGING_BUCKET_NAME);
+
+        // helper function for cleanup
+        let cleanup = |journal: &Path, maybe_backup: Option<&Path>| -> InternalResult<()> {
+            if let Some(b) = maybe_backup {
+                if b.exists() {
+                    let _ = fs::remove_file(b);
+                }
+            }
+
+            if journal.exists() {
+                let _ = fs::remove_file(journal);
+            }
+
+            let _ = Self::fsync_dir(dir);
+            Ok(())
+        };
+
+        // NOTE: If journal exists, we use it as the primary source of truth
+        if journal_path.exists() {
+            let s = fs::read_to_string(&journal_path)?;
+            let v: serde_json::Value = serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
+
+            let j_live = v.get("live").and_then(|x| x.as_str()).map(PathBuf::from);
+            let j_staging = v.get("staging").and_then(|x| x.as_str()).map(PathBuf::from);
+            let j_backup = v.get("backup").and_then(|x| x.as_str()).map(PathBuf::from);
+
+            let live = j_live.unwrap_or_else(|| live_path.clone());
+            let staging = j_staging.unwrap_or_else(|| staging_path.clone());
+            let backup = j_backup.as_ref().map(|p| p.clone());
+
+            // ▶ Case 1: Staging missing but live exists
+            //
+            // This indicates that swap probably completed! So just perform cleanup
+            // by removoving `backup + journal`
+            if !staging.exists() && live.exists() {
+                return cleanup(&journal_path, backup.as_deref());
+            }
+
+            // ▶ Case 2: Staging exists but live missing
+            //
+            // So we try to finish swap by renaming `staging => live`
+            if staging.exists() && !live.exists() {
+                fs::rename(&staging, &live)?;
+                Self::fsync_dir(dir)?;
+
+                // cleanup everything
+                return cleanup(&journal_path, backup.as_deref());
+            }
+
+            // ▶ Case 3: Both staging & live exist
+            if staging.exists() && live.exists() {
+                let s_meta = staging.metadata();
+                let l_meta = live.metadata();
+
+                if let (Ok(s_meta), Ok(l_meta)) = (s_meta, l_meta) {
+                    let s_m = s_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                    let l_m = l_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+                    if s_m > l_m {
+                        // NOTE: We must prefer staging!
+                        //
+                        // So we rotate live to backup and put staging as live
+
+                        let ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let recovery_backup = dir
+                            .as_ref()
+                            .join(format!("{}.bak.recover.{}", DEFAULT_BUCKET_NAME, ts));
+
+                        // live => backup
+                        fs::rename(&live, &recovery_backup)?;
+
+                        // staging => live
+                        fs::rename(&staging, &live)?;
+
+                        // sync + cleanup
+                        Self::fsync_dir(dir)?;
+                        return cleanup(&journal_path, Some(&recovery_backup));
+                    } else {
+                        // staging is older, remove stale staging
+                        let _ = fs::remove_file(&staging);
+                        let _ = Self::fsync_dir(dir);
+
+                        return cleanup(&journal_path, backup.as_deref());
+                    }
+                }
+            }
+
+            // ▶ Case 4: Neither staging nor live exist, but only backup exists
+            if !staging.exists() && !live.exists() {
+                if let Some(bk) = &backup {
+                    if bk.exists() {
+                        // restore `backup => live`
+                        fs::rename(bk, &live)?;
+                        Self::fsync_dir(dir)?;
+
+                        return cleanup(&journal_path, None);
+                    }
+                }
+
+                // Fallback: Let's try to find newest backup file in directory
+                if let Some(newest) = Self::find_newest_backup(dir) {
+                    fs::rename(newest, &live)?;
+                    Self::fsync_dir(dir)?;
+
+                    return cleanup(&journal_path, None);
+                }
+
+                // Nothing to recover — maybe DB was empty, indicates new init.
+                // So just cleanup and exit.
+                return cleanup(&journal_path, None);
+            }
+
+            // ▶ Case 5: This is a generic fallback
+            //
+            // HACK: Just remove journal and return
+            let _ = fs::remove_file(&journal_path);
+            let _ = Self::fsync_dir(dir);
+
+            return Ok(());
+        }
+
+        // README: So no journal is present.
+        //
+        // Need to handle some remaining cases conservatively.
+
+        // ▶ Case 6: If live-bucket is missing but there's a backup
+        //
+        // We restore newest backup => live
+        if !live_path.exists() {
+            if let Some(newest) = Self::find_newest_backup(dir) {
+                fs::rename(&newest, &live_path)?;
+                Self::fsync_dir(dir)?;
+
+                return Ok(());
+            }
+
+            // NOTE: If staging exists and live missing,
+            // we promote staging => live
+            if staging_path.exists() {
+                fs::rename(&staging_path, &live_path)?;
+                Self::fsync_dir(dir)?;
+                return Ok(());
+            }
+        }
+
+        // ▶ Case 7: If both live & staging exist but no journal
+        //
+        // We choose newer (mtime heuristic)
+        if live_path.exists() && staging_path.exists() {
+            let s_meta = staging_path.metadata();
+            let l_meta = live_path.metadata();
+
+            if let (Ok(s_meta), Ok(l_meta)) = (s_meta, l_meta) {
+                let s_m = s_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                let l_m = l_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+                if s_m > l_m {
+                    // move `live => backup`, `staging => live`
+                    let ts = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let recovery_backup = dir
+                        .as_ref()
+                        .join(format!("{}.bak.recover.{}", DEFAULT_BUCKET_NAME, ts));
+
+                    fs::rename(&live_path, &recovery_backup)?;
+                    fs::rename(&staging_path, &live_path)?;
+
+                    Self::fsync_dir(dir)?;
+                } else {
+                    let _ = fs::remove_file(&staging_path);
+                    let _ = Self::fsync_dir(dir);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn find_newest_backup<P: AsRef<Path>>(dir: &P) -> Option<PathBuf> {
+        let prefix = format!("{}{}", DEFAULT_BUCKET_NAME, ".bak.");
+        let mut newest: Option<(PathBuf, SystemTime)> = None;
+
+        if let Ok(rd) = fs::read_dir(dir) {
+            for ent in rd.flatten() {
+                let p = ent.path();
+
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if name.starts_with(&prefix) {
+                        if let Ok(meta) = p.metadata() {
+                            if let Ok(m) = meta.modified() {
+                                match &newest {
+                                    Some((_, ref cur_m)) if m > *cur_m => {
+                                        newest = Some((p.clone(), m))
+                                    }
+
+                                    None => newest = Some((p.clone(), m)),
+
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        newest.map(|(p, _)| p)
     }
 }
 
