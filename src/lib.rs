@@ -45,6 +45,20 @@ impl TurboCache {
         Ok(())
     }
 
+    pub fn get(&self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
+        let lock = self.read_lock()?;
+        let res = lock.get(key.to_vec())?;
+
+        Ok(res)
+    }
+
+    pub fn del(&self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
+        let mut write_lock = self.write_lock()?;
+        let res = write_lock.del(key.to_vec())?;
+
+        Ok(res)
+    }
+
     /// Return an iterator over all KV pairs.
     /// Each `Item` is an `InternalResult<KVPair>`.
     /// The iterator keeps the router's read-lock until it is dropped.
@@ -56,6 +70,13 @@ impl TurboCache {
             _guard: router_guard,
             iter: router_iter,
         })
+    }
+
+    pub fn total_count(&self) -> TurboResult<usize> {
+        let lock = self.read_lock()?;
+        let count = lock.get_insert_count()?;
+
+        Ok(count)
     }
 
     // Acquire the read lock while mapping a lock poison error into [TurboError]

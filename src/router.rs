@@ -3,7 +3,6 @@ use crate::{
     common::{KVPair, Key, DEFAULT_BUCKET_NAME, INDEX_NAME, STAGING_BUCKET_NAME},
     index::Index,
     types::{InternalConfig, InternalError, InternalResult},
-    TurboResult,
 };
 use std::{
     fs::{self, OpenOptions},
@@ -205,7 +204,7 @@ impl Router {
     /// Fetch total number of pairs from [TurboCache]
     ///
     /// NOTE: This operation is blocked by "Migration Thread"
-    pub fn get_inserts(&self) -> TurboResult<usize> {
+    pub fn get_inserts(&self) -> InternalResult<usize> {
         self.mgr.wait_for_migration()?;
 
         let mut num_inserts = self.read_lock(&self.live_bucket)?.get_inserted_count()?;
@@ -828,6 +827,102 @@ impl SwapManager {
         }
 
         newest.map(|(p, _)| p)
+    }
+}
+
+#[cfg(test)]
+mod iter_tests {
+    use super::*;
+    use crate::common::create_temp_dir;
+    use std::collections::HashSet;
+
+    const CAP: usize = 1024;
+
+    fn create_router(cap: usize) -> (Router, tempfile::TempDir) {
+        let tmp = create_temp_dir();
+        let dir = tmp.path().to_path_buf();
+        let config = InternalConfig {
+            dirpath: dir,
+            initial_capacity: cap,
+        };
+
+        let router = Router::new(config).expect("Router::new");
+
+        (router, tmp)
+    }
+
+    fn collect_pairs(router: &Router) -> HashSet<(Vec<u8>, Vec<u8>)> {
+        router
+            .iter()
+            .unwrap()
+            .map(|res| res.expect("iter error"))
+            .collect::<HashSet<_>>()
+    }
+
+    #[test]
+    fn iter_empty_db_yields_none() {
+        let (router, _tmp) = create_router(4);
+
+        assert!(router.iter().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn iter_only_live_entries() {
+        let (mut router, _tmp) = create_router(4);
+        let inputs = vec![
+            (b"a".to_vec(), b"1".to_vec()),
+            (b"b".to_vec(), b"2".to_vec()),
+            (b"c".to_vec(), b"3".to_vec()),
+        ];
+
+        for pair in &inputs {
+            router.set(pair.clone()).unwrap();
+        }
+
+        let (mut router2, _tmp2) = create_router(10);
+
+        for pair in &inputs {
+            router2.set(pair.clone()).unwrap();
+        }
+
+        let got: HashSet<_> = collect_pairs(&router2);
+        let want: HashSet<_> = inputs.into_iter().collect();
+
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn iter_live_and_staging_entries() {
+        let (mut router, _tmp) = create_router(4);
+
+        let live_pairs = vec![
+            (b"x".to_vec(), b"10".to_vec()),
+            (b"y".to_vec(), b"11".to_vec()),
+            (b"z".to_vec(), b"12".to_vec()),
+        ];
+
+        for p in live_pairs.iter().take(2) {
+            router.set(p.clone()).unwrap();
+        }
+
+        router.set(live_pairs[2].clone()).unwrap();
+
+        let stag_pairs = vec![
+            (b"a".to_vec(), b"20".to_vec()),
+            (b"b".to_vec(), b"21".to_vec()),
+        ];
+
+        for p in &stag_pairs {
+            router.set(p.clone()).unwrap();
+        }
+
+        let got = collect_pairs(&router);
+        let want: HashSet<_> = live_pairs
+            .into_iter()
+            .chain(stag_pairs.into_iter())
+            .collect();
+
+        assert_eq!(got, want);
     }
 }
 
