@@ -201,21 +201,6 @@ impl Router {
         Ok(del_val)
     }
 
-    /// Fetch total number of pairs from [TurboCache]
-    ///
-    /// NOTE: This operation is blocked by "Migration Thread"
-    pub fn get_inserts(&self) -> InternalResult<usize> {
-        self.mgr.wait_for_migration()?;
-
-        let mut num_inserts = self.read_lock(&self.live_bucket)?.get_inserted_count()?;
-
-        if let Some(staging) = &self.staging_bucket {
-            num_inserts += self.read_lock(staging)?.get_inserted_count()?;
-        }
-
-        Ok(num_inserts)
-    }
-
     /// Iterator for [TurboCache]
     ///
     /// NOTE: This operation is blocked by "Migration Thread"
@@ -835,8 +820,6 @@ mod iter_tests {
     use super::*;
     use crate::common::create_temp_dir;
     use std::collections::HashSet;
-
-    const CAP: usize = 1024;
 
     fn create_router(cap: usize) -> (Router, tempfile::TempDir) {
         let tmp = create_temp_dir();

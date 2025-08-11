@@ -30,12 +30,24 @@ struct Meta {
 struct Pair(u64);
 
 impl Pair {
-    fn from_offset(offset: Offset) -> Self {
+    fn from_offset(offset: Offset) -> InternalResult<Self> {
+        if offset.position > (1u64 << 40) {
+            return Err(InternalError::OffsetOverflow(offset.position as usize));
+        }
+
+        if offset.klen > (1u16 << 12) {
+            return Err(InternalError::KeyTooLarge(offset.klen as usize));
+        }
+
+        if offset.vlen > (1u16 << 12) {
+            return Err(InternalError::ValueTooLarge(offset.vlen as usize));
+        }
+
         let off_bits = offset.position & ((1u64 << 40) - 1);
         let klen_bits = (offset.klen as u64 & ((1u64 << 12) - 1)) << 40;
         let vlen_bits = (offset.vlen as u64 & ((1u64 << 12) - 1)) << 52;
 
-        Self(off_bits | klen_bits | vlen_bits)
+        Ok(Self(off_bits | klen_bits | vlen_bits))
     }
 
     fn to_offset(&self) -> Offset {
@@ -70,7 +82,7 @@ mod pair_tests {
             vlen: 200,
         };
 
-        let encoded = Pair::from_offset(o);
+        let encoded = Pair::from_offset(o).unwrap();
         let decoded = encoded.to_offset();
 
         assert_eq!(o.position, decoded.position);
@@ -85,7 +97,8 @@ mod pair_tests {
             klen: 0,
             vlen: 0,
         };
-        let encoded = Pair::from_offset(o);
+
+        let encoded = Pair::from_offset(o).unwrap();
         let decoded = encoded.to_offset();
 
         assert_eq!(o, decoded);
@@ -99,7 +112,8 @@ mod pair_tests {
             klen: max_klen,
             vlen: max_vlen,
         };
-        let encoded = Pair::from_offset(o);
+
+        let encoded = Pair::from_offset(o).unwrap();
         let decoded = encoded.to_offset();
 
         assert_eq!(o, decoded);
@@ -117,7 +131,7 @@ mod pair_tests {
                 klen,
                 vlen,
             };
-            let encoded = Pair::from_offset(o);
+            let encoded = Pair::from_offset(o).unwrap();
             let decoded = encoded.to_offset();
 
             assert_eq!(o, decoded, "Failed at iteration {i}");
@@ -179,14 +193,19 @@ impl BucketFile {
             threshold,
         };
 
-        if is_new {
+        // validate file on disk
+        if !is_new {
+            let meta = bucket.metadata();
+
+            if meta.version != VERSION || meta.magic != MAGIC {
+                return Err(InternalError::InvalidFile);
+            }
+        } else {
             let meta = bucket.metadata_mut();
 
             meta.magic = MAGIC;
             meta.version = VERSION;
         }
-
-        // TODO: Take action if [MAGIC] or [VERSION] does not match
 
         Ok(bucket)
     }
@@ -274,7 +293,7 @@ impl BucketFile {
             position,
         };
 
-        Ok(Pair::from_offset(offset))
+        Ok(Pair::from_offset(offset)?)
     }
 
     #[inline]
@@ -528,7 +547,8 @@ mod bucket_file_tests {
             vlen: 2,
             position: 99,
         };
-        let pair = Pair::from_offset(fake_po);
+
+        let pair = Pair::from_offset(fake_po).unwrap();
         bucket.set_po(7, pair);
 
         let got_po = bucket.get_po(7);

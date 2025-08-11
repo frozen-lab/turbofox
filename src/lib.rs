@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use router::{Router, RouterIterator};
 use std::{
     path::Path,

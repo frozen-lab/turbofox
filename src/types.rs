@@ -9,6 +9,7 @@ pub(crate) struct InternalConfig {
 pub type TurboResult<T> = Result<T, TurboError>;
 
 /// A custom set of errors thrown by [TurboCache]
+#[derive(Debug)]
 pub enum TurboError {
     /// Represents an I/O error
     Io(std::io::Error),
@@ -62,7 +63,8 @@ impl From<InternalError> for TurboError {
             InternalError::OffsetOverflow(n) => TurboError::OffsetOverflow(n),
             InternalError::KeyTooLarge(n) => TurboError::KeyTooLarge(n),
             InternalError::ValueTooLarge(n) => TurboError::ValueTooLarge(n),
-            _ => TurboError::Unknown,
+            InternalError::InvalidFile => TurboError::Unknown,
+            InternalError::BucketFull => TurboError::Unknown,
         }
     }
 }
