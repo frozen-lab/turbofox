@@ -1,8 +1,8 @@
 /// Configurations for [TurboCache] struct
 #[derive(Clone)]
 pub(crate) struct InternalConfig {
-    pub dirpath: std::path::PathBuf,
-    pub initial_capacity: usize,
+    pub(crate) dirpath: std::path::PathBuf,
+    pub(crate) initial_capacity: usize,
 }
 
 /// A custom result type

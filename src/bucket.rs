@@ -193,18 +193,18 @@ impl BucketFile {
             threshold,
         };
 
-        // validate file on disk
-        if !is_new {
+        if is_new {
+            let meta = bucket.metadata_mut();
+
+            meta.magic = MAGIC;
+            meta.version = VERSION;
+        } else {
+            // validate the file
             let meta = bucket.metadata();
 
             if meta.version != VERSION || meta.magic != MAGIC {
                 return Err(InternalError::InvalidFile);
             }
-        } else {
-            let meta = bucket.metadata_mut();
-
-            meta.magic = MAGIC;
-            meta.version = VERSION;
         }
 
         Ok(bucket)
