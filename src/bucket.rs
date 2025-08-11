@@ -5,7 +5,7 @@ use std::{
     mem::size_of,
     path::Path,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, RwLock,
     },
 };
@@ -22,15 +22,107 @@ struct Meta {
     version: u32,
     inserts: AtomicU32,
     iter_idx: AtomicU32,
-    insert_offset: AtomicU32,
+    insert_offset: AtomicU64,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct PairOffset {
-    offset: u32,
+struct Pair(u64);
+
+impl Pair {
+    fn from_offset(offset: Offset) -> Self {
+        let off_bits = offset.position & ((1u64 << 40) - 1);
+        let klen_bits = (offset.klen as u64 & ((1u64 << 12) - 1)) << 40;
+        let vlen_bits = (offset.vlen as u64 & ((1u64 << 12) - 1)) << 52;
+
+        Self(off_bits | klen_bits | vlen_bits)
+    }
+
+    fn to_offset(&self) -> Offset {
+        let position = self.0 & ((1u64 << 40) - 1);
+        let klen = (self.0 >> 40) & ((1u64 << 12) - 1);
+        let vlen = (self.0 >> 52) & ((1u64 << 12) - 1);
+
+        Offset {
+            position,
+            klen: klen as u16,
+            vlen: vlen as u16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+struct Offset {
+    position: u64,
     klen: u16,
     vlen: u16,
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::{Offset, Pair};
+
+    #[test]
+    fn test_basic_round_trip() {
+        let o = Offset {
+            position: 123456789,
+            klen: 100,
+            vlen: 200,
+        };
+
+        let encoded = Pair::from_offset(o);
+        let decoded = encoded.to_offset();
+
+        assert_eq!(o.position, decoded.position);
+        assert_eq!(o.klen, decoded.klen);
+        assert_eq!(o.vlen, decoded.vlen);
+    }
+
+    #[test]
+    fn test_boundaries() {
+        let o = Offset {
+            position: 0,
+            klen: 0,
+            vlen: 0,
+        };
+        let encoded = Pair::from_offset(o);
+        let decoded = encoded.to_offset();
+
+        assert_eq!(o, decoded);
+
+        let max_pos = (1u64 << 40) - 1;
+        let max_klen = (1u16 << 12) - 1;
+        let max_vlen = (1u16 << 12) - 1;
+
+        let o = Offset {
+            position: max_pos,
+            klen: max_klen,
+            vlen: max_vlen,
+        };
+        let encoded = Pair::from_offset(o);
+        let decoded = encoded.to_offset();
+
+        assert_eq!(o, decoded);
+    }
+
+    #[test]
+    fn test_randomized_values() {
+        for i in 0..1000 {
+            let position = (i * 1234567) as u64 & ((1u64 << 40) - 1);
+            let klen = (i * 37 % (1 << 12)) as u16;
+            let vlen = (i * 91 % (1 << 12)) as u16;
+
+            let o = Offset {
+                position,
+                klen,
+                vlen,
+            };
+            let encoded = Pair::from_offset(o);
+            let decoded = encoded.to_offset();
+
+            assert_eq!(o, decoded, "Failed at iteration {i}");
+        }
+    }
 }
 
 struct BucketFile {
@@ -138,16 +230,18 @@ impl BucketFile {
         Err(InternalError::BucketFull)
     }
 
-    /// Read a [KVPair] from a given [PairOffset]
-    fn read_slot(&self, pair: &PairOffset) -> InternalResult<KVPair> {
-        let klen = pair.klen as usize;
-        let vlen = pair.vlen as usize;
+    /// Read a [KVPair] from a given [Pair]
+    fn read_slot(&self, pair: &Pair) -> InternalResult<KVPair> {
+        let offset = pair.to_offset();
+        let klen = offset.klen as usize;
+        let vlen = offset.vlen as usize;
+
         let mut buf = vec![0u8; klen + vlen];
 
         Self::read_exact_at(
             &self.file,
             &mut buf,
-            self.header_size as u64 + pair.offset as u64,
+            self.header_size as u64 + offset.position as u64,
         )?;
 
         let vbuf = buf[klen..(klen + vlen)].to_owned();
@@ -156,8 +250,8 @@ impl BucketFile {
         Ok((buf, vbuf))
     }
 
-    /// Write a [KVPair] to the bucket and get [PairOffset]
-    fn write_slot(&self, pair: &KVPair) -> InternalResult<PairOffset> {
+    /// Write a [KVPair] to the bucket and get [Pair]
+    fn write_slot(&self, pair: &KVPair) -> InternalResult<Pair> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
         let blen = klen + vlen;
@@ -167,18 +261,20 @@ impl BucketFile {
         buf[..klen].copy_from_slice(&pair.0);
         buf[klen..].copy_from_slice(&pair.1);
 
-        let offset = self
+        let position = self
             .metadata()
             .insert_offset
-            .fetch_add(blen as u32, Ordering::SeqCst);
+            .fetch_add(blen as u64, Ordering::SeqCst);
 
-        Self::write_all_at(&self.file, &buf, self.header_size as u64 + offset as u64)?;
+        Self::write_all_at(&self.file, &buf, self.header_size as u64 + position)?;
 
-        Ok(PairOffset {
+        let offset = Offset {
             klen: klen as u16,
             vlen: vlen as u16,
-            offset,
-        })
+            position,
+        };
+
+        Ok(Pair::from_offset(offset))
     }
 
     #[inline]
@@ -201,14 +297,14 @@ impl BucketFile {
         cap.saturating_mul(4) / 5
     }
 
-    /// Read a single [PairOffset] at index, directly from the mmap
+    /// Read a single [Pair] at index, directly from the mmap
     #[inline(always)]
-    fn get_po(&self, idx: usize) -> PairOffset {
+    fn get_po(&self, idx: usize) -> Pair {
         // sanity check
         debug_assert!(idx < self.capacity);
 
         unsafe {
-            let ptr = self.mmap.as_ptr().add(self.pair_offsets) as *const PairOffset;
+            let ptr = self.mmap.as_ptr().add(self.pair_offsets) as *const Pair;
 
             *ptr.add(idx)
         }
@@ -216,12 +312,12 @@ impl BucketFile {
 
     /// Write a new [PairOffset] at given index
     #[inline]
-    fn set_po(&mut self, idx: usize, po: PairOffset) {
+    fn set_po(&mut self, idx: usize, po: Pair) {
         // sanity check
         debug_assert!(idx < self.capacity);
 
         unsafe {
-            let ptr = self.mmap.as_mut_ptr().add(self.pair_offsets) as *mut PairOffset;
+            let ptr = self.mmap.as_mut_ptr().add(self.pair_offsets) as *mut Pair;
             *ptr.add(idx) = po;
         }
     }
@@ -258,7 +354,7 @@ impl BucketFile {
         let mut n = size_of::<Meta>();
 
         n += size_of::<u32>() * capacity;
-        n += size_of::<PairOffset>() * capacity;
+        n += size_of::<Pair>() * capacity;
 
         n
     }
@@ -344,10 +440,11 @@ mod bucket_file_tests {
 
         for idx in 0..bucket.capacity {
             let po = bucket.get_po(idx);
+            let offset = po.to_offset();
 
-            assert_eq!(po.klen, 0);
-            assert_eq!(po.vlen, 0);
-            assert_eq!(po.offset, 0);
+            assert_eq!(offset.klen, 0);
+            assert_eq!(offset.vlen, 0);
+            assert_eq!(offset.position, 0);
         }
     }
 
@@ -426,17 +523,20 @@ mod bucket_file_tests {
         let mut bucket = open_bucket();
 
         // set a fake PairOffset at idx 7
-        let fake_po = PairOffset {
+        let fake_po = Offset {
             klen: 1,
             vlen: 2,
-            offset: 99,
+            position: 99,
         };
-        bucket.set_po(7, fake_po);
-        let got_po = bucket.get_po(7);
+        let pair = Pair::from_offset(fake_po);
+        bucket.set_po(7, pair);
 
-        assert_eq!(got_po.klen, 1);
-        assert_eq!(got_po.vlen, 2);
-        assert_eq!(got_po.offset, 99);
+        let got_po = bucket.get_po(7);
+        let got_off = got_po.to_offset();
+
+        assert_eq!(got_off.klen, 1);
+        assert_eq!(got_off.vlen, 2);
+        assert_eq!(got_off.position, 99);
 
         // set and read a signature
         bucket.set_signature(7, 0xABC);
@@ -470,6 +570,7 @@ impl Bucket {
     fn open_bucket<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<BucketFile> {
         let file = match BucketFile::open(&path, capacity) {
             Ok(f) => f,
+
             Err(InternalError::InvalidFile) => {
                 // returns IO error if something goes wrong
                 std::fs::remove_file(&path)?;
@@ -477,6 +578,7 @@ impl Bucket {
                 // try to reopen the file
                 Self::open_bucket(path, capacity)?
             }
+
             Err(e) => return Err(e),
         };
 
@@ -529,6 +631,7 @@ impl Bucket {
 
                 _ => {}
             }
+
             idx = (idx + 1) % file.capacity;
         }
 
@@ -583,6 +686,7 @@ impl Bucket {
                 EMPTY_SIGN | TOMBSTONE_SIGN => {
                     continue;
                 }
+
                 _ => {
                     let p_offset = file.get_po(idx);
                     let pair = file.read_slot(&p_offset)?;
@@ -612,6 +716,7 @@ impl Bucket {
 
             match signs[cur_idx] {
                 EMPTY_SIGN | TOMBSTONE_SIGN => continue,
+
                 _ => {
                     let p_offset = file.get_po(cur_idx);
                     let pair = file.read_slot(&p_offset)?;
