@@ -357,10 +357,10 @@ impl MgrManager {
 
     #[inline]
     fn calc_batch_size(free_spots: usize) -> usize {
-        const TIME_PER_OP_MS: usize = 1;
-        const MAX_BATCH_SIZE_MS: usize = 200;
+        const TIME_PER_OP: usize = 1;
+        const MAX_BATCH_SIZE: usize = 200;
 
-        std::cmp::min(free_spots / 2, MAX_BATCH_SIZE_MS / TIME_PER_OP_MS)
+        std::cmp::min(free_spots / 2, MAX_BATCH_SIZE / TIME_PER_OP)
     }
 
     fn spawn(

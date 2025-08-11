@@ -21,3 +21,7 @@ name = "base_bench"
 path = "benchmarks/base_bench.rs"
 harness = false
 
+[[bench]]
+name = "mgr_bench"
+path = "benchmarks/mgr_bench.rs"
+harness = false
