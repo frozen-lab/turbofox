@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use router::Router;
+use router::{Router, RouterIterator};
 use std::{
     path::Path,
     sync::{Arc, RwLock},
@@ -45,6 +45,19 @@ impl TurboCache {
         Ok(())
     }
 
+    /// Return an iterator over all KV pairs.
+    /// Each `Item` is an `InternalResult<KVPair>`.
+    /// The iterator keeps the router's read-lock until it is dropped.
+    pub fn iter(&self) -> TurboResult<TurboCacheIter<'_>> {
+        let router_guard = self.read_lock()?;
+        let router_iter = router_guard.iter()?;
+
+        Ok(TurboCacheIter {
+            _guard: router_guard,
+            iter: router_iter,
+        })
+    }
+
     // Acquire the read lock while mapping a lock poison error into [TurboError]
     fn read_lock(&self) -> Result<std::sync::RwLockReadGuard<'_, Router>, TurboError> {
         Ok(self.router.read()?)
@@ -53,5 +66,28 @@ impl TurboCache {
     // Acquire the write lock while mapping a lock poison error into [TurboError]
     fn write_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, Router>, TurboError> {
         Ok(self.router.write()?)
+    }
+}
+
+pub struct TurboCacheIter<'a> {
+    _guard: std::sync::RwLockReadGuard<'a, Router>,
+    iter: RouterIterator,
+}
+
+impl<'a> Iterator for TurboCacheIter<'a> {
+    type Item = TurboResult<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.iter.next() {
+            Some(Ok(pair)) => return Some(Ok(pair)),
+
+            Some(Err(e)) => {
+                let err = TurboError::from(e);
+
+                return Some(Err(err));
+            }
+
+            None => None,
+        }
     }
 }

@@ -3,6 +3,7 @@ use crate::{
     common::{KVPair, Key, DEFAULT_BUCKET_NAME, INDEX_NAME, STAGING_BUCKET_NAME},
     index::Index,
     types::{InternalConfig, InternalError, InternalResult},
+    TurboResult,
 };
 use std::{
     fs::{self, OpenOptions},
@@ -201,6 +202,56 @@ impl Router {
         Ok(del_val)
     }
 
+    /// Fetch total number of pairs from [TurboCache]
+    ///
+    /// NOTE: This operation is blocked by "Migration Thread"
+    pub fn get_inserts(&self) -> TurboResult<usize> {
+        self.mgr.wait_for_migration()?;
+
+        let mut num_inserts = self.read_lock(&self.live_bucket)?.get_inserted_count()?;
+
+        if let Some(staging) = &self.staging_bucket {
+            num_inserts += self.read_lock(staging)?.get_inserted_count()?;
+        }
+
+        Ok(num_inserts)
+    }
+
+    /// Iterator for [TurboCache]
+    ///
+    /// NOTE: This operation is blocked by "Migration Thread"
+    pub fn iter(&self) -> InternalResult<RouterIterator> {
+        self.mgr.wait_for_migration()?;
+
+        let live_bucket = Arc::clone(&self.live_bucket);
+        let staging_bucket = match &self.staging_bucket {
+            Some(staging) => Some(Arc::clone(staging)),
+            None => None,
+        };
+
+        let live_remaining = self.read_lock(&self.live_bucket)?.get_inserted_count()?;
+        let staging_remaining = match &self.staging_bucket {
+            Some(staging) => staging.read()?.get_inserted_count()?,
+            None => 0,
+        };
+
+        let state = if live_remaining > 0 {
+            IterState::Live
+        } else if staging_remaining > 0 {
+            IterState::Staging
+        } else {
+            IterState::Done
+        };
+
+        Ok(RouterIterator {
+            live_bucket,
+            staging_bucket,
+            live_idx: 0,
+            staging_idx: 0,
+            state,
+        })
+    }
+
     fn internal_set(bucket: &Arc<RwLock<Bucket>>, pair: &KVPair) -> InternalResult<bool> {
         let write_lock = bucket.write()?;
 
@@ -232,6 +283,74 @@ impl Router {
         lk: &'a Arc<RwLock<T>>,
     ) -> InternalResult<RwLockWriteGuard<'a, T>> {
         Ok(lk.write()?)
+    }
+}
+
+enum IterState {
+    Live,
+    Staging,
+    Done,
+}
+
+pub(crate) struct RouterIterator {
+    live_bucket: Arc<RwLock<Bucket>>,
+    staging_bucket: Option<Arc<RwLock<Bucket>>>,
+    live_idx: usize,
+    staging_idx: usize,
+    state: IterState,
+}
+
+impl Iterator for RouterIterator {
+    type Item = InternalResult<KVPair>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.state {
+                IterState::Live => match self.live_bucket.read() {
+                    Err(e) => return Some(Err(InternalError::LockPoisoned(e.to_string()))),
+
+                    Ok(lock) => match lock.iter(&mut self.live_idx) {
+                        Ok(Some(pair)) => return Some(Ok(pair)),
+
+                        Ok(None) => {
+                            if self.staging_bucket.is_some() {
+                                self.state = IterState::Staging;
+                                continue;
+                            }
+
+                            self.state = IterState::Done;
+                            return None;
+                        }
+
+                        Err(e) => return Some(Err(e)),
+                    },
+                },
+
+                IterState::Staging => match &self.staging_bucket {
+                    Some(stg) => match stg.read() {
+                        Err(e) => return Some(Err(InternalError::LockPoisoned(e.to_string()))),
+
+                        Ok(lock) => match lock.iter(&mut self.staging_idx) {
+                            Ok(Some(pair)) => return Some(Ok(pair)),
+
+                            Ok(None) => {
+                                self.state = IterState::Done;
+                                return None;
+                            }
+
+                            Err(e) => return Some(Err(e)),
+                        },
+                    },
+
+                    None => {
+                        self.state = IterState::Done;
+                        return None;
+                    }
+                },
+
+                IterState::Done => return None,
+            }
+        }
     }
 }
 
