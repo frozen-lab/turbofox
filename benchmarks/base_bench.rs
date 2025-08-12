@@ -36,6 +36,9 @@ fn create_db(erase_old: bool) -> TurboCache {
 fn bench_set(c: &mut Criterion) {
     let mut group = c.benchmark_group("set");
 
+    // clear prev data
+    let _ = create_db(true);
+
     // calculating ops/sec
     group.throughput(Throughput::Elements(1));
 
@@ -127,7 +130,7 @@ fn configured_criterion() -> Criterion {
     Criterion::default()
         .configure_from_args()
         .sample_size(SAMPLE)
-        .measurement_time(Duration::from_secs(20))
+        .measurement_time(Duration::from_secs(12))
         .warm_up_time(Duration::from_secs(5))
         .noise_threshold(0.05)
         .with_plots()

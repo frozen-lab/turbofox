@@ -13,7 +13,7 @@ use turbocache::TurboCache;
 const INITIAL_CAP: usize = 1000;
 const PREPOP: usize = 799;
 const BATCH_SIZE: usize = 50;
-const NUM_BATCHES: usize = 60;
+const NUM_BATCHES: usize = 64;
 const BG_INSERT_RATE_MS: u64 = 0;
 const RNG_SEED: u64 = 42;
 const KEY_LEN: usize = 16;
