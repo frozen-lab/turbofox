@@ -26,6 +26,7 @@ fn gen_dataset(num_entries: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn test_concurrent_operations() -> TurboResult<()> {
     let tmp = TempDir::new().unwrap();

@@ -1,3 +1,7 @@
+//!
+//! TurboCache is a persistent and efficient embedded KV database
+//!
+
 use router::{Router, RouterIterator};
 use std::{
     path::Path,
@@ -14,12 +18,54 @@ mod types;
 
 pub use crate::types::{TurboError, TurboResult};
 
+/// [TurboCache] is a persistent and efficient embedded KV database
+///
+/// ## Example
+///
+/// ```rs
+/// use turbocache::TurboCache;
+///
+/// fn main() {
+///     let path = std::env::temp_dir().join("cache-dir");
+///     let cache = TurboCache::new(path, 1024).unwrap();
+///
+///     for i in 0..5 {
+///         cache.set(&vec![i], &vec![i * 10]).unwrap();
+///     }
+///
+///     assert_eq!(cache.get(&vec![3]).unwrap(), Some(vec![30]));
+///     assert_eq!(cache.del(&vec![3]).unwrap(), Some(vec![30]));
+/// }
+/// ```
 #[derive(Clone)]
 pub struct TurboCache {
     router: Arc<RwLock<Router>>,
 }
 
 impl TurboCache {
+    /// Open or Create a new [`TurboCache`] instance
+    ///
+    /// ## Parameters
+    ///
+    /// - `dirpath`: [Path] to a directory on disk
+    /// - `initial_capacity`: Initial capacity (no. of KV pairs stored) before auto scaling happens
+    ///
+    /// > NOTE: `initial_capacity` is only used to create new instances, it makes no effect otherwise
+    ///
+    /// ## Errors
+    ///
+    /// An instance of [TurboError] is returned
+    ///
+    /// ## Example
+    ///
+    /// ```rs
+    /// use turbocache::TurboCache;
+    ///
+    /// let path = std::env::temp_dir().join("cache-dir");
+    /// let cache = TurboCache::new(path, 1024).unwrap();
+    ///
+    /// assert_eq!(cache.total_count().unwrap(), 0);
+    /// ```
     pub fn new<P: AsRef<Path>>(dirpath: P, initial_capacity: usize) -> TurboResult<Self> {
         let internal_config = InternalConfig {
             initial_capacity,
@@ -33,6 +79,25 @@ impl TurboCache {
         })
     }
 
+    /// Inserts or update a key–value pair
+    ///
+    /// > NOTE: If the key already exists, its value will be overwritten.
+    ///
+    /// ## Errors
+    ///
+    /// An instance of [TurboError] is returned
+    ///
+    /// ## Example
+    ///
+    /// ```rs
+    /// use turbocache::TurboCache;
+    ///
+    /// let path = std::env::temp_dir().join("cache-dir");
+    /// let cache = TurboCache::new(path, 1024).unwrap();
+    ///
+    /// cache.set(b"hello", b"world").unwrap();
+    /// assert_eq!(cache.get(b"hello").unwrap(), Some(b"world".to_vec()));
+    /// ```
     pub fn set(&self, key: &[u8], value: &[u8]) -> TurboResult<()> {
         let mut write_lock = self.write_lock()?;
 
@@ -44,6 +109,32 @@ impl TurboCache {
         Ok(())
     }
 
+    /// Retrive a value for a given key
+    ///
+    /// > NOTE: If the key already exists, its value will be overwritten.
+    ///
+    /// ## Returns
+    ///
+    /// - `Ok(Some(Vec<u8>))` if the key exists.
+    /// - `Ok(None)` if the key is not found.
+    ///
+    /// ## Errors
+    ///
+    /// An instance of [TurboError] is returned
+    ///
+    /// ## Example
+    ///
+    /// ```rs
+    /// use turbocache::TurboCache;
+    ///
+    /// let path = std::env::temp_dir().join("cache-dir");
+    /// let cache = TurboCache::new(path, 1024).unwrap();
+    ///
+    /// cache.set(b"a", b"1").unwrap();
+    ///
+    /// assert_eq!(cache.get(b"a").unwrap(), Some(b"1".to_vec()));
+    /// assert_eq!(cache.get(b"missing").unwrap(), None);
+    /// ```
     pub fn get(&self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
         let lock = self.read_lock()?;
         let res = lock.get(key.to_vec())?;
@@ -51,6 +142,30 @@ impl TurboCache {
         Ok(res)
     }
 
+    /// Delete a key–value pair
+    ///
+    /// ## Errors
+    ///
+    /// An instance of [TurboError] is returned
+    ///
+    /// ## Returns
+    ///
+    /// - `Ok(Some(Vec<u8>))` containing the removed value if the key existed
+    /// - `Ok(None)` if the key was not found
+    ///
+    /// ## Example
+    ///
+    /// ```rs
+    /// use turbocache::TurboCache;
+    ///
+    /// let path = std::env::temp_dir().join("cache-dir");
+    /// let cache = TurboCache::new(path, 1024).unwrap();
+    ///
+    /// cache.set(b"x", b"y").unwrap();
+    ///
+    /// assert_eq!(cache.del(b"x").unwrap(), Some(b"y".to_vec()));
+    /// assert_eq!(cache.get(b"x").unwrap(), None);
+    /// ```    
     pub fn del(&self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
         let mut write_lock = self.write_lock()?;
         let res = write_lock.del(key.to_vec())?;
@@ -58,9 +173,34 @@ impl TurboCache {
         Ok(res)
     }
 
-    /// Return an iterator over all KV pairs.
-    /// Each `Item` is an `InternalResult<KVPair>`.
-    /// The iterator keeps the router's read-lock until it is dropped.
+    /// Returns an iterator over all key–value pairs
+    ///
+    /// ## Returns
+    ///
+    /// - An [`Iterator`] over `TurboResult<(Vec<u8>, Vec<u8>)>`.  
+    /// - Each `Ok` item contains a `(key, value)` pair.
+    ///
+    /// ## Example
+    ///
+    /// ```rs
+    /// use turbocache::TurboCache;
+    ///
+    /// let path = std::env::temp_dir().join("cache-dir");
+    /// let cache = TurboCache::new(path, 1024).unwrap();
+    ///
+    /// cache.set(b"a", b"1").unwrap();
+    /// cache.set(b"b", b"2").unwrap();
+    ///
+    /// let mut keys = Vec::new();
+    ///
+    /// for res in cache.iter().unwrap() {
+    ///     let (k, v) = res.unwrap();
+    ///     keys.push(k);
+    /// }
+    ///
+    /// assert!(keys.contains(&b"a".to_vec()));
+    /// assert!(keys.contains(&b"b".to_vec()));
+    /// ```
     pub fn iter(&self) -> TurboResult<TurboCacheIter<'_>> {
         let router_guard = self.read_lock()?;
         let router_iter = router_guard.iter()?;
@@ -71,6 +211,21 @@ impl TurboCache {
         })
     }
 
+    /// Returns the total number of key–value pairs stored
+    ///
+    /// ## Example
+    ///
+    /// ```rs
+    /// use turbocache::TurboCache;
+    ///
+    /// let path = std::env::temp_dir().join("cache-dir");
+    /// let cache = TurboCache::new(path, 1024).unwrap();
+    ///
+    /// cache.set(b"k1", b"v1").unwrap();
+    /// cache.set(b"k2", b"v2").unwrap();
+    ///
+    /// assert_eq!(cache.total_count().unwrap(), 2);
+    /// ```
     pub fn total_count(&self) -> TurboResult<usize> {
         let lock = self.read_lock()?;
         let count = lock.get_insert_count()?;
