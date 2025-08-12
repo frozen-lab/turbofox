@@ -929,6 +929,7 @@ mod router_tests {
         (router, tmp)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_large_load() {
         let db_count = CAP * 5;
@@ -984,6 +985,7 @@ mod router_tests {
         assert_eq!(router.get_insert_count().unwrap(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_bulk_set_and_spot_checks() {
         let db_count = 500usize;
@@ -1052,6 +1054,7 @@ mod router_tests {
         assert_eq!(count, 3 + 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_perform_bucket_swap_updates_index_and_replaces_live() {
         let (mut router, tmpdir) = create_router(8);
@@ -1085,6 +1088,7 @@ mod router_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_del_triggers_swap_when_live_becomes_empty_and_staging_exists() {
         let (mut router, tmpdir) = create_router(8);
@@ -1175,6 +1179,7 @@ mod router_concurrency_tests {
         (router, tmp)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_concurrent_writes_and_reads() {
         const THREADS: usize = 8;
@@ -1257,6 +1262,7 @@ mod router_concurrency_tests {
         assert_eq!(cnt, total, "expected {} entries, got {}", total, cnt);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_concurrent_set_triggers_migration_and_no_data_loss() {
         let small_cap = 128usize;

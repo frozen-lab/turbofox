@@ -434,6 +434,7 @@ mod concurrency_tests {
         assert_eq!(cache.total_count().unwrap(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_operations_during_swap() {
         let tmp = TempDir::new().unwrap();
@@ -533,6 +534,7 @@ mod concurrency_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_iteration_with_modification() {
         let tmp = TempDir::new().unwrap();
