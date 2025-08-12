@@ -1,3 +1,4 @@
+[![Crates.io](https://img.shields.io/crates/v/turbocache.svg)](https://crates.io/crates/turbocache)
 [![Linux (ARM)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_arm.yml)
 [![Linux (x86)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/linux_x86.yml)
 [![WIN (ARM)](https://github.com/frozen-lab/turbocache/actions/workflows/win_arm.yml/badge.svg)](https://github.com/frozen-lab/turbocache/actions/workflows/win_arm.yml)
