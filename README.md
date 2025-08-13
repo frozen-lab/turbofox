@@ -1,4 +1,4 @@
-[![Latest Version](https://img.shields.io/crates/dv/turbocache.svg)](https://crates.io/crates/turbocache)
+[![Latest Version](https://img.shields.io/crates/v/turbocache.svg)](https://crates.io/crates/turbocache)
 [![Downloads](https://img.shields.io/crates/d/turbocache.svg)](https://crates.io/crates/turbocache)
 [![Last Commits](https://img.shields.io/github/last-commit/frozen-lab/turbocache?logo=git&logoColor=white)](https://github.com/frozen-lab/turbocache/commits/main)
 [![Pull Requests](https://img.shields.io/github/issues-pr/frozen-lab/turbocache?logo=github&logoColor=white)](https://github.com/frozen-lab/turbocache/pulls)
@@ -22,7 +22,6 @@ A persistant and embedded KV Database built for on-device caching.
 - [Architecture](#architecture)
 - [Memory Usage](#memory-usage)
 - [Limitations](#limitations)
-- [Support](#support)
 
 ## Installation
 
@@ -93,6 +92,18 @@ All performance benchmarks are conducted on following potato (🥔) machine,
 *NOTE*: Benchmarks are derived from 256 samples collected from millions of iterations per opeation.
 
 ### Operations at Scale
+
+`set` operation at scale,
+
+![set operation at scale](./assets/bench_set.png)
+
+`get` operation at scale,
+
+![get operation at scale](./assets/bench_get.png)
+
+`del` operation at scale,
+
+![del operation at scale](./assets/bench_del.png)
 
 ## Architecture
 
