@@ -1,3 +1,9 @@
+## 0.0.5
+
+- Improved performance
+- Sync'ed implementation (w/ `Arc`)
+- Improved implementation of `iter`
+
 ## 0.0.4
 
 - Improved error handling

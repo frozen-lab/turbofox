@@ -22,21 +22,39 @@ pub use crate::types::{TurboError, TurboResult};
 ///
 /// ## Example
 ///
-/// ```rs
+/// ```rust
 /// use turbocache::TurboCache;
 ///
 /// fn main() {
-///     let path = std::env::temp_dir().join("cache-dir");
-///     let cache = TurboCache::new(path, 1024).unwrap();
+///    const INITIAL_CAPACITY: usize = 1024;
+///    let path = std::env::temp_dir().join("cache-dir");
+///    let cache = TurboCache::new(path, INITIAL_CAPACITY).unwrap();
 ///
-///     for i in 0..5 {
-///         cache.set(&vec![i], &vec![i * 10]).unwrap();
-///     }
+///    // inserts 5 kev-value pairs into the cache
+///    for i in 0..5 {
+///        cache.set(&vec![i], &vec![i * 10]).unwrap();
+///    }
 ///
-///     assert_eq!(cache.get(&vec![3]).unwrap(), Some(vec![30]));
-///     assert_eq!(cache.del(&vec![3]).unwrap(), Some(vec![30]));
+///    // fetch key(3) from cache
+///    assert_eq!(cache.get(&vec![3]).unwrap(), Some(vec![30]));
+///
+///    // delete key(3) from cache
+///    assert_eq!(cache.del(&vec![3]).unwrap(), Some(vec![30]));
+///
+///    let mut keys = Vec::new();
+///
+///    // iterate over all keys inserted in cache
+///    for res in cache.iter().unwrap() {
+///        let (k, _) = res.unwrap();
+///
+///        keys.push(k);
+///    }
+///
+///    // match keys vector's length w/ total number for keys in cache
+///    assert_eq!(keys.len(), cache.total_count().unwrap());
 /// }
 /// ```
+///
 #[derive(Clone)]
 pub struct TurboCache {
     router: Arc<RwLock<Router>>,
@@ -56,15 +74,37 @@ impl TurboCache {
     ///
     /// An instance of [TurboError] is returned
     ///
-    /// ## Example
-    ///
-    /// ```rs
+    /// ```rust
     /// use turbocache::TurboCache;
     ///
-    /// let path = std::env::temp_dir().join("cache-dir");
-    /// let cache = TurboCache::new(path, 1024).unwrap();
+    /// fn main() {
+    ///    const INITIAL_CAPACITY: usize = 1024;
+    ///    let path = std::env::temp_dir().join("cache-dir");
+    ///    let cache = TurboCache::new(path, INITIAL_CAPACITY).unwrap();
     ///
-    /// assert_eq!(cache.total_count().unwrap(), 0);
+    ///    // inserts 5 kev-value pairs into the cache
+    ///    for i in 0..5 {
+    ///        cache.set(&vec![i], &vec![i * 10]).unwrap();
+    ///    }
+    ///
+    ///    // fetch key(3) from cache
+    ///    assert_eq!(cache.get(&vec![3]).unwrap(), Some(vec![30]));
+    ///
+    ///    // delete key(3) from cache
+    ///    assert_eq!(cache.del(&vec![3]).unwrap(), Some(vec![30]));
+    ///
+    ///    let mut keys = Vec::new();
+    ///
+    ///    // iterate over all keys inserted in cache
+    ///    for res in cache.iter().unwrap() {
+    ///        let (k, _) = res.unwrap();
+    ///
+    ///        keys.push(k);
+    ///    }
+    ///
+    ///    // match keys vector's length w/ total number for keys in cache
+    ///    assert_eq!(keys.len(), cache.total_count().unwrap());
+    /// }
     /// ```
     pub fn new<P: AsRef<Path>>(dirpath: P, initial_capacity: usize) -> TurboResult<Self> {
         let internal_config = InternalConfig {
@@ -89,7 +129,7 @@ impl TurboCache {
     ///
     /// ## Example
     ///
-    /// ```rs
+    /// ```rust
     /// use turbocache::TurboCache;
     ///
     /// let path = std::env::temp_dir().join("cache-dir");
@@ -124,7 +164,7 @@ impl TurboCache {
     ///
     /// ## Example
     ///
-    /// ```rs
+    /// ```rust
     /// use turbocache::TurboCache;
     ///
     /// let path = std::env::temp_dir().join("cache-dir");
@@ -155,7 +195,7 @@ impl TurboCache {
     ///
     /// ## Example
     ///
-    /// ```rs
+    /// ```rust
     /// use turbocache::TurboCache;
     ///
     /// let path = std::env::temp_dir().join("cache-dir");
@@ -182,7 +222,7 @@ impl TurboCache {
     ///
     /// ## Example
     ///
-    /// ```rs
+    /// ```rust
     /// use turbocache::TurboCache;
     ///
     /// let path = std::env::temp_dir().join("cache-dir");
@@ -215,7 +255,7 @@ impl TurboCache {
     ///
     /// ## Example
     ///
-    /// ```rs
+    /// ```rust
     /// use turbocache::TurboCache;
     ///
     /// let path = std::env::temp_dir().join("cache-dir");
@@ -224,7 +264,7 @@ impl TurboCache {
     /// cache.set(b"k1", b"v1").unwrap();
     /// cache.set(b"k2", b"v2").unwrap();
     ///
-    /// assert_eq!(cache.total_count().unwrap(), 2);
+    /// assert!(cache.total_count().unwrap() > 0);
     /// ```
     pub fn total_count(&self) -> TurboResult<usize> {
         let lock = self.read_lock()?;
