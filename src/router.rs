@@ -1,3 +1,26 @@
+//! A `Router` is used to route incoming operations towards respective `Bucket`.
+//!
+//! If *Live* Bucket reaches it's capacity, a *Staging* Bucket is spawned to AID
+//! w/ migration and avoid blocking in-coming opertaions for longer times.
+//!
+//! ## Migrations
+//!
+//! For every set operation, if *Staging* is created, a thread is spawned to
+//! migrate a batch of pairs from *Live* to *Staging*.
+//!
+//! Migration does not block the main thread, it's a fire-and-forget operation.
+//! But it does block new incoming operations from executing, this is done to avoid
+//! contention during concurrency issues.
+//!
+//! ## Bucket Swaps
+//!
+//! As soon as migration is completed, *Staging* is prompted to *Live* and
+//! the old *Live* is deleted.
+//!
+//! This operation is spawned on the main thread itself, to avoid contention issues
+//! across threads.
+//!
+
 use crate::{
     bucket::Bucket,
     common::{KVPair, Key, DEFAULT_BUCKET_NAME, INDEX_NAME, STAGING_BUCKET_NAME},

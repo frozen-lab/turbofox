@@ -1,3 +1,65 @@
+//! A `Bucket` is an on-disk, immutable, append-only HashTable to store the
+//! Key-Value pairs. It uses a fix sized, memory-mapped Header.
+//!
+//! ## Header
+//!
+//! Header space contains metadata, a signature array of u32 values, and a `Pair`
+//! array of u64 values.
+//!
+//! > Signatures array
+//!
+//! A signatures array is used to find the slot for the Key-Value pair, each Key
+//! is hashed to a 32-bit unsigned integer using XxHash32 algorithm.
+//!
+//! > Pairs array
+//!
+//! A pairs array uses encoded u64 numbers which contains key-value lengths and a
+//! file offset at which the raw bytes are stored in append-only space of the `Bucket`
+//!
+//! ## Memory Usage
+//!
+//! Entire header space of the Bucket is memory-mapped, this reduces I/O operations and
+//! provides great lookup speeds.
+//!
+//! Header size can be derived as,
+//!
+//! `SIZE = sizeof(Meta) + (sizeof(u32) * CAP) + (sizeof(PairOffset) * CAP)`
+//!
+//! e.g. If initial capacity is 1024, then 12312 bytes are mmaped, which is ~ 12.029 KiB.
+//!
+//! ## Capacity
+//!
+//! Every `Bucket` is allowed to fill up 80%, above that insertions are not allowed.
+//!
+//! ## On-Disk Layout
+//!
+//! ---------------------------------------------------------------
+//!
+//! [ 0 <==> size_of::<Meta>() )
+//!    File metadata (signature, version, etc.)
+//!
+//! [ size_of::<Meta>() <==> size_of::<Meta>() + size_of::<u32>() * capacity )
+//!     Signatures array (u32 per slot)
+//!     ├─ slot0_sign : u32
+//!     ├─ ...
+//!     └─ slot(capacity-1)_sign : u32
+//!     // Values are EMPTY_SIGN, TOMBSTONE_SIGN, or hash signature
+//!
+//! [ sign_region_end <==> sign_region_end + 8*capacity )
+//!     Pair array (u64 per slot)
+//!     ├─ slot0_pair : u64  // packed { position:40b | klen:12b | vlen:12b }
+//!     ├─ ...
+//!     └─ slot(capacity-1)_pair : u64
+//!
+//! [ header_size <==> EOF )
+//!     Data region (variable-length)
+//!     ├─ Entry0: [ key bytes (klen) ][ value bytes (vlen) ]
+//!     ├─ ...
+//!     └─ appended sequentially as insert_offset grows
+//!
+//! ---------------------------------------------------------------
+//!
+
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},

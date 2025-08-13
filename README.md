@@ -1,4 +1,5 @@
-[![Crates.io](https://img.shields.io/crates/v/turbocache.svg)](https://crates.io/crates/turbocache)
+[![Latest Version](https://img.shields.io/crates/dv/turbocache.svg)](https://crates.io/crates/turbocache)
+[![Downloads](https://img.shields.io/crates/d/turbocache.svg)](https://crates.io/crates/turbocache)
 [![Last Commits](https://img.shields.io/github/last-commit/frozen-lab/turbocache?logo=git&logoColor=white)](https://github.com/frozen-lab/turbocache/commits/main)
 [![Pull Requests](https://img.shields.io/github/issues-pr/frozen-lab/turbocache?logo=github&logoColor=white)](https://github.com/frozen-lab/turbocache/pulls)
 [![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/frozen-lab/turbocache?logo=github&logoColor=white)](https://github.com/frozen-lab/turbocache/issues)
@@ -20,6 +21,8 @@ A persistant and embedded KV Database built for on-device caching.
 - [Performance](#performance)
 - [Architecture](#architecture)
 - [Memory Usage](#memory-usage)
+- [Limitations](#limitations)
+- [Support](#support)
 
 ## Installation
 
@@ -66,14 +69,20 @@ fn main() {
 }
 ```
 
+Refer to [docs.rs](https://docs.rs/turbocache/0.0.5/turbocache/struct.TurboCache.html) for in detailed documentation.
+
 ## Performance
 
-### Common Benchmarks
+### Benchmark Machine
+
+All performance benchmarks are conducted on following potato (🥔) machine,
 
 * **OS**: Windows 64-bit (`WSL2 NixOS 24.11 (Vicuna)`)
 * **Kernel**: Linux 6.6.87.2-microsoft-standard-WSL2
 * **CPU**: Intel Core i5-10300H @ 2.50GHz
 * **Architecture**: x86/64
+
+### Common Benchmarks (p50/median)
 
 | Operation           | Latency (p50)                 | Throughput (p50)                   | Outliers (Total)            |
 | ------------------- | ----------------------------- | ---------------------------------- | --------------------------- |
@@ -83,7 +92,35 @@ fn main() {
 
 *NOTE*: Benchmarks are derived from 256 samples collected from millions of iterations per opeation.
 
+### Operations at Scale
+
 ## Architecture
 
+**TurboCache (TC)** is nothing but a fancy HashTable on disk. But unlike in-mem HashTables, TC uses immutable tables
+which can not grow beyound their initial capacity. This limitation provides the capability to `mmap` headers and `pwrite`
+into the file which brings heavy performance gains. Despite the table being unable to grow after creation, TC can grow
+as much as user wants, well almost! Refer to [limitations](#limitations) to know more.
+
+When initial table has reached it's capacity, a staging table is created w/ 2x the capacity of the original. As new insert
+operations are conduceted, incremental migration is done on this table, and eventually staging table is prompted to live.
+This cycle again repeats itself, when the live table reaches its capcity. This brings that capability to grow w/ the data.
+
 ## Memory Usage
+
+On-Disk tables are mmaped for faster lookup operations. At initial capcity 1024 (pairs), the memory usage is ~ 12.029 KiB.
+As no. of inserted pairs grow the memory usage grows too.
+
+For when staging is active, the memory usage spikes to 3x of the original and goes back to 2x (increased capacity) when
+the migrations are done.  
+
+## Limitations
+
+- Lengths:
+
+    Key and Values lengths at capped at max 4096 bytes (2^12).
+
+- Size:
+ 
+    A table can contain at most 1024 Gib of data. Insertion beyound this will not be allowed. In rare case, where
+    usage can cross this limit, another instance of **TurboCache** can be created w/ diff directory.
 
