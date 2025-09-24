@@ -1,27 +1,15 @@
 [package]
 name = "turbocache"
-version = "0.0.5"
-edition = "2021"
+version = "0.1.0"
+edition = "2024"
 description = "A persistant and embedded KV Database built for on-device caching."
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/frozen-lab/turbocache"
-keywords = ["key-value", "database", "persistent", "store", "frozen-lab"]
+keywords = ["key-value", "database", "persistent", "store", "simd"]
 
 [dependencies]
 memmap2 = "0.9.7"
-serde_json = "1.0.142"
 
 [dev-dependencies]
-rand = "0.9.1"
+sphur = "0.2.0"
 tempfile = "3.20.0"
-criterion = { version = "0.6.0", features = ["html_reports"] }
-
-[[bench]]
-name = "base_bench"
-path = "benchmarks/base_bench.rs"
-harness = false
-
-[[bench]]
-name = "mgr_bench"
-path = "benchmarks/mgr_bench.rs"
-harness = false
