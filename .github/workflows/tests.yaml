@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  clib-test:
+  unit_tests:
     strategy:
       fail-fast: false
       
@@ -39,18 +39,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ runner.os }}-rust
-          key: ${{ hashFiles('**/Cargo.lock') }}
-          cache-on-failure: true
-
       - name: Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          profile: minimal
-          override: true
+          cache-key: ${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test aarch64 (NEON)
         if: matrix.arch == 'aarch64'
