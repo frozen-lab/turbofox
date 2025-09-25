@@ -2,7 +2,7 @@
 //! Key-Value pairs. It uses a fix sized, memory-mapped Header.
 
 use crate::error::{InternalError, InternalResult};
-use hasher::{EMPTY_SIGN, TOMBSTONE_SIGN};
+use hasher::{Hasher, EMPTY_SIGN, TOMBSTONE_SIGN};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
@@ -751,5 +751,67 @@ mod bucket_file_tests {
         assert_eq!(BucketFile::calc_threshold(0), 0);
         assert_eq!(BucketFile::calc_threshold(5), 4);
         assert_eq!(BucketFile::calc_threshold(10), 8);
+    }
+}
+
+/// ----------------------------------------
+/// Bucket
+/// ----------------------------------------
+
+struct Bucket {
+    file: BucketFile,
+}
+
+impl Bucket {
+    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+        let file = match BucketFile::open(&path, capacity) {
+            Ok(f) => f,
+
+            Err(InternalError::InvalidFile) => {
+                // returns IO error if something goes wrong
+                std::fs::remove_file(&path)?;
+
+                // try to reopen the file
+                //
+                // NOTE: if the same or any error occurs again,
+                // we simply throw it out!
+                BucketFile::open(&path, capacity)?
+            }
+
+            Err(e) => return Err(e),
+        };
+
+        Ok(Self { file })
+    }
+
+    pub fn open<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+        let file = BucketFile::new(path, capacity)?;
+
+        Ok(Self { file })
+    }
+
+    pub fn set(&mut self, kv: &KeyValue) -> InternalResult<bool> {
+        let sign = Hasher::new(&kv.0);
+        let meta = self.file.meta_mut();
+
+        // threshold has reached, so pair can not be inserted
+        if self.file.get_inserted_count() >= self.file.threshold {
+            return Ok(false);
+        }
+
+        let signs = self.file.get_signs();
+        let start_idx = sign as usize % self.file.capacity;
+        let (idx, is_new) = self.file.lookup_slot(start_idx, signs, sign, &kv.0)?;
+
+        if is_new {
+            meta.inserts.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let pair = self.file.write_slot(kv)?;
+
+        self.file.set_sign(idx, sign);
+        self.file.set_pair(idx, pair);
+
+        return Ok(true);
     }
 }

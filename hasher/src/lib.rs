@@ -10,14 +10,12 @@ const DEFAULT_SEED: u32 = 0;
 /// Magic constant to substitute for reserved signatures
 const REPLACEMENT: u32 = 0x6052_c9b7;
 
-pub struct Hasher(pub u32);
+pub struct Hasher;
 
 impl Hasher {
-    pub fn new(buf: &[u8]) -> Self {
+    pub fn new(buf: &[u8]) -> u32 {
         let mut h = XxHash32::oneshot(buf);
-        let fixed = Self::from_hash(&mut h);
-
-        Self(fixed)
+        Self::from_hash(&mut h)
     }
 
     /// Replaces any reserved signature values with a magic constant [REPLACEMENT]
@@ -43,11 +41,11 @@ mod hasher_tests {
     #[test]
     fn sanity_check() {
         let buf = b"hello_world";
-        let hasher = Hasher::new(buf);
 
+        let hash = Hasher::new(buf);
         let raw = XxHash32::oneshot(buf);
 
-        assert_eq!(hasher.0, raw, "Hasher output should match raw XxHash32");
+        assert_eq!(hash, raw, "Hasher output should match raw XxHash32");
     }
 
     #[test]
