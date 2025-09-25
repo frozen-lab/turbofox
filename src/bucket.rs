@@ -3,6 +3,8 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
+use crate::error::{InternalError, InternalResult};
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Namespace {
@@ -18,16 +20,14 @@ impl From<Namespace> for u8 {
 }
 
 impl TryFrom<u8> for Namespace {
-    // TODO: Impl of internal error
-    type Error = ();
+    type Error = InternalError;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> InternalResult<Namespace> {
         match value {
             0 => Ok(Namespace::Base),
             1 => Ok(Namespace::List),
             2 => Ok(Namespace::ListItem),
-            // TODO: Handle error w/ grace
-            _ => Err(()),
+            _ => Err(InternalError::InvalidEntry("Invalid namespace".into())),
         }
     }
 }
@@ -74,10 +74,9 @@ impl PairRaw {
         Self(out)
     }
 
-    fn from_raw(&self) -> Pair {
-        // TODO: Handle error w/ grace
+    fn from_raw(&self) -> InternalResult<Pair> {
         let slice = self.0;
-        let ns = Namespace::try_from(slice[0]).unwrap();
+        let ns = Namespace::try_from(slice[0])?;
 
         let klen = u16::from_le_bytes([slice[1], slice[2]]);
         let vlen = u16::from_le_bytes([slice[3], slice[4]]);
@@ -86,18 +85,19 @@ impl PairRaw {
         offset_bytes[..5].copy_from_slice(&slice[5..10]);
         let offset = u64::from_le_bytes(offset_bytes);
 
-        Pair {
+        Ok(Pair {
             ns,
             klen,
             vlen,
             offset,
-        }
+        })
     }
 }
 
 #[cfg(test)]
 mod pair_tests {
     use super::{Namespace, Pair, PairRaw};
+    use sphur::Sphur;
 
     #[test]
     fn test_basic_round_trip() {
@@ -109,7 +109,7 @@ mod pair_tests {
         };
 
         let encoded = PairRaw::to_raw(p);
-        let decoded = encoded.from_raw();
+        let decoded = encoded.from_raw().expect("Decode raw pair");
 
         assert_eq!(p.ns, decoded.ns);
         assert_eq!(p.offset, decoded.offset);
@@ -127,7 +127,7 @@ mod pair_tests {
         };
 
         let encoded = PairRaw::to_raw(p);
-        let decoded = encoded.from_raw();
+        let decoded = encoded.from_raw().expect("Decode raw pair");
 
         assert_eq!(p, decoded);
 
@@ -143,28 +143,36 @@ mod pair_tests {
         };
 
         let encoded = PairRaw::to_raw(p2);
-        let decoded = encoded.from_raw();
+        let decoded = encoded.from_raw().expect("Decode raw pair");
 
         assert_eq!(p2, decoded);
     }
 
     #[test]
     fn test_randomized_values() {
-        // TODO: Update this test for randomize Namespace tests
+        let mut rng = Sphur::new();
+
         for i in 0..100 {
             let offset = (i * 1234567) as u64 & ((1u64 << 40) - 1);
             let klen = (i * 37 % (1 << 12)) as u16;
             let vlen = (i * 91 % (1 << 12)) as u16;
 
+            let ns = match rng.gen_range(0..=2) {
+                0 => Namespace::Base,
+                1 => Namespace::List,
+                2 => Namespace::ListItem,
+                _ => unreachable!(),
+            };
+
             let p = Pair {
-                ns: Namespace::Base,
+                ns: ns,
                 offset,
                 klen,
                 vlen,
             };
 
             let encoded = PairRaw::to_raw(p);
-            let decoded = encoded.from_raw();
+            let decoded = encoded.from_raw().expect("Decode raw pair");
 
             assert_eq!(p, decoded, "Failed at iteration {i}");
         }

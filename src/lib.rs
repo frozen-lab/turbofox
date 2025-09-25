@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 mod bucket;
+mod error;
 
 pub struct TurboCache;
 
