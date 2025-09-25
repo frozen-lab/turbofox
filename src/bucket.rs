@@ -70,33 +70,6 @@ impl TryFrom<u8> for Namespace {
     }
 }
 
-/// ----------------------------------------
-/// Bucket File
-/// ----------------------------------------
-
-#[repr(C)]
-struct Meta {
-    magic: [u8; 4],
-    version: u32,
-    inserts: AtomicU64,
-    iter_idx: AtomicU64,
-    capacity: AtomicU64,
-    write_pointer: AtomicU64,
-}
-
-impl Meta {
-    fn default(capacity: u64) -> Self {
-        Self {
-            magic: MAGIC,
-            version: VERSION,
-            inserts: AtomicU64::new(0),
-            iter_idx: AtomicU64::new(0),
-            capacity: AtomicU64::new(capacity),
-            write_pointer: AtomicU64::new(0),
-        }
-    }
-}
-
 #[repr(align(16))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Pair {
@@ -105,6 +78,10 @@ struct Pair {
     vlen: u16,
     offset: u64,
 }
+
+/// ----------------------------------------
+/// Bucket File (Pair)
+/// ----------------------------------------
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +207,37 @@ mod pair_tests {
         }
     }
 }
+
+/// ----------------------------------------
+/// Bucket File (Meta)
+/// ----------------------------------------
+
+#[repr(C)]
+struct Meta {
+    magic: [u8; 4],
+    version: u32,
+    inserts: AtomicU64,
+    iter_idx: AtomicU64,
+    capacity: AtomicU64,
+    write_pointer: AtomicU64,
+}
+
+impl Meta {
+    fn default(capacity: u64) -> Self {
+        Self {
+            magic: MAGIC,
+            version: VERSION,
+            inserts: AtomicU64::new(0),
+            iter_idx: AtomicU64::new(0),
+            capacity: AtomicU64::new(capacity),
+            write_pointer: AtomicU64::new(0),
+        }
+    }
+}
+
+/// ----------------------------------------
+/// Bucket File
+/// ----------------------------------------
 
 struct BucketFile {
     mmap: MmapMut,
@@ -376,6 +384,11 @@ impl BucketFile {
     }
 
     #[inline(always)]
+    fn increment_inserted_count(&self) {
+        self.meta_mut().inserts.store(1, Ordering::Release);
+    }
+
+    #[inline(always)]
     fn get_iter_idx(&self) -> usize {
         self.meta().iter_idx.load(Ordering::Acquire) as usize
     }
@@ -442,7 +455,7 @@ impl BucketFile {
     }
 
     /// Write a [KeyValue] to the bucket and get [Pair]
-    fn write_slot(&self, pair: &KeyValue) -> InternalResult<Pair> {
+    fn write_slot(&self, pair: &KeyValue) -> InternalResult<PairRaw> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
         let blen = klen + vlen;
@@ -459,12 +472,14 @@ impl BucketFile {
 
         Self::write_all_at(&self.file, &buf, self.header_size as u64 + offset)?;
 
-        Ok(Pair {
+        let pair = Pair {
             klen: klen as u16,
             vlen: vlen as u16,
             offset,
             ns: Namespace::Base,
-        })
+        };
+
+        Ok(PairRaw::to_raw(pair))
     }
 
     fn lookup_slot(
@@ -496,19 +511,25 @@ impl BucketFile {
         Err(InternalError::BucketFull)
     }
 
-    /// Read given numof bytes from a given offset uing `pread`
+    /// Read N bytes at a given offset
+    ///
+    /// NOTE: this mimics the `pread` syscall on linux
     #[cfg(unix)]
     fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
         std::os::unix::fs::FileExt::read_exact_at(f, buf, offset)
     }
 
-    /// Write a buffer to a file at a given offset using `pwrite`
+    /// Write a buffer to a file at a given offset
+    ///
+    /// NOTE: this mimic the `pwrite` syscall on linux
     #[cfg(unix)]
     fn write_all_at(f: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
         std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
     }
 
-    /// Read given numof bytes from a given offset uing `pread`
+    /// Read N bytes at a given offset
+    ///
+    /// NOTE: this mimics the `pread` syscall on linux
     #[cfg(windows)]
     fn read_exact_at(f: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
         while !buf.is_empty() {
@@ -532,7 +553,9 @@ impl BucketFile {
         }
     }
 
-    /// Write a buffer to a file at a given offset using `pwrite`
+    /// Write a buffer to a file at a given offset
+    ///
+    /// NOTE: this mimic the `pwrite` syscall on linux
     #[cfg(windows)]
     fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
         while !buf.is_empty() {
@@ -567,7 +590,9 @@ mod bucket_file_tests {
     fn open_bucket() -> BucketFile {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let rand = gen_rand();
-        let path = tmp.path().join(rand.to_string());
+        let path = tmp
+            .path()
+            .join(format!("bucket_file_tests_{}", rand.to_string()));
 
         BucketFile::new(path, TEST_CAP).expect("create bucket")
     }
@@ -601,7 +626,7 @@ mod bucket_file_tests {
     }
 
     #[test]
-    fn test_file_open() {
+    fn test_file_reopen() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let rand = gen_rand();
         let path = tmp.path().join(rand.to_string());
@@ -616,5 +641,115 @@ mod bucket_file_tests {
 
         assert_eq!(meta.magic, MAGIC);
         assert_eq!(meta.version, VERSION);
+    }
+
+    #[test]
+    fn test_reopen_with_update() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp.path().join(rand.to_string());
+
+        {
+            let mut bucket = BucketFile::new(&path, TEST_CAP).unwrap();
+            let kv = (b"foo".to_vec(), b"bar".to_vec());
+            let pair = bucket.write_slot(&kv).unwrap();
+
+            bucket.set_pair(0, pair);
+            bucket.set_sign(0, 12345);
+
+            // metadata updates
+            bucket.increment_inserted_count();
+        }
+
+        // at re-open, it shouldn’t be re-zero'ed
+        let bucket2 = BucketFile::open(path, TEST_CAP).unwrap();
+        let signs = bucket2.get_signs();
+        assert_eq!(signs[0], 12345);
+
+        let po2 = bucket2.get_pair(0);
+        let kv2 = bucket2.read_slot(&po2).unwrap();
+
+        assert_eq!(kv2.0, b"foo".to_vec());
+        assert_eq!(kv2.1, b"bar".to_vec());
+    }
+
+    #[test]
+    fn test_write_and_read_roundtrip() {
+        let mut bucket = open_bucket();
+
+        let kv = (b"key1".to_vec(), b"value1".to_vec());
+        let sign = 0xDEADBEEF;
+        let pair = bucket.write_slot(&kv).unwrap();
+
+        bucket.set_pair(3, pair);
+        bucket.set_sign(3, sign);
+        bucket.meta_mut().inserts.fetch_add(1, Ordering::SeqCst);
+
+        let signs = bucket.get_signs();
+        let (found_idx, is_new) = bucket.lookup_slot(3, signs, sign, &kv.0).unwrap();
+
+        assert_eq!(found_idx, 3);
+        assert!(!is_new, "existing key should report is_new=false");
+
+        let po_back = bucket.get_pair(3);
+        let kv_back = bucket.read_slot(&po_back).unwrap();
+
+        assert_eq!(kv_back, kv);
+    }
+
+    #[test]
+    fn test_sign_lookup_empty_and_tombstone() {
+        let mut bucket = open_bucket();
+
+        let signs = bucket.get_signs();
+        let (idx, is_new) = bucket.lookup_slot(5, signs, 42, b"whatever").unwrap();
+
+        assert_eq!(idx, 5);
+        assert!(is_new);
+
+        bucket.set_sign(5, TOMBSTONE_SIGN);
+
+        let signs2 = bucket.get_signs();
+        let (idx2, is_new2) = bucket.lookup_slot(5, signs2, 42, b"new").unwrap();
+
+        assert_eq!(idx2, 5);
+        assert!(is_new2);
+    }
+
+    #[test]
+    fn test_pair_and_sign_mutation() {
+        let mut bucket = open_bucket();
+
+        // set a fake PairOffset at idx 7
+        let fake_pair = Pair {
+            klen: 1,
+            vlen: 2,
+            offset: 99,
+            ns: Namespace::Base,
+        };
+
+        let pair = PairRaw::to_raw(fake_pair);
+        bucket.set_pair(7, pair);
+
+        let got_pair = bucket.get_pair(7);
+        let got_off = got_pair.from_raw().unwrap();
+
+        assert_eq!(got_off.klen, 1);
+        assert_eq!(got_off.vlen, 2);
+        assert_eq!(got_off.offset, 99);
+        assert_eq!(got_off.ns, Namespace::Base);
+
+        // set and read a signature
+        bucket.set_sign(7, 0xABC);
+        let signs = bucket.get_signs();
+
+        assert_eq!(signs[7], 0xABC);
+    }
+
+    #[test]
+    fn test_calc_threshold() {
+        assert_eq!(BucketFile::calc_threshold(0), 0);
+        assert_eq!(BucketFile::calc_threshold(5), 4);
+        assert_eq!(BucketFile::calc_threshold(10), 8);
     }
 }
