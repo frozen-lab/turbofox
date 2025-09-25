@@ -74,7 +74,7 @@ pub(crate) enum InternalError {
     /// we spawn staging bucket
     ///
     /// **Must be handled internally**
-    BucketFull(usize),
+    BucketFull,
 
     /// The bucket contains an invalid entry
     ///

@@ -2,11 +2,12 @@
 //! Key-Value pairs. It uses a fix sized, memory-mapped Header.
 
 use crate::error::{InternalError, InternalResult};
+use hasher::{EMPTY_SIGN, TOMBSTONE_SIGN};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
-    sync::atomic::{AtomicU32, AtomicU64},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 /// ----------------------------------------
@@ -27,6 +28,10 @@ pub(crate) type KeyValue = (Vec<u8>, Vec<u8>);
 
 /// A custom type for Key object
 pub(crate) type Key = Vec<u8>;
+
+/// ----------------------------------------
+/// Namespaces
+/// ----------------------------------------
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,22 +70,28 @@ impl TryFrom<u8> for Namespace {
     }
 }
 
+/// ----------------------------------------
+/// Bucket File
+/// ----------------------------------------
+
 #[repr(C)]
 struct Meta {
     magic: [u8; 4],
     version: u32,
-    inserts: AtomicU32,
-    iter_idx: AtomicU32,
+    inserts: AtomicU64,
+    iter_idx: AtomicU64,
+    capacity: AtomicU64,
     write_pointer: AtomicU64,
 }
 
-impl Default for Meta {
-    fn default() -> Self {
+impl Meta {
+    fn default(capacity: u64) -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
-            inserts: AtomicU32::new(0),
-            iter_idx: AtomicU32::new(0),
+            inserts: AtomicU64::new(0),
+            iter_idx: AtomicU64::new(0),
+            capacity: AtomicU64::new(capacity),
             write_pointer: AtomicU64::new(0),
         }
     }
@@ -252,7 +263,7 @@ impl BucketFile {
         // init the meta w/ file version and magic
         unsafe {
             let meta_ptr = mmap.as_mut_ptr() as *mut Meta;
-            meta_ptr.write(Meta::default());
+            meta_ptr.write(Meta::default(capacity as u64));
         }
 
         Ok(Self {
@@ -303,7 +314,20 @@ impl BucketFile {
             return Err(InternalError::InvalidFile);
         }
 
-        // TODO: Validate that `meta.write_pointer < file_len`
+        // safeguard for the write pointer
+        if meta.write_pointer.load(Ordering::Relaxed) > file_len {
+            return Err(InternalError::InvalidFile);
+        }
+
+        // safeguard for the insert index
+        if meta.iter_idx.load(Ordering::Relaxed) > meta.capacity.load(Ordering::Relaxed) {
+            return Err(InternalError::InvalidFile);
+        }
+
+        // safeguard for the insert count
+        if meta.inserts.load(Ordering::Relaxed) > meta.capacity.load(Ordering::Relaxed) {
+            return Err(InternalError::InvalidFile);
+        }
 
         Ok(Self {
             file,
@@ -332,5 +356,265 @@ impl BucketFile {
     #[inline(always)]
     const fn calc_threshold(cap: usize) -> usize {
         cap.saturating_mul(4) / 5
+    }
+
+    /// Returns an immutable reference to [Meta]
+    #[inline(always)]
+    fn meta(&self) -> &Meta {
+        unsafe { &*(self.mmap.as_ptr() as *const Meta) }
+    }
+
+    /// Returns a mutable reference to [Meta]
+    #[inline(always)]
+    fn meta_mut(&self) -> &mut Meta {
+        unsafe { &mut *(self.mmap.as_ptr() as *mut Meta) }
+    }
+
+    #[inline(always)]
+    fn get_inserted_count(&self) -> usize {
+        self.meta().inserts.load(Ordering::Acquire) as usize
+    }
+
+    #[inline(always)]
+    fn get_iter_idx(&self) -> usize {
+        self.meta().iter_idx.load(Ordering::Acquire) as usize
+    }
+
+    #[inline(always)]
+    fn get_capacity(&self) -> usize {
+        self.meta().capacity.load(Ordering::Acquire) as usize
+    }
+
+    #[inline(always)]
+    fn increment_iter_idx(&self) {
+        self.meta_mut().iter_idx.store(1, Ordering::Release);
+    }
+
+    /// Read a single [PairRaw] from an index, directly from the mmap
+    #[inline(always)]
+    fn get_pair(&self, idx: usize) -> PairRaw {
+        unsafe {
+            let ptr = self.mmap.as_ptr().add(self.pair_offset) as *const PairRaw;
+            *ptr.add(idx)
+        }
+    }
+
+    /// Write a new [PairRaw] at given index
+    #[inline(always)]
+    fn set_pair(&mut self, idx: usize, pair: PairRaw) {
+        unsafe {
+            let ptr = self.mmap.as_mut_ptr().add(self.pair_offset) as *mut PairRaw;
+            *ptr.add(idx) = pair;
+        }
+    }
+
+    /// Returns an immutable reference to signatures slice
+    #[inline(always)]
+    fn get_signs(&self) -> &[Sign] {
+        unsafe {
+            let ptr = self.mmap.as_ptr().add(self.sign_offset) as *const Sign;
+            core::slice::from_raw_parts(ptr, self.capacity)
+        }
+    }
+
+    /// Write a new [Sign] at given index
+    #[inline(always)]
+    fn set_sign(&mut self, idx: usize, sign: Sign) {
+        unsafe {
+            let ptr = self.mmap.as_mut_ptr().add(self.sign_offset) as *mut Sign;
+            *ptr.add(idx) = sign;
+        }
+    }
+
+    /// Read a [KeyValue] from a given [PairRaw]
+    fn read_slot(&self, raw: &PairRaw) -> InternalResult<KeyValue> {
+        let pair = raw.from_raw()?;
+        let klen = pair.klen as usize;
+        let vlen = pair.vlen as usize;
+
+        let mut buf = vec![0u8; klen + vlen];
+        Self::read_exact_at(&self.file, &mut buf, self.header_size as u64 + pair.offset)?;
+
+        let vbuf = buf[klen..(klen + vlen)].to_owned();
+        buf.truncate(klen);
+
+        Ok((buf, vbuf))
+    }
+
+    /// Write a [KeyValue] to the bucket and get [Pair]
+    fn write_slot(&self, pair: &KeyValue) -> InternalResult<Pair> {
+        let klen = pair.0.len();
+        let vlen = pair.1.len();
+        let blen = klen + vlen;
+
+        let mut buf = vec![0u8; blen];
+
+        buf[..klen].copy_from_slice(&pair.0);
+        buf[klen..].copy_from_slice(&pair.1);
+
+        let offset = self
+            .meta()
+            .write_pointer
+            .fetch_add(blen as u64, Ordering::Release);
+
+        Self::write_all_at(&self.file, &buf, self.header_size as u64 + offset)?;
+
+        Ok(Pair {
+            klen: klen as u16,
+            vlen: vlen as u16,
+            offset,
+            ns: Namespace::Base,
+        })
+    }
+
+    fn lookup_slot(
+        &self,
+        mut idx: usize,
+        signs: &[u32],
+        sign: u32,
+        kbuf: &[u8],
+    ) -> InternalResult<(usize, bool)> {
+        for _ in 0..self.capacity {
+            match signs[idx] {
+                EMPTY_SIGN | TOMBSTONE_SIGN => return Ok((idx, true)),
+
+                s if s == sign => {
+                    let po = self.get_pair(idx);
+                    let (existing_key, _) = self.read_slot(&po)?;
+
+                    if existing_key == kbuf {
+                        return Ok((idx, false));
+                    }
+                }
+
+                _ => {}
+            }
+
+            idx = (idx + 1) % self.capacity;
+        }
+
+        Err(InternalError::BucketFull)
+    }
+
+    /// Read given numof bytes from a given offset uing `pread`
+    #[cfg(unix)]
+    fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::read_exact_at(f, buf, offset)
+    }
+
+    /// Write a buffer to a file at a given offset using `pwrite`
+    #[cfg(unix)]
+    fn write_all_at(f: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
+    }
+
+    /// Read given numof bytes from a given offset uing `pread`
+    #[cfg(windows)]
+    fn read_exact_at(f: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            match std::os::windows::fs::FileExt::seek_read(f, buf, offset) {
+                Ok(0) => break,
+
+                Ok(n) => {
+                    let tmp = buf;
+                    buf = &mut tmp[n..];
+                    offset += n as u64;
+                }
+
+                Err(e) => return Err(e),
+            }
+        }
+
+        if !buf.is_empty() {
+            Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Write a buffer to a file at a given offset using `pwrite`
+    #[cfg(windows)]
+    fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            match std::os::windows::fs::FileExt::seek_write(f, buf, offset) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bucket_file_tests {
+    use super::*;
+    use tempfile::tempfile;
+
+    const TEST_CAP: usize = 16;
+
+    fn gen_rand() -> u32 {
+        let mut rng = sphur::Sphur::new();
+        rng.gen_u32()
+    }
+
+    fn open_bucket() -> BucketFile {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp.path().join(rand.to_string());
+
+        BucketFile::new(path, TEST_CAP).expect("create bucket")
+    }
+
+    #[test]
+    fn test_new_file() {
+        let bucket = open_bucket();
+        let meta = bucket.meta();
+
+        // MAGIC and VERSION should be set
+        assert_eq!(meta.magic, MAGIC);
+        assert_eq!(meta.version, VERSION);
+
+        // inserts and iter idx start at zero
+        assert_eq!(meta.inserts.load(Ordering::SeqCst), 0);
+        assert_eq!(meta.iter_idx.load(Ordering::SeqCst), 0);
+
+        // signatures and pair-offset regions should be zero
+        let signs = bucket.get_signs();
+        assert!(signs.iter().all(|&s| s == 0));
+
+        for idx in 0..bucket.capacity {
+            let raw = bucket.get_pair(idx);
+            let pair = raw.from_raw().expect("Extract Pair from raw data");
+
+            assert_eq!(pair.klen, 0);
+            assert_eq!(pair.vlen, 0);
+            assert_eq!(pair.offset, 0);
+            assert_eq!(pair.ns, Namespace::Base);
+        }
+    }
+
+    #[test]
+    fn test_file_open() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp.path().join(rand.to_string());
+
+        // create & close file
+        let init = BucketFile::new(&path, TEST_CAP).expect("create bucket");
+        drop(init);
+
+        // reopen and validate
+        let reopen = BucketFile::open(path, TEST_CAP).expect("open bucket");
+        let meta = reopen.meta();
+
+        assert_eq!(meta.magic, MAGIC);
+        assert_eq!(meta.version, VERSION);
     }
 }
