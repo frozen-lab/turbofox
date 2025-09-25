@@ -43,6 +43,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hasher"
+version = "0.1.0"
+
+[[package]]
 name = "libc"
 version = "0.2.174"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -111,6 +115,7 @@ dependencies = [
 name = "turbocache"
 version = "0.1.0"
 dependencies = [
+ "hasher",
  "memmap2",
  "sphur",
  "tempfile",

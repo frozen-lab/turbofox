@@ -9,7 +9,11 @@ keywords = ["key-value", "database", "persistent", "store", "simd"]
 
 [dependencies]
 memmap2 = "0.9.7"
+hasher = {path = "./hasher"}
 
 [dev-dependencies]
 sphur = "0.2.0"
 tempfile = "3.20.0"
+
+[workspace]
+members = ["hasher"]
