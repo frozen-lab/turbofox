@@ -16,4 +16,4 @@ sphur = "0.2.0"
 tempfile = "3.20.0"
 
 [workspace]
-members = ["hasher"]
+members = ["hasher", "logger"]
