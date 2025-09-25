@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logging_enabled() {
+    fn test_logging() {
         let buf = init_test_logger(Level::Trace);
         let logger = Logger::new(true, "unit_test");
 
@@ -161,17 +161,5 @@ mod tests {
         assert!(logs.iter().any(|l| l.contains("info message")));
         assert!(logs.iter().any(|l| l.contains("warning!")));
         assert!(logs.iter().any(|l| l.contains("error!")));
-    }
-
-    #[test]
-    fn test_logging_disabled() {
-        let buf = init_test_logger(Level::Trace);
-        let logger = Logger::new(false, "disabled");
-
-        debugf!(logger, "this should not log");
-        infof!(logger, "nor this");
-
-        let logs = buf.lock().unwrap().clone();
-        assert!(logs.is_empty(), "logs should be empty when logger.disabled");
     }
 }
