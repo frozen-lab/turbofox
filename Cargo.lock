@@ -363,6 +363,7 @@ name = "turbocache"
 version = "0.1.0"
 dependencies = [
  "hasher",
+ "logger",
  "memmap2",
  "sphur",
  "tempfile",

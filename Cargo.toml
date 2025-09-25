@@ -10,6 +10,7 @@ keywords = ["key-value", "database", "persistent", "store", "simd"]
 [dependencies]
 memmap2 = "0.9.7"
 hasher = {path = "./hasher"}
+logger = {path = "./logger"}
 
 [dev-dependencies]
 sphur = "0.2.0"
