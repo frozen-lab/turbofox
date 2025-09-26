@@ -212,7 +212,6 @@ struct Meta {
     magic: [u8; 4],
     version: u32,
     inserts: AtomicU64,
-    iter_idx: AtomicU64,
     write_pointer: AtomicU64,
 }
 
@@ -222,7 +221,6 @@ impl Meta {
             magic: MAGIC,
             version: VERSION,
             inserts: AtomicU64::new(0),
-            iter_idx: AtomicU64::new(0),
             write_pointer: AtomicU64::new(0),
         }
     }
@@ -248,7 +246,7 @@ impl BucketFile {
             .create(true)
             .read(true)
             .write(true)
-            .truncate(false)
+            .truncate(true)
             .open(path)?;
 
         let header_size = Self::calc_header_size(capacity);
@@ -320,11 +318,6 @@ impl BucketFile {
             return Err(InternalError::InvalidFile);
         }
 
-        // safeguard for the insert index
-        if meta.iter_idx.load(Ordering::Relaxed) > capacity as u64 {
-            return Err(InternalError::InvalidFile);
-        }
-
         // safeguard for the insert count
         if meta.inserts.load(Ordering::Relaxed) > capacity as u64 {
             return Err(InternalError::InvalidFile);
@@ -377,18 +370,13 @@ impl BucketFile {
     }
 
     #[inline(always)]
-    fn increment_inserted_count(&self) {
-        self.meta_mut().inserts.store(1, Ordering::Release);
+    fn incr_inserted_count(&self) {
+        self.meta_mut().inserts.fetch_add(1, Ordering::Release);
     }
 
     #[inline(always)]
-    fn get_iter_idx(&self) -> usize {
-        self.meta().iter_idx.load(Ordering::Acquire) as usize
-    }
-
-    #[inline(always)]
-    fn increment_iter_idx(&self) {
-        self.meta_mut().iter_idx.store(1, Ordering::Release);
+    fn decr_inserted_count(&self) {
+        self.meta_mut().inserts.fetch_sub(1, Ordering::Release);
     }
 
     /// Read a single [PairRaw] from an index, directly from the mmap
@@ -428,7 +416,7 @@ impl BucketFile {
     }
 
     /// Read a [KeyValue] from a given [PairRaw]
-    fn read_slot(&self, raw: RawPair) -> InternalResult<KeyValue> {
+    fn get_slot(&self, raw: RawPair) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(raw)?;
         let klen = pair.klen as usize;
         let vlen = pair.vlen as usize;
@@ -443,7 +431,7 @@ impl BucketFile {
     }
 
     /// Write a [KeyValue] to the bucket and get [Pair]
-    fn write_slot(&self, pair: &KeyValue) -> InternalResult<RawPair> {
+    fn set_slot(&self, pair: &KeyValue) -> InternalResult<RawPair> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
         let blen = klen + vlen;
@@ -470,6 +458,7 @@ impl BucketFile {
         Ok(pair.to_raw())
     }
 
+    #[allow(unused)]
     fn lookup_slot(
         &self,
         mut idx: usize,
@@ -483,7 +472,7 @@ impl BucketFile {
 
                 s if s == sign => {
                     let po = self.get_pair(idx);
-                    let (existing_key, _) = self.read_slot(po)?;
+                    let (existing_key, _) = self.get_slot(po)?;
 
                     if existing_key == kbuf {
                         return Ok((idx, false));
@@ -596,7 +585,6 @@ mod bucket_file_tests {
 
         // inserts and iter idx start at zero
         assert_eq!(meta.inserts.load(Ordering::SeqCst), 0);
-        assert_eq!(meta.iter_idx.load(Ordering::SeqCst), 0);
 
         // signatures and pair-offset regions should be zero
         let signs = bucket.get_signs();
@@ -654,7 +642,7 @@ mod bucket_file_tests {
 
         let kv = (b"key1".to_vec(), b"value1".to_vec());
         let sign = 0xDEADBEEF;
-        let pair = bucket.write_slot(&kv).unwrap();
+        let pair = bucket.set_slot(&kv).unwrap();
 
         bucket.set_pair(3, pair);
         bucket.set_sign(3, sign);
@@ -667,7 +655,7 @@ mod bucket_file_tests {
         assert!(!is_new, "existing key should report is_new=false");
 
         let po_back = bucket.get_pair(3);
-        let kv_back = bucket.read_slot(po_back).unwrap();
+        let kv_back = bucket.get_slot(po_back).unwrap();
 
         assert_eq!(kv_back, kv);
     }
@@ -735,6 +723,7 @@ mod bucket_file_tests {
 
 struct Bucket {
     file: BucketFile,
+    iter_idx: usize,
 }
 
 impl Bucket {
@@ -756,18 +745,17 @@ impl Bucket {
             Err(e) => return Err(e),
         };
 
-        Ok(Self { file })
+        Ok(Self { file, iter_idx: 0 })
     }
 
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
         let file = BucketFile::new(path, capacity)?;
 
-        Ok(Self { file })
+        Ok(Self { file, iter_idx: 0 })
     }
 
     pub fn set(&mut self, kv: &KeyValue) -> InternalResult<bool> {
         let sign = Hasher::new(&kv.0);
-        let meta = self.file.meta_mut();
 
         // threshold has reached, so pair can not be inserted
         if self.file.get_inserted_count() >= self.file.threshold {
@@ -779,10 +767,10 @@ impl Bucket {
         let (idx, is_new) = self.file.lookup_slot(start_idx, signs, sign, &kv.0)?;
 
         if is_new {
-            meta.inserts.fetch_add(1, Ordering::SeqCst);
+            self.file.incr_inserted_count();
         }
 
-        let pair = self.file.write_slot(kv)?;
+        let pair = self.file.set_slot(kv)?;
 
         self.file.set_sign(idx, sign);
         self.file.set_pair(idx, pair);
@@ -801,7 +789,7 @@ impl Bucket {
 
                 s if s == sign => {
                     let po = self.file.get_pair(idx);
-                    let (k, v) = self.file.read_slot(po)?;
+                    let (k, v) = self.file.get_slot(po)?;
 
                     if key == k {
                         return Ok(Some(v));
@@ -820,7 +808,6 @@ impl Bucket {
     pub fn del(&mut self, key: Key) -> InternalResult<Option<Vec<u8>>> {
         let sign = Hasher::new(&key);
 
-        let meta = self.file.meta_mut();
         let signs = self.file.get_signs();
         let mut idx = sign as usize % self.file.capacity;
 
@@ -830,12 +817,12 @@ impl Bucket {
 
                 s if s == sign => {
                     let po = self.file.get_pair(idx);
-                    let (k, v) = self.file.read_slot(po)?;
+                    let (k, v) = self.file.get_slot(po)?;
 
                     // found the key
                     if key == k {
                         // update meta and header
-                        meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                        self.file.decr_inserted_count();
                         self.file.set_sign(idx, TOMBSTONE_SIGN);
 
                         return Ok(Some(v));
@@ -867,7 +854,7 @@ impl Bucket {
 
                 _ => {
                     let p_offset = file.get_pair(idx);
-                    let pair = file.read_slot(p_offset)?;
+                    let pair = file.get_slot(p_offset)?;
 
                     return Ok(Some(pair));
                 }
@@ -879,27 +866,24 @@ impl Bucket {
 
     pub fn iter_del(&mut self) -> InternalResult<Option<KeyValue>> {
         let mut file = &mut self.file;
-        let mut idx = file.get_iter_idx();
 
-        let meta = file.meta_mut();
         let signs = file.get_signs();
         let cap = file.capacity;
 
-        while idx < cap {
-            let cur_idx = idx;
+        while self.iter_idx < cap {
+            let cur_idx = self.iter_idx;
 
             // increment for the next iteration
-            file.increment_iter_idx();
-            idx += 1;
+            self.iter_idx += 1;
 
             match signs[cur_idx] {
                 EMPTY_SIGN | TOMBSTONE_SIGN => continue,
 
                 _ => {
                     let p_offset = file.get_pair(cur_idx);
-                    let pair = file.read_slot(p_offset)?;
+                    let pair = file.get_slot(p_offset)?;
 
-                    meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                    file.decr_inserted_count();
                     file.set_sign(cur_idx, TOMBSTONE_SIGN);
 
                     return Ok(Some(pair));
@@ -912,7 +896,6 @@ impl Bucket {
 
     pub fn get_inserted_count(&self) -> InternalResult<usize> {
         let count = self.file.get_inserted_count();
-
         Ok(count)
     }
 
@@ -1246,6 +1229,30 @@ mod bucket_tests {
             bucket.get(absent_key).unwrap(),
             None,
             "unexpectedly found a value for a non‐existent key"
+        );
+    }
+
+    #[test]
+    fn test_inserted_count_accuracy() {
+        let mut bucket = open_bucket();
+        assert_eq!(bucket.get_inserted_count().unwrap(), 0);
+
+        bucket.set(&(vec![1], b"one".to_vec())).unwrap();
+        bucket.set(&(vec![2], b"two".to_vec())).unwrap();
+        assert_eq!(bucket.get_inserted_count().unwrap(), 2);
+
+        bucket.del(vec![1]).unwrap();
+        assert_eq!(
+            bucket.get_inserted_count().unwrap(),
+            1,
+            "deletes should reduce live count"
+        );
+
+        bucket.set(&(vec![1], b"one-again".to_vec())).unwrap();
+        assert_eq!(
+            bucket.get_inserted_count().unwrap(),
+            2,
+            "reinserts should restore count"
         );
     }
 }
