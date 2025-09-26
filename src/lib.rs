@@ -2,6 +2,7 @@
 
 mod bucket;
 mod error;
+mod router;
 
 pub struct TurboCache;
 

@@ -721,7 +721,7 @@ mod bucket_file_tests {
 /// Bucket
 /// ----------------------------------------
 
-struct Bucket {
+pub(crate) struct Bucket {
     file: BucketFile,
     iter_idx: usize,
 }
