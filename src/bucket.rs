@@ -160,8 +160,8 @@ mod pair_tests {
         assert_eq!(p, decoded);
 
         let max_off = (1u64 << 40) - 1;
-        let max_klen = (1u16 << 12) - 1;
-        let max_vlen = (1u16 << 12) - 1;
+        let max_klen = u16::MAX - 1;
+        let max_vlen = u16::MAX - 1;
 
         let p2 = Pair {
             ns: Namespace::Base,
@@ -182,8 +182,8 @@ mod pair_tests {
 
         for i in 0..100 {
             let offset = (i * 1234567) as u64 & ((1u64 << 40) - 1);
-            let klen = (i * 37 % (1 << 12)) as u16;
-            let vlen = (i * 91 % (1 << 12)) as u16;
+            let klen = (i * 37 % (1 << 16)) as u16;
+            let vlen = (i * 91 % (1 << 16)) as u16;
 
             let r = rng.gen_range(0..=6) as u8;
             let ns = Namespace::try_from(r).expect("Expected valid [Namespace]");
@@ -1254,5 +1254,150 @@ mod bucket_tests {
             2,
             "reinserts should restore count"
         );
+    }
+
+    #[test]
+    fn test_reopen_preserves_counts() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp
+            .path()
+            .join(format!("bucket_reopen_counts_{}", rand.to_string()));
+
+        // first session
+        {
+            let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
+
+            bucket.set(&(vec![1], b"a".to_vec())).unwrap();
+            bucket.set(&(vec![2], b"b".to_vec())).unwrap();
+            bucket.del(vec![1]).unwrap();
+
+            // live count should be 1
+            assert_eq!(bucket.get_inserted_count().unwrap(), 1);
+        }
+
+        // reopen and validate
+        {
+            let bucket = Bucket::open(&path, TEST_CAP).unwrap();
+
+            assert_eq!(bucket.get_inserted_count().unwrap(), 1);
+            assert_eq!(bucket.get(vec![2]).unwrap(), Some(b"b".to_vec()));
+            assert_eq!(bucket.get(vec![1]).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn test_iter_matches_inserted_count() {
+        let mut bucket = open_bucket();
+
+        // insert up to threshold (80% of capacity)
+        let threshold = bucket.get_threshold().unwrap();
+
+        for i in 0..threshold {
+            let key = vec![(i as u8).wrapping_add(1)];
+            let val = format!("v{}", i).into_bytes();
+
+            bucket.set(&(key, val)).unwrap();
+        }
+
+        // delete a couple of entries
+        bucket.del(vec![1]).unwrap();
+        bucket.del(vec![3]).unwrap();
+
+        // iterate and count live entries
+        let mut idx = 0usize;
+        let mut found = Vec::new();
+
+        while let Some((k, v)) = bucket.iter(&mut idx).unwrap() {
+            found.push((k, v));
+        }
+
+        assert_eq!(found.len(), bucket.get_inserted_count().unwrap());
+    }
+
+    #[test]
+    fn test_threshold_with_deletes() {
+        let mut bucket = open_bucket();
+        let threshold = bucket.get_threshold().unwrap();
+
+        // fill until threshold
+        for i in 0..threshold {
+            let key = vec![(i as u8).wrapping_add(1)];
+
+            bucket.set(&(key, vec![0u8])).unwrap();
+        }
+
+        // the next insert should be rejected (returns false)
+        assert_eq!(
+            bucket.set(&(vec![0xFF], b"overflow".to_vec())).unwrap(),
+            false
+        );
+
+        // delete one and now insert should succeed
+        bucket.del(vec![1]).unwrap();
+
+        assert_eq!(
+            bucket.set(&(vec![0xFF], b"overflow".to_vec())).unwrap(),
+            true
+        );
+
+        // live count should equal threshold again
+        assert_eq!(bucket.get_inserted_count().unwrap(), threshold);
+    }
+
+    #[test]
+    fn test_iter_del_persistence() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp
+            .path()
+            .join(format!("bucket_iter_del_{}", rand.to_string()));
+
+        // first session: insert two keys and tombstone one via iter_del()
+        let deleted_key: Vec<u8>;
+        {
+            let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
+
+            let k1 = vec![1u8];
+            let k2 = vec![2u8];
+
+            bucket.set(&(k1.clone(), b"foo".to_vec())).unwrap();
+            bucket.set(&(k2.clone(), b"bar".to_vec())).unwrap();
+
+            // tombstone one entry via iter_del()
+            let deleted = bucket
+                .iter_del()
+                .unwrap()
+                .expect("expected one deleted pair");
+
+            deleted_key = deleted.0.clone();
+
+            // the deleted key must be gone in the same session
+            assert_eq!(bucket.get(deleted_key.clone()).unwrap(), None);
+
+            // the other key must still exist
+            let other_key = if deleted_key == k1 {
+                k2.clone()
+            } else {
+                k1.clone()
+            };
+
+            assert!(bucket.get(other_key).unwrap().is_some());
+        }
+
+        // reopen and validate tombstone persisted
+        {
+            let bucket = Bucket::open(&path, TEST_CAP).unwrap();
+            assert_eq!(bucket.get(deleted_key.clone()).unwrap(), None);
+
+            // ensure at least one other key is still present
+            let other_key = if deleted_key == vec![1u8] {
+                vec![2u8]
+            } else {
+                vec![1u8]
+            };
+
+            assert!(bucket.get(other_key).unwrap().is_some());
+        }
     }
 }
