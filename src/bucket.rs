@@ -723,7 +723,6 @@ mod bucket_file_tests {
 
 pub(crate) struct Bucket {
     file: BucketFile,
-    iter_idx: usize,
 }
 
 impl Bucket {
@@ -745,21 +744,21 @@ impl Bucket {
             Err(e) => return Err(e),
         };
 
-        Ok(Self { file, iter_idx: 0 })
+        Ok(Self { file })
     }
 
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
         let file = BucketFile::new(path, capacity)?;
 
-        Ok(Self { file, iter_idx: 0 })
+        Ok(Self { file })
     }
 
-    pub fn set(&mut self, kv: &KeyValue) -> InternalResult<bool> {
+    pub fn set(&mut self, kv: KeyValue) -> InternalResult<bool> {
         let sign = Hasher::new(&kv.0);
 
         // threshold has reached, so pair can not be inserted
         if self.file.get_inserted_count() >= self.file.threshold {
-            return Ok(false);
+            return Err(InternalError::BucketFull);
         }
 
         let signs = self.file.get_signs();
@@ -770,7 +769,7 @@ impl Bucket {
             self.file.incr_inserted_count();
         }
 
-        let pair = self.file.set_slot(kv)?;
+        let pair = self.file.set_slot(&kv)?;
 
         self.file.set_sign(idx, sign);
         self.file.set_pair(idx, pair);
@@ -833,62 +832,6 @@ impl Bucket {
             }
 
             idx = (idx + 1) % self.file.capacity;
-        }
-
-        Ok(None)
-    }
-
-    pub fn iter(&self, start: &mut usize) -> InternalResult<Option<KeyValue>> {
-        let file = &self.file;
-        let signs = file.get_signs();
-        let cap = file.capacity;
-
-        while *start < cap {
-            let idx = *start;
-            *start += 1;
-
-            match signs[idx] {
-                EMPTY_SIGN | TOMBSTONE_SIGN => {
-                    continue;
-                }
-
-                _ => {
-                    let p_offset = file.get_pair(idx);
-                    let pair = file.get_slot(p_offset)?;
-
-                    return Ok(Some(pair));
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    pub fn iter_del(&mut self) -> InternalResult<Option<KeyValue>> {
-        let mut file = &mut self.file;
-
-        let signs = file.get_signs();
-        let cap = file.capacity;
-
-        while self.iter_idx < cap {
-            let cur_idx = self.iter_idx;
-
-            // increment for the next iteration
-            self.iter_idx += 1;
-
-            match signs[cur_idx] {
-                EMPTY_SIGN | TOMBSTONE_SIGN => continue,
-
-                _ => {
-                    let p_offset = file.get_pair(cur_idx);
-                    let pair = file.get_slot(p_offset)?;
-
-                    file.decr_inserted_count();
-                    file.set_sign(cur_idx, TOMBSTONE_SIGN);
-
-                    return Ok(Some(pair));
-                }
-            }
         }
 
         Ok(None)
@@ -957,7 +900,7 @@ mod bucket_tests {
         assert_eq!(bucket.get(key.clone()).unwrap(), None);
 
         // insert and get
-        bucket.set(&(key.clone(), val.clone())).unwrap();
+        bucket.set((key.clone(), val.clone())).unwrap();
         assert_eq!(bucket.get(key.clone()).unwrap(), Some(val.clone()));
     }
 
@@ -968,7 +911,7 @@ mod bucket_tests {
         let key = b"alpha".to_vec();
         let val = b"beta".to_vec();
 
-        bucket.set(&(key.clone(), val.clone())).unwrap();
+        bucket.set((key.clone(), val.clone())).unwrap();
         let got = bucket.del(key.clone()).unwrap();
 
         // check returned value and try fetching again
@@ -977,47 +920,9 @@ mod bucket_tests {
 
         // re-insert same key again
         let newval = b"gamma".to_vec();
-        bucket.set(&(key.clone(), newval.clone())).unwrap();
+        bucket.set((key.clone(), newval.clone())).unwrap();
 
         assert_eq!(bucket.get(key.clone()).unwrap(), Some(newval));
-    }
-
-    #[test]
-    fn test_iter_only_live_entries() {
-        let mut bucket = open_bucket();
-        let mut inserted = Vec::new();
-
-        // insert 3 keys
-        for &s in &["one", "two", "three"] {
-            let key = s.as_bytes().to_vec();
-            let val = (s.to_uppercase()).as_bytes().to_vec();
-
-            bucket.set(&(key.clone(), val.clone())).unwrap();
-            inserted.push((key, val));
-        }
-
-        // delete "two"
-        let key_to_delete = b"two".to_vec();
-
-        let _ = bucket.del(key_to_delete.clone()).unwrap();
-
-        // collect via iter
-        let mut out = Vec::new();
-        let mut idx = 0;
-
-        while let Some((k, v)) = bucket.iter(&mut idx).unwrap() {
-            out.push((k, v));
-        }
-
-        // should contain only "one" and "three"
-        let mut expected = inserted;
-        expected.retain(|(k, _)| k != &key_to_delete);
-
-        assert_eq!(out.len(), expected.len());
-
-        for pair in expected {
-            assert!(out.contains(&pair));
-        }
     }
 
     #[test]
@@ -1034,7 +939,7 @@ mod bucket_tests {
         // first session
         {
             let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
-            bucket.set(&(key.clone(), val.clone())).unwrap();
+            bucket.set((key.clone(), val.clone())).unwrap();
         }
 
         // second session
@@ -1054,7 +959,7 @@ mod bucket_tests {
 
         {
             let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
-            bucket.set(&(vec![0], vec![1])).unwrap();
+            bucket.set((vec![0], vec![1])).unwrap();
         }
 
         // at re-open, cause of the wrong cap, it must re-init the file
@@ -1101,8 +1006,8 @@ mod bucket_tests {
 
         let key = b"dup".to_vec();
 
-        bucket.set(&(key.clone(), b"one".to_vec())).unwrap();
-        bucket.set(&(key.clone(), b"two".to_vec())).unwrap();
+        bucket.set((key.clone(), b"one".to_vec())).unwrap();
+        bucket.set((key.clone(), b"two".to_vec())).unwrap();
 
         assert_eq!(bucket.get(key.clone()).unwrap(), Some(b"two".to_vec()));
     }
@@ -1114,19 +1019,19 @@ mod bucket_tests {
         // empty key, non-empty value
         let k1 = vec![];
 
-        bucket.set(&(k1.clone(), b"V".to_vec())).unwrap();
+        bucket.set((k1.clone(), b"V".to_vec())).unwrap();
         assert_eq!(bucket.get(k1.clone()).unwrap(), Some(b"V".to_vec()));
 
         // non-empty key, empty value
         let k2 = b"K".to_vec();
 
-        bucket.set(&(k2.clone(), vec![])).unwrap();
+        bucket.set((k2.clone(), vec![])).unwrap();
         assert_eq!(bucket.get(k2.clone()).unwrap(), Some(vec![]));
 
         // both empty
         let k3 = vec![];
 
-        bucket.set(&(k3.clone(), vec![])).unwrap();
+        bucket.set((k3.clone(), vec![])).unwrap();
         assert_eq!(bucket.get(k3.clone()).unwrap(), Some(vec![]));
     }
 
@@ -1155,7 +1060,7 @@ mod bucket_tests {
             let key1 = b"A".to_vec(); // len = 1
             let val1 = b"111".to_vec(); // len = 3
 
-            bucket.set(&(key1, val1)).unwrap();
+            bucket.set((key1, val1)).unwrap();
 
             // NOTE: Bucket is dropped! So mmap will be flushed on drop
         }
@@ -1167,7 +1072,7 @@ mod bucket_tests {
             let key2 = b"B".to_vec();
             let val2 = b"2222".to_vec(); // length = 4
 
-            bucket.set(&(key2.clone(), val2.clone())).unwrap();
+            bucket.set((key2.clone(), val2.clone())).unwrap();
 
             let got = bucket.get(key2).unwrap();
             assert_eq!(got, Some(val2));
@@ -1205,7 +1110,7 @@ mod bucket_tests {
             let key = knum.to_be_bytes().to_vec();
             let val = vnum.to_be_bytes().to_vec();
 
-            bucket.set(&(key.clone(), val.clone())).unwrap();
+            bucket.set((key.clone(), val.clone())).unwrap();
             entries.push((key, val));
         }
 
@@ -1237,8 +1142,8 @@ mod bucket_tests {
         let mut bucket = open_bucket();
         assert_eq!(bucket.get_inserted_count().unwrap(), 0);
 
-        bucket.set(&(vec![1], b"one".to_vec())).unwrap();
-        bucket.set(&(vec![2], b"two".to_vec())).unwrap();
+        bucket.set((vec![1], b"one".to_vec())).unwrap();
+        bucket.set((vec![2], b"two".to_vec())).unwrap();
         assert_eq!(bucket.get_inserted_count().unwrap(), 2);
 
         bucket.del(vec![1]).unwrap();
@@ -1248,7 +1153,7 @@ mod bucket_tests {
             "deletes should reduce live count"
         );
 
-        bucket.set(&(vec![1], b"one-again".to_vec())).unwrap();
+        bucket.set((vec![1], b"one-again".to_vec())).unwrap();
         assert_eq!(
             bucket.get_inserted_count().unwrap(),
             2,
@@ -1268,8 +1173,8 @@ mod bucket_tests {
         {
             let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
 
-            bucket.set(&(vec![1], b"a".to_vec())).unwrap();
-            bucket.set(&(vec![2], b"b".to_vec())).unwrap();
+            bucket.set((vec![1], b"a".to_vec())).unwrap();
+            bucket.set((vec![2], b"b".to_vec())).unwrap();
             bucket.del(vec![1]).unwrap();
 
             // live count should be 1
@@ -1287,35 +1192,6 @@ mod bucket_tests {
     }
 
     #[test]
-    fn test_iter_matches_inserted_count() {
-        let mut bucket = open_bucket();
-
-        // insert up to threshold (80% of capacity)
-        let threshold = bucket.get_threshold().unwrap();
-
-        for i in 0..threshold {
-            let key = vec![(i as u8).wrapping_add(1)];
-            let val = format!("v{}", i).into_bytes();
-
-            bucket.set(&(key, val)).unwrap();
-        }
-
-        // delete a couple of entries
-        bucket.del(vec![1]).unwrap();
-        bucket.del(vec![3]).unwrap();
-
-        // iterate and count live entries
-        let mut idx = 0usize;
-        let mut found = Vec::new();
-
-        while let Some((k, v)) = bucket.iter(&mut idx).unwrap() {
-            found.push((k, v));
-        }
-
-        assert_eq!(found.len(), bucket.get_inserted_count().unwrap());
-    }
-
-    #[test]
     fn test_threshold_with_deletes() {
         let mut bucket = open_bucket();
         let threshold = bucket.get_threshold().unwrap();
@@ -1324,12 +1200,12 @@ mod bucket_tests {
         for i in 0..threshold {
             let key = vec![(i as u8).wrapping_add(1)];
 
-            bucket.set(&(key, vec![0u8])).unwrap();
+            bucket.set((key, vec![0u8])).unwrap();
         }
 
         // the next insert should be rejected (returns false)
         assert_eq!(
-            bucket.set(&(vec![0xFF], b"overflow".to_vec())).unwrap(),
+            bucket.set((vec![0xFF], b"overflow".to_vec())).unwrap(),
             false
         );
 
@@ -1337,67 +1213,11 @@ mod bucket_tests {
         bucket.del(vec![1]).unwrap();
 
         assert_eq!(
-            bucket.set(&(vec![0xFF], b"overflow".to_vec())).unwrap(),
+            bucket.set((vec![0xFF], b"overflow".to_vec())).unwrap(),
             true
         );
 
         // live count should equal threshold again
         assert_eq!(bucket.get_inserted_count().unwrap(), threshold);
-    }
-
-    #[test]
-    fn test_iter_del_persistence() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let rand = gen_rand();
-        let path = tmp
-            .path()
-            .join(format!("bucket_iter_del_{}", rand.to_string()));
-
-        // first session: insert two keys and tombstone one via iter_del()
-        let deleted_key: Vec<u8>;
-        {
-            let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
-
-            let k1 = vec![1u8];
-            let k2 = vec![2u8];
-
-            bucket.set(&(k1.clone(), b"foo".to_vec())).unwrap();
-            bucket.set(&(k2.clone(), b"bar".to_vec())).unwrap();
-
-            // tombstone one entry via iter_del()
-            let deleted = bucket
-                .iter_del()
-                .unwrap()
-                .expect("expected one deleted pair");
-
-            deleted_key = deleted.0.clone();
-
-            // the deleted key must be gone in the same session
-            assert_eq!(bucket.get(deleted_key.clone()).unwrap(), None);
-
-            // the other key must still exist
-            let other_key = if deleted_key == k1 {
-                k2.clone()
-            } else {
-                k1.clone()
-            };
-
-            assert!(bucket.get(other_key).unwrap().is_some());
-        }
-
-        // reopen and validate tombstone persisted
-        {
-            let bucket = Bucket::open(&path, TEST_CAP).unwrap();
-            assert_eq!(bucket.get(deleted_key.clone()).unwrap(), None);
-
-            // ensure at least one other key is still present
-            let other_key = if deleted_key == vec![1u8] {
-                vec![2u8]
-            } else {
-                vec![1u8]
-            };
-
-            assert!(bucket.get(other_key).unwrap().is_some());
-        }
     }
 }

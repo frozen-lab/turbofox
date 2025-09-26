@@ -3,7 +3,10 @@ use std::{
     str::FromStr,
 };
 
-use crate::{bucket::Bucket, error::InternalResult};
+use crate::{
+    bucket::{Bucket, Key, KeyValue},
+    error::InternalResult,
+};
 
 pub(crate) struct Router {
     bucket: Bucket,
@@ -27,6 +30,22 @@ impl Router {
         Ok(Self {
             bucket: Bucket::new(path, capacity)?,
         })
+    }
+
+    pub fn get_insert_count(&self) -> InternalResult<usize> {
+        self.bucket.get_inserted_count()
+    }
+
+    pub fn set(&mut self, pair: KeyValue) -> InternalResult<bool> {
+        self.bucket.set(pair)
+    }
+
+    pub fn get(&mut self, key: Key) -> InternalResult<Option<Vec<u8>>> {
+        self.bucket.get(key)
+    }
+
+    pub fn del(&mut self, key: Key) -> InternalResult<Option<Vec<u8>>> {
+        self.bucket.del(key)
     }
 
     fn fetch_bucket_path<P: AsRef<Path>>(
@@ -127,5 +146,73 @@ mod tests {
         let (found, found_cap) = res.unwrap();
         assert_eq!(found, filename);
         assert_eq!(found_cap, cap);
+    }
+
+    #[test]
+    fn test_set_and_get() {
+        let dir = tempdir().unwrap();
+        let mut router = Router::open(dir.path(), "kvbucket", 64).unwrap();
+
+        let key = Key::from("foo");
+        let value = b"bar".to_vec();
+
+        let inserted = router.set((key.clone(), value.clone())).unwrap();
+        assert!(inserted, "Set should return true on first insert");
+
+        let retrieved = router.get(key.clone()).unwrap();
+        assert_eq!(retrieved, Some(value));
+    }
+
+    #[test]
+    fn test_del() {
+        let dir = tempdir().unwrap();
+        let mut router = Router::open(dir.path(), "delbucket", 64).unwrap();
+
+        let key = Key::from("dead");
+        let value = b"beef".to_vec();
+        router.set((key.clone(), value.clone())).unwrap();
+
+        let deleted = router.del(key.clone()).unwrap();
+        assert_eq!(deleted, Some(value), "Del should return stored value");
+
+        let check = router.get(key).unwrap();
+        assert!(check.is_none(), "Key should be gone after delete");
+    }
+
+    #[test]
+    fn test_get_insert_count() {
+        let dir = tempdir().unwrap();
+        let mut router = Router::open(dir.path(), "countbucket", 64).unwrap();
+
+        assert_eq!(router.get_insert_count().unwrap(), 0);
+
+        router.set((Key::from("a"), b"1".to_vec())).unwrap();
+        router.set((Key::from("b"), b"2".to_vec())).unwrap();
+
+        assert_eq!(router.get_insert_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_set_fails_when_bucket_full() {
+        let dir = tempdir().unwrap();
+        let mut router = Router::open(dir.path(), "fullbucket", 8).unwrap();
+
+        let threshold = router.bucket.get_threshold().unwrap();
+
+        // Fill until threshold
+        for i in 0..threshold {
+            let key = Key::from(format!("key{i}"));
+            let value = format!("val{i}").into_bytes();
+
+            let inserted = router.set((key, value)).unwrap();
+            assert!(inserted);
+        }
+
+        // Next insert should error
+        let key = Key::from("overflow");
+        let value = b"oops".to_vec();
+        let res = router.set((key, value));
+
+        assert!(res.is_err(), "Expected error when bucket is full");
     }
 }
