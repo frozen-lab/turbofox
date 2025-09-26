@@ -6,6 +6,7 @@ use hasher::{Hasher, EMPTY_SIGN, TOMBSTONE_SIGN};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
+    io::Write,
     path::Path,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
@@ -218,18 +219,16 @@ struct Meta {
     version: u32,
     inserts: AtomicU64,
     iter_idx: AtomicU64,
-    capacity: AtomicU64,
     write_pointer: AtomicU64,
 }
 
 impl Meta {
-    fn default(capacity: u64) -> Self {
+    fn default() -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
             inserts: AtomicU64::new(0),
             iter_idx: AtomicU64::new(0),
-            capacity: AtomicU64::new(capacity),
             write_pointer: AtomicU64::new(0),
         }
     }
@@ -271,7 +270,7 @@ impl BucketFile {
         // init the meta w/ file version and magic
         unsafe {
             let meta_ptr = mmap.as_mut_ptr() as *mut Meta;
-            meta_ptr.write(Meta::default(capacity as u64));
+            meta_ptr.write(Meta::default());
         }
 
         Ok(Self {
@@ -328,12 +327,12 @@ impl BucketFile {
         }
 
         // safeguard for the insert index
-        if meta.iter_idx.load(Ordering::Relaxed) > meta.capacity.load(Ordering::Relaxed) {
+        if meta.iter_idx.load(Ordering::Relaxed) > capacity as u64 {
             return Err(InternalError::InvalidFile);
         }
 
         // safeguard for the insert count
-        if meta.inserts.load(Ordering::Relaxed) > meta.capacity.load(Ordering::Relaxed) {
+        if meta.inserts.load(Ordering::Relaxed) > capacity as u64 {
             return Err(InternalError::InvalidFile);
         }
 
@@ -391,11 +390,6 @@ impl BucketFile {
     #[inline(always)]
     fn get_iter_idx(&self) -> usize {
         self.meta().iter_idx.load(Ordering::Acquire) as usize
-    }
-
-    #[inline(always)]
-    fn get_capacity(&self) -> usize {
-        self.meta().capacity.load(Ordering::Acquire) as usize
     }
 
     #[inline(always)]
@@ -763,7 +757,7 @@ struct Bucket {
 }
 
 impl Bucket {
-    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+    pub fn open<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
         let file = match BucketFile::open(&path, capacity) {
             Ok(f) => f,
 
@@ -771,11 +765,11 @@ impl Bucket {
                 // returns IO error if something goes wrong
                 std::fs::remove_file(&path)?;
 
-                // try to reopen the file
+                // now we create a new bucket file
                 //
                 // NOTE: if the same or any error occurs again,
                 // we simply throw it out!
-                BucketFile::open(&path, capacity)?
+                BucketFile::new(&path, capacity)?
             }
 
             Err(e) => return Err(e),
@@ -784,7 +778,7 @@ impl Bucket {
         Ok(Self { file })
     }
 
-    pub fn open<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
         let file = BucketFile::new(path, capacity)?;
 
         Ok(Self { file })
@@ -813,5 +807,446 @@ impl Bucket {
         self.file.set_pair(idx, pair);
 
         return Ok(true);
+    }
+
+    pub fn get(&self, key: Key) -> InternalResult<Option<Vec<u8>>> {
+        let sign = Hasher::new(&key);
+        let signs = self.file.get_signs();
+        let mut idx = sign as usize % self.file.capacity;
+
+        for _ in 0..self.file.capacity {
+            match signs[idx] {
+                EMPTY_SIGN => return Ok(None),
+
+                s if s == sign => {
+                    let po = self.file.get_pair(idx);
+                    let (k, v) = self.file.read_slot(&po)?;
+
+                    if key == k {
+                        return Ok(Some(v));
+                    }
+                }
+
+                _ => {}
+            }
+
+            idx = (idx + 1) % self.file.capacity;
+        }
+
+        Ok(None)
+    }
+
+    pub fn del(&mut self, key: Key) -> InternalResult<Option<Vec<u8>>> {
+        let sign = Hasher::new(&key);
+
+        let meta = self.file.meta_mut();
+        let signs = self.file.get_signs();
+        let mut idx = sign as usize % self.file.capacity;
+
+        for _ in 0..self.file.capacity {
+            match signs[idx] {
+                EMPTY_SIGN => return Ok(None),
+
+                s if s == sign => {
+                    let po = self.file.get_pair(idx);
+                    let (k, v) = self.file.read_slot(&po)?;
+
+                    // found the key
+                    if key == k {
+                        // update meta and header
+                        meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                        self.file.set_sign(idx, TOMBSTONE_SIGN);
+
+                        return Ok(Some(v));
+                    }
+                }
+
+                _ => {}
+            }
+
+            idx = (idx + 1) % self.file.capacity;
+        }
+
+        Ok(None)
+    }
+
+    pub fn iter(&self, start: &mut usize) -> InternalResult<Option<KeyValue>> {
+        let file = &self.file;
+        let signs = file.get_signs();
+        let cap = file.capacity;
+
+        while *start < cap {
+            let idx = *start;
+            *start += 1;
+
+            match signs[idx] {
+                EMPTY_SIGN | TOMBSTONE_SIGN => {
+                    continue;
+                }
+
+                _ => {
+                    let p_offset = file.get_pair(idx);
+                    let pair = file.read_slot(&p_offset)?;
+
+                    return Ok(Some(pair));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn iter_del(&mut self) -> InternalResult<Option<KeyValue>> {
+        let mut file = &mut self.file;
+        let mut idx = file.get_iter_idx();
+
+        let meta = file.meta_mut();
+        let signs = file.get_signs();
+        let cap = file.capacity;
+
+        while idx < cap {
+            let cur_idx = idx;
+
+            // increment for the next iteration
+            file.increment_iter_idx();
+            idx += 1;
+
+            match signs[cur_idx] {
+                EMPTY_SIGN | TOMBSTONE_SIGN => continue,
+
+                _ => {
+                    let p_offset = file.get_pair(cur_idx);
+                    let pair = file.read_slot(&p_offset)?;
+
+                    meta.inserts.fetch_sub(1, Ordering::SeqCst);
+                    file.set_sign(cur_idx, TOMBSTONE_SIGN);
+
+                    return Ok(Some(pair));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn get_inserted_count(&self) -> InternalResult<usize> {
+        let count = self.file.get_inserted_count();
+
+        Ok(count)
+    }
+
+    pub fn get_threshold(&self) -> InternalResult<usize> {
+        Ok(self.file.threshold)
+    }
+
+    pub fn get_capacity(&self) -> InternalResult<usize> {
+        Ok(self.file.capacity)
+    }
+
+    /// Flush buckets data to disk
+    ///
+    /// NOTE: Requires write lock to the bucket
+    pub fn flush(&mut self) -> InternalResult<()> {
+        self.file.mmap.flush()?;
+        self.file.file.flush()?;
+
+        Ok(())
+    }
+}
+
+impl Drop for Bucket {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+#[cfg(test)]
+mod bucket_tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+
+    const TEST_CAP: usize = 8;
+
+    fn gen_rand() -> u32 {
+        let mut rng = sphur::Sphur::new();
+        rng.gen_u32()
+    }
+
+    fn open_bucket() -> Bucket {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp
+            .path()
+            .join(format!("bucket_tests_{}", rand.to_string()));
+
+        Bucket::new(path, TEST_CAP).expect("create bucket")
+    }
+
+    #[test]
+    fn test_set_and_get() {
+        let mut bucket = open_bucket();
+
+        let key = b"foo".to_vec();
+        let val = b"bar".to_vec();
+
+        // empty => None
+        assert_eq!(bucket.get(key.clone()).unwrap(), None);
+
+        // insert and get
+        bucket.set(&(key.clone(), val.clone())).unwrap();
+        assert_eq!(bucket.get(key.clone()).unwrap(), Some(val.clone()));
+    }
+
+    #[test]
+    fn test_delete_and_tombstone() {
+        let mut bucket = open_bucket();
+
+        let key = b"alpha".to_vec();
+        let val = b"beta".to_vec();
+
+        bucket.set(&(key.clone(), val.clone())).unwrap();
+        let got = bucket.del(key.clone()).unwrap();
+
+        // check returned value and try fetching again
+        assert_eq!(got, Some(val.clone()));
+        assert_eq!(bucket.get(key.clone()).unwrap(), None);
+
+        // re-insert same key again
+        let newval = b"gamma".to_vec();
+        bucket.set(&(key.clone(), newval.clone())).unwrap();
+
+        assert_eq!(bucket.get(key.clone()).unwrap(), Some(newval));
+    }
+
+    #[test]
+    fn test_iter_only_live_entries() {
+        let mut bucket = open_bucket();
+        let mut inserted = Vec::new();
+
+        // insert 3 keys
+        for &s in &["one", "two", "three"] {
+            let key = s.as_bytes().to_vec();
+            let val = (s.to_uppercase()).as_bytes().to_vec();
+
+            bucket.set(&(key.clone(), val.clone())).unwrap();
+            inserted.push((key, val));
+        }
+
+        // delete "two"
+        let key_to_delete = b"two".to_vec();
+
+        let _ = bucket.del(key_to_delete.clone()).unwrap();
+
+        // collect via iter
+        let mut out = Vec::new();
+        let mut idx = 0;
+
+        while let Some((k, v)) = bucket.iter(&mut idx).unwrap() {
+            out.push((k, v));
+        }
+
+        // should contain only "one" and "three"
+        let mut expected = inserted;
+        expected.retain(|(k, _)| k != &key_to_delete);
+
+        assert_eq!(out.len(), expected.len());
+
+        for pair in expected {
+            assert!(out.contains(&pair));
+        }
+    }
+
+    #[test]
+    fn test_persistence_across_reopen() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp
+            .path()
+            .join(format!("bucket_tests_{}", rand.to_string()));
+
+        let key = b"k".to_vec();
+        let val = b"v".to_vec();
+
+        // first session
+        {
+            let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
+            bucket.set(&(key.clone(), val.clone())).unwrap();
+        }
+
+        // second session
+        {
+            let mut bucket2 = Bucket::open(&path, TEST_CAP).unwrap();
+            let got = bucket2.get(key.clone()).unwrap();
+
+            assert_eq!(got, Some(b"v".to_vec()));
+        }
+    }
+
+    #[test]
+    fn test_invalid_magic_or_version() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp
+            .path()
+            .join(format!("bucket_tests_{}", rand.to_string()));
+
+        // create a bucket normally
+        {
+            let _ = Bucket::new(&path, TEST_CAP).unwrap();
+        }
+
+        // Corrupt the header: change magic
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xff, 0xff, 0xff, 0xff]).unwrap();
+        file.flush().unwrap();
+
+        // reopening should not throw an error
+        match Bucket::open(&path, TEST_CAP) {
+            Ok(_) => {}
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_upsert_does_not_increment_and_overwrites() {
+        let mut bucket = open_bucket();
+
+        let key = b"dup".to_vec();
+
+        bucket.set(&(key.clone(), b"one".to_vec())).unwrap();
+        bucket.set(&(key.clone(), b"two".to_vec())).unwrap();
+
+        assert_eq!(bucket.get(key.clone()).unwrap(), Some(b"two".to_vec()));
+    }
+
+    #[test]
+    fn test_zero_length_keys_and_values() {
+        let mut bucket = open_bucket();
+
+        // empty key, non-empty value
+        let k1 = vec![];
+
+        bucket.set(&(k1.clone(), b"V".to_vec())).unwrap();
+        assert_eq!(bucket.get(k1.clone()).unwrap(), Some(b"V".to_vec()));
+
+        // non-empty key, empty value
+        let k2 = b"K".to_vec();
+
+        bucket.set(&(k2.clone(), vec![])).unwrap();
+        assert_eq!(bucket.get(k2.clone()).unwrap(), Some(vec![]));
+
+        // both empty
+        let k3 = vec![];
+
+        bucket.set(&(k3.clone(), vec![])).unwrap();
+        assert_eq!(bucket.get(k3.clone()).unwrap(), Some(vec![]));
+    }
+
+    #[test]
+    fn test_del_on_nonexistent_returns_none() {
+        let mut bucket = open_bucket();
+
+        let key = b"ghost".to_vec();
+
+        assert_eq!(bucket.del(key.clone()).unwrap(), None);
+        assert_eq!(bucket.get(key).unwrap(), None);
+    }
+
+    #[test]
+    fn test_file_offset_continues_after_reopen() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp
+            .path()
+            .join(format!("bucket_tests_{}", rand.to_string()));
+
+        // first session: write 3 bytes
+        {
+            let mut bucket = Bucket::new(&path, TEST_CAP).expect("create bucket");
+
+            let key1 = b"A".to_vec(); // len = 1
+            let val1 = b"111".to_vec(); // len = 3
+
+            bucket.set(&(key1, val1)).unwrap();
+
+            // NOTE: Bucket is dropped! So mmap will be flushed on drop
+        }
+
+        // second session: reopen, write 4 more bytes
+        {
+            let mut bucket = Bucket::open(path, TEST_CAP).expect("create bucket");
+
+            let key2 = b"B".to_vec();
+            let val2 = b"2222".to_vec(); // length = 4
+
+            bucket.set(&(key2.clone(), val2.clone())).unwrap();
+
+            let got = bucket.get(key2).unwrap();
+            assert_eq!(got, Some(val2));
+        }
+    }
+
+    #[test]
+    fn test_random_inserts_and_gets() {
+        const CAP: usize = 50;
+        const NUM: usize = 40; // 80% of CAP
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp
+            .path()
+            .join(format!("bucket_tests_{}", rand.to_string()));
+
+        let mut bucket = Bucket::new(path, CAP).expect("create bucket");
+
+        // very simple LCG for reproducible “random” bytes
+        let mut seed: u32 = 0x1234_5678;
+
+        fn next(seed: &mut u32) -> u32 {
+            *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *seed
+        }
+
+        // generate, insert, and remember all pairs
+        let mut entries = Vec::with_capacity(NUM);
+
+        for _ in 0..NUM {
+            let knum = next(&mut seed);
+            let vnum = next(&mut seed);
+
+            let key = knum.to_be_bytes().to_vec();
+            let val = vnum.to_be_bytes().to_vec();
+
+            bucket.set(&(key.clone(), val.clone())).unwrap();
+            entries.push((key, val));
+        }
+
+        for (key, val) in &entries {
+            let got = bucket.get(key.clone()).unwrap();
+
+            assert_eq!(
+                got.as_ref(),
+                Some(val),
+                "for key={:02X?} expected value={:02X?}, got={:?}",
+                key,
+                val,
+                got
+            );
+        }
+
+        // a key we never inserted should be absent
+        let absent_key = next(&mut seed).to_be_bytes().to_vec();
+
+        assert_eq!(
+            bucket.get(absent_key).unwrap(),
+            None,
+            "unexpectedly found a value for a non‐existent key"
+        );
     }
 }
