@@ -1,5 +1,6 @@
 //! A `Bucket` is an on-disk, immutable, append-only HashTable to store the
-//! Key-Value pairs. It uses a fix sized, memory-mapped Header.
+//! KeyValue pairs. To reduce I/O and achieve performance it uses a
+//! fix sized, memory-mapped Header.
 
 use crate::error::{InternalError, InternalResult};
 use hasher::{Hasher, EMPTY_SIGN, TOMBSTONE_SIGN};
@@ -8,32 +9,28 @@ use std::{
     fs::{File, OpenOptions},
     io::Write,
     path::Path,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 /// ----------------------------------------
 /// Constants and Types
 /// ----------------------------------------
 
-/// File version for [Bucket] file
 const VERSION: u32 = 2;
-
-/// Magic Id for [Bucket] file
 const MAGIC: [u8; 4] = *b"TCv2";
 
-/// Hash signature of a key
 type Sign = u32;
-
-/// A custom type for Key-Value pair object
 pub(crate) type KeyValue = (Vec<u8>, Vec<u8>);
-
-/// A custom type for Key object
 pub(crate) type Key = Vec<u8>;
 
 /// ----------------------------------------
 /// Namespaces
 /// ----------------------------------------
 
+/// This acts as an id for an item stored in [Bucket]
+///
+/// NOTE: The *index* must start from `0` cause the 0th item,
+/// [Base] in here, acts as an default in the [BucketFile].
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Namespace {
@@ -71,6 +68,10 @@ impl TryFrom<u8> for Namespace {
     }
 }
 
+/// ----------------------------------------
+/// Bucket File (Pair)
+/// ----------------------------------------
+
 #[repr(align(16))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Pair {
@@ -80,36 +81,29 @@ struct Pair {
     offset: u64,
 }
 
-/// ----------------------------------------
-/// Bucket File (Pair)
-/// ----------------------------------------
+type RawPair = [u8; 10];
 
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PairRaw([u8; 10]);
-
-impl PairRaw {
-    fn to_raw(pair: Pair) -> Self {
+impl Pair {
+    fn to_raw(&self) -> RawPair {
         let mut out = [0u8; 10];
 
         // namespace
-        out[0] = pair.ns as u8;
+        out[0] = self.ns as u8;
 
         // klen (LE)
-        out[1..3].copy_from_slice(&pair.klen.to_le_bytes());
+        out[1..3].copy_from_slice(&self.klen.to_le_bytes());
 
         // vlen (LE)
-        out[3..5].copy_from_slice(&pair.vlen.to_le_bytes());
+        out[3..5].copy_from_slice(&self.vlen.to_le_bytes());
 
         // offset (only 5 bytes, LE)
-        let offset_bytes = pair.offset.to_le_bytes();
+        let offset_bytes = self.offset.to_le_bytes();
         out[5..10].copy_from_slice(&offset_bytes[..5]);
 
-        Self(out)
+        out
     }
 
-    fn from_raw(&self) -> InternalResult<Pair> {
-        let slice = self.0;
+    fn from_raw(slice: RawPair) -> InternalResult<Pair> {
         let ns = Namespace::try_from(slice[0])?;
 
         let klen = u16::from_le_bytes([slice[1], slice[2]]);
@@ -130,7 +124,7 @@ impl PairRaw {
 
 #[cfg(test)]
 mod pair_tests {
-    use super::{Namespace, Pair, PairRaw};
+    use super::{Namespace, Pair, RawPair};
     use sphur::Sphur;
 
     #[test]
@@ -142,8 +136,8 @@ mod pair_tests {
             vlen: 200,
         };
 
-        let encoded = PairRaw::to_raw(p);
-        let decoded = encoded.from_raw().expect("Decode raw pair");
+        let encoded = p.to_raw();
+        let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
         assert_eq!(p.ns, decoded.ns);
         assert_eq!(p.offset, decoded.offset);
@@ -160,8 +154,8 @@ mod pair_tests {
             vlen: 0,
         };
 
-        let encoded = PairRaw::to_raw(p);
-        let decoded = encoded.from_raw().expect("Decode raw pair");
+        let encoded = p.to_raw();
+        let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
         assert_eq!(p, decoded);
 
@@ -176,8 +170,8 @@ mod pair_tests {
             vlen: max_vlen,
         };
 
-        let encoded = PairRaw::to_raw(p2);
-        let decoded = encoded.from_raw().expect("Decode raw pair");
+        let encoded = p2.to_raw();
+        let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
         assert_eq!(p2, decoded);
     }
@@ -201,8 +195,8 @@ mod pair_tests {
                 vlen,
             };
 
-            let encoded = PairRaw::to_raw(p);
-            let decoded = encoded.from_raw().expect("Decode raw pair");
+            let encoded = p.to_raw();
+            let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
             assert_eq!(p, decoded, "Failed at iteration {i}");
         }
@@ -354,7 +348,7 @@ impl BucketFile {
     /// `sizeof(Meta) + (sizeof(Sign) * CAP) + (sizeof(PairRaw) * CAP)`
     #[inline(always)]
     const fn calc_header_size(capacity: usize) -> usize {
-        size_of::<Meta>() + (size_of::<Sign>() * capacity) + (size_of::<PairRaw>() * capacity)
+        size_of::<Meta>() + (size_of::<Sign>() * capacity) + (size_of::<RawPair>() * capacity)
     }
 
     /// Calculate threshold w/ given capacity for [Bucket]
@@ -399,18 +393,18 @@ impl BucketFile {
 
     /// Read a single [PairRaw] from an index, directly from the mmap
     #[inline(always)]
-    fn get_pair(&self, idx: usize) -> PairRaw {
+    fn get_pair(&self, idx: usize) -> RawPair {
         unsafe {
-            let ptr = self.mmap.as_ptr().add(self.pair_offset) as *const PairRaw;
+            let ptr = self.mmap.as_ptr().add(self.pair_offset) as *const RawPair;
             *ptr.add(idx)
         }
     }
 
     /// Write a new [PairRaw] at given index
     #[inline(always)]
-    fn set_pair(&mut self, idx: usize, pair: PairRaw) {
+    fn set_pair(&mut self, idx: usize, pair: RawPair) {
         unsafe {
-            let ptr = self.mmap.as_mut_ptr().add(self.pair_offset) as *mut PairRaw;
+            let ptr = self.mmap.as_mut_ptr().add(self.pair_offset) as *mut RawPair;
             *ptr.add(idx) = pair;
         }
     }
@@ -434,8 +428,8 @@ impl BucketFile {
     }
 
     /// Read a [KeyValue] from a given [PairRaw]
-    fn read_slot(&self, raw: &PairRaw) -> InternalResult<KeyValue> {
-        let pair = raw.from_raw()?;
+    fn read_slot(&self, raw: RawPair) -> InternalResult<KeyValue> {
+        let pair = Pair::from_raw(raw)?;
         let klen = pair.klen as usize;
         let vlen = pair.vlen as usize;
 
@@ -449,7 +443,7 @@ impl BucketFile {
     }
 
     /// Write a [KeyValue] to the bucket and get [Pair]
-    fn write_slot(&self, pair: &KeyValue) -> InternalResult<PairRaw> {
+    fn write_slot(&self, pair: &KeyValue) -> InternalResult<RawPair> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
         let blen = klen + vlen;
@@ -473,7 +467,7 @@ impl BucketFile {
             ns: Namespace::Base,
         };
 
-        Ok(PairRaw::to_raw(pair))
+        Ok(pair.to_raw())
     }
 
     fn lookup_slot(
@@ -489,7 +483,7 @@ impl BucketFile {
 
                 s if s == sign => {
                     let po = self.get_pair(idx);
-                    let (existing_key, _) = self.read_slot(&po)?;
+                    let (existing_key, _) = self.read_slot(po)?;
 
                     if existing_key == kbuf {
                         return Ok((idx, false));
@@ -610,7 +604,7 @@ mod bucket_file_tests {
 
         for idx in 0..bucket.capacity {
             let raw = bucket.get_pair(idx);
-            let pair = raw.from_raw().expect("Extract Pair from raw data");
+            let pair = Pair::from_raw(raw).expect("Extract Pair from raw data");
 
             assert_eq!(pair.klen, 0);
             assert_eq!(pair.vlen, 0);
@@ -638,33 +632,20 @@ mod bucket_file_tests {
     }
 
     #[test]
-    fn test_reopen_with_update() {
+    fn test_capacity_mismatch() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let rand = gen_rand();
         let path = tmp.path().join(rand.to_string());
 
         {
-            let mut bucket = BucketFile::new(&path, TEST_CAP).unwrap();
-            let kv = (b"foo".to_vec(), b"bar".to_vec());
-            let pair = bucket.write_slot(&kv).unwrap();
-
-            bucket.set_pair(0, pair);
-            bucket.set_sign(0, 12345);
-
-            // metadata updates
-            bucket.increment_inserted_count();
+            let _ = BucketFile::new(&path, TEST_CAP).unwrap();
         }
 
-        // at re-open, it shouldn’t be re-zero'ed
-        let bucket2 = BucketFile::open(path, TEST_CAP).unwrap();
-        let signs = bucket2.get_signs();
-        assert_eq!(signs[0], 12345);
-
-        let po2 = bucket2.get_pair(0);
-        let kv2 = bucket2.read_slot(&po2).unwrap();
-
-        assert_eq!(kv2.0, b"foo".to_vec());
-        assert_eq!(kv2.1, b"bar".to_vec());
+        // at re-open, cause of the wrong cap, it should throw an error
+        match BucketFile::open(path, TEST_CAP * 2) {
+            Ok(_) => panic!("Wrong cap should throw an error"),
+            Err(_) => {}
+        }
     }
 
     #[test]
@@ -686,7 +667,7 @@ mod bucket_file_tests {
         assert!(!is_new, "existing key should report is_new=false");
 
         let po_back = bucket.get_pair(3);
-        let kv_back = bucket.read_slot(&po_back).unwrap();
+        let kv_back = bucket.read_slot(po_back).unwrap();
 
         assert_eq!(kv_back, kv);
     }
@@ -722,11 +703,11 @@ mod bucket_file_tests {
             ns: Namespace::Base,
         };
 
-        let pair = PairRaw::to_raw(fake_pair);
+        let pair = fake_pair.to_raw();
         bucket.set_pair(7, pair);
 
         let got_pair = bucket.get_pair(7);
-        let got_off = got_pair.from_raw().unwrap();
+        let got_off = Pair::from_raw(got_pair).unwrap();
 
         assert_eq!(got_off.klen, 1);
         assert_eq!(got_off.vlen, 2);
@@ -820,7 +801,7 @@ impl Bucket {
 
                 s if s == sign => {
                     let po = self.file.get_pair(idx);
-                    let (k, v) = self.file.read_slot(&po)?;
+                    let (k, v) = self.file.read_slot(po)?;
 
                     if key == k {
                         return Ok(Some(v));
@@ -849,7 +830,7 @@ impl Bucket {
 
                 s if s == sign => {
                     let po = self.file.get_pair(idx);
-                    let (k, v) = self.file.read_slot(&po)?;
+                    let (k, v) = self.file.read_slot(po)?;
 
                     // found the key
                     if key == k {
@@ -886,7 +867,7 @@ impl Bucket {
 
                 _ => {
                     let p_offset = file.get_pair(idx);
-                    let pair = file.read_slot(&p_offset)?;
+                    let pair = file.read_slot(p_offset)?;
 
                     return Ok(Some(pair));
                 }
@@ -916,7 +897,7 @@ impl Bucket {
 
                 _ => {
                     let p_offset = file.get_pair(cur_idx);
-                    let pair = file.read_slot(&p_offset)?;
+                    let pair = file.read_slot(p_offset)?;
 
                     meta.inserts.fetch_sub(1, Ordering::SeqCst);
                     file.set_sign(cur_idx, TOMBSTONE_SIGN);
@@ -1080,6 +1061,24 @@ mod bucket_tests {
 
             assert_eq!(got, Some(b"v".to_vec()));
         }
+    }
+
+    #[test]
+    fn test_reinit_on_capacity_mismatch() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let rand = gen_rand();
+        let path = tmp.path().join(rand.to_string());
+
+        {
+            let mut bucket = Bucket::new(&path, TEST_CAP).unwrap();
+            bucket.set(&(vec![0], vec![1])).unwrap();
+        }
+
+        // at re-open, cause of the wrong cap, it must re-init the file
+        let bucket = Bucket::open(path, TEST_CAP * 2).unwrap();
+
+        assert_eq!(bucket.get(vec![0]).unwrap(), None);
+        assert_eq!(bucket.get_inserted_count().unwrap(), 0);
     }
 
     #[test]
