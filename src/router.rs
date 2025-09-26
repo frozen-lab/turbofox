@@ -16,13 +16,13 @@ impl Router {
         capacity: usize,
     ) -> InternalResult<Self> {
         // open existing
-        if let Some((path, cap)) = Self::fetch_bucket_path(dirpath, name)? {
+        if let Some((path, cap)) = Self::fetch_bucket_path(&dirpath, name)? {
             return Ok(Self {
-                bucket: Bucket::open(path, cap)?,
+                bucket: Bucket::open(dirpath.as_ref().join(path), cap)?,
             });
         }
 
-        let path = format!("{name}_{capacity}");
+        let path = dirpath.as_ref().join(format!("{name}_{capacity}"));
 
         Ok(Self {
             bucket: Bucket::new(path, capacity)?,
@@ -63,5 +63,69 @@ impl Router {
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_open_new_bucket() {
+        let dir = tempdir().unwrap();
+        let name = "testbucket";
+        let capacity = 128;
+
+        let router = Router::open(dir.path(), name, capacity).unwrap();
+
+        // check file created with correct name
+        let expected = dir.path().join(format!("{name}_{capacity}"));
+        assert!(expected.exists(), "Bucket file should exist");
+    }
+
+    #[test]
+    fn test_reopen_existing_bucket() {
+        let dir = tempdir().unwrap();
+        let name = "testbucket";
+        let capacity = 256;
+
+        // create once
+        let router1 = Router::open(dir.path(), name, capacity).unwrap();
+        drop(router1);
+
+        // open again -> should reuse existing
+        let router2 = Router::open(dir.path(), name, capacity).unwrap();
+        drop(router2);
+
+        let expected = dir.path().join(format!("{name}_{capacity}"));
+        assert!(expected.exists(), "Existing bucket file should still exist");
+    }
+
+    #[test]
+    fn test_fetch_bucket_path_none() {
+        let dir = tempdir().unwrap();
+        let res = Router::fetch_bucket_path(dir.path(), "nonexistent").unwrap();
+
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_fetch_bucket_path_valid() {
+        let dir = tempdir().unwrap();
+        let name = "bucketx";
+        let cap = 64;
+        let filename = format!("{name}_{cap}");
+        let filepath = dir.path().join(&filename);
+
+        fs::write(&filepath, b"dummy").unwrap();
+
+        let res = Router::fetch_bucket_path(dir.path(), name).unwrap();
+        assert!(res.is_some());
+
+        let (found, found_cap) = res.unwrap();
+        assert_eq!(found, filename);
+        assert_eq!(found_cap, cap);
     }
 }
