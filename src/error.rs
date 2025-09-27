@@ -31,6 +31,12 @@ impl From<InternalError> for TurboError {
     }
 }
 
+impl From<std::io::Error> for TurboError {
+    fn from(e: std::io::Error) -> Self {
+        TurboError::Io(e.to_string())
+    }
+}
+
 impl std::fmt::Display for TurboError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -93,6 +99,7 @@ pub(crate) enum InternalError {
     /// - The insertion offset has reached its max cap of `2^40 - 1` i.e `u40::Max`
     ///
     /// NOTE: This is rare, but acts as a guard rail to prevent crash.
+    #[allow(unused)]
     BucketOverflow(usize),
 }
 

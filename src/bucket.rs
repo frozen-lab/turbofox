@@ -61,9 +61,9 @@ impl TryFrom<u8> for Namespace {
             4 => Ok(Namespace::QueueItem),
             5 => Ok(Namespace::Set),
             6 => Ok(Namespace::SetItem),
-            err => Err(InternalError::InvalidEntry(
-                "Invalid namespace: {err}".into(),
-            )),
+            err => Err(InternalError::InvalidEntry(format!(
+                "Invalid namespace: {err}"
+            ))),
         }
     }
 }
@@ -124,7 +124,7 @@ impl Pair {
 
 #[cfg(test)]
 mod pair_tests {
-    use super::{Namespace, Pair, RawPair};
+    use super::{Namespace, Pair};
     use sphur::Sphur;
 
     #[test]
@@ -555,7 +555,6 @@ impl BucketFile {
 #[cfg(test)]
 mod bucket_file_tests {
     use super::*;
-    use tempfile::tempfile;
 
     const TEST_CAP: usize = 16;
 
@@ -842,10 +841,12 @@ impl Bucket {
         Ok(count)
     }
 
+    #[allow(unused)]
     pub fn get_threshold(&self) -> InternalResult<usize> {
         Ok(self.file.threshold)
     }
 
+    #[allow(unused)]
     pub fn get_capacity(&self) -> InternalResult<usize> {
         Ok(self.file.capacity)
     }
@@ -944,7 +945,7 @@ mod bucket_tests {
 
         // second session
         {
-            let mut bucket2 = Bucket::open(&path, TEST_CAP).unwrap();
+            let bucket2 = Bucket::open(&path, TEST_CAP).unwrap();
             let got = bucket2.get(key.clone()).unwrap();
 
             assert_eq!(got, Some(b"v".to_vec()));
@@ -1204,10 +1205,7 @@ mod bucket_tests {
         }
 
         // the next insert should be rejected (returns false)
-        assert_eq!(
-            bucket.set((vec![0xFF], b"overflow".to_vec())).unwrap(),
-            false
-        );
+        assert!(bucket.set((vec![0xFF], b"overflow".to_vec())).is_err());
 
         // delete one and now insert should succeed
         bucket.del(vec![1]).unwrap();

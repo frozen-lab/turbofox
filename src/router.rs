@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::path::Path;
 
 use crate::{
     bucket::{Bucket, Key, KeyValue},
@@ -97,7 +94,7 @@ mod tests {
         let name = "testbucket";
         let capacity = 128;
 
-        let router = Router::open(dir.path(), name, capacity).unwrap();
+        let _router = Router::open(dir.path(), name, capacity).unwrap();
 
         // check file created with correct name
         let expected = dir.path().join(format!("{name}_{capacity}"));
