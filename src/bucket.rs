@@ -3,7 +3,7 @@
 //! fix sized, memory-mapped Header.
 
 use crate::error::{InternalError, InternalResult};
-use hasher::{Hasher, EMPTY_SIGN, TOMBSTONE_SIGN};
+use crate::hasher::{Hasher, EMPTY_SIGN, TOMBSTONE_SIGN};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},

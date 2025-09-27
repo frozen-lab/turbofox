@@ -1,8 +1,8 @@
 /// Used as a tombstone state for a signature for deleated entries in [Bucket]
-pub const TOMBSTONE_SIGN: u32 = 1u32;
+pub(crate) const TOMBSTONE_SIGN: u32 = 1u32;
 
 /// Used as a default state for a signature for entry in [Bucket]
-pub const EMPTY_SIGN: u32 = 0u32;
+pub(crate) const EMPTY_SIGN: u32 = 0u32;
 
 /// Default seed for [XxHash32]
 const DEFAULT_SEED: u32 = 0;
@@ -10,7 +10,7 @@ const DEFAULT_SEED: u32 = 0;
 /// Magic constant to substitute for reserved signatures
 const REPLACEMENT: u32 = 0x6052_c9b7;
 
-pub struct Hasher;
+pub(crate) struct Hasher;
 
 impl Hasher {
     pub fn new(buf: &[u8]) -> u32 {
@@ -117,8 +117,7 @@ impl Accumulator {
         ])
     }
 
-    #[inline]
-    fn write(&mut self, lanes: Lanes) {
+    const fn write(&mut self, lanes: Lanes) {
         let [acc1, acc2, acc3, acc4] = &mut self.0;
         let [l1, l2, l3, l4] = lanes;
 
@@ -128,8 +127,7 @@ impl Accumulator {
         *acc4 = Self::round(*acc4, l4.to_le());
     }
 
-    #[inline]
-    fn write_many<'d>(&mut self, mut data: &'d [u8]) -> &'d [u8] {
+    const fn write_many<'d>(&mut self, mut data: &'d [u8]) -> &'d [u8] {
         while let Some((chunk, rest)) = data.split_first_chunk::<BYTES_IN_LANE>() {
             let lanes = unsafe { chunk.as_ptr().cast::<Lanes>().read_unaligned() };
             self.write(lanes);
@@ -139,7 +137,6 @@ impl Accumulator {
         data
     }
 
-    #[inline]
     const fn finish(&self) -> u32 {
         let [acc1, acc2, acc3, acc4] = self.0;
 
@@ -153,10 +150,10 @@ impl Accumulator {
             .wrapping_add(acc4)
     }
 
-    #[inline]
     const fn round(mut acc: u32, lane: u32) -> u32 {
         acc = acc.wrapping_add(lane.wrapping_mul(PRIME32_2));
         acc = acc.rotate_left(13);
+
         acc.wrapping_mul(PRIME32_1)
     }
 }
@@ -232,7 +229,7 @@ mod accumulator_tests {
 }
 
 #[derive(Clone, PartialEq)]
-pub struct XxHash32 {
+struct XxHash32 {
     seed: u32,
     length: u64,
     accumulator: Accumulator,

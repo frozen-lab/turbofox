@@ -1,11 +1,13 @@
 use log::{Level, Record};
 
 #[derive(Clone)]
-pub struct Logger {
+#[allow(unused)]
+pub(crate) struct Logger {
     pub enabled: bool,
     pub target: String,
 }
 
+#[allow(unused)]
 impl Logger {
     pub fn new(enabled: bool, target: impl Into<String>) -> Self {
         Self {
@@ -15,7 +17,7 @@ impl Logger {
     }
 
     #[inline]
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 

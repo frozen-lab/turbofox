@@ -3,6 +3,8 @@ use std::path::Path;
 
 mod bucket;
 mod error;
+mod hasher;
+mod logger;
 mod router;
 
 pub struct TurboCache {
