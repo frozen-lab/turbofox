@@ -4,8 +4,6 @@ use std::path::Path;
 mod bucket;
 mod error;
 mod hasher;
-#[macro_use]
-mod log_macros;
 mod logger;
 mod router;
 
@@ -23,13 +21,11 @@ impl TurboCache {
         std::fs::create_dir_all(&dirpath)?;
 
         let router = Router::open(dirpath, name, capacity)?;
-
         Ok(Self { router })
     }
 
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<bool> {
         let pair = (key.to_vec(), value.to_vec());
-
         Ok(self.router.set(pair)?)
     }
 
