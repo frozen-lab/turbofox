@@ -6,11 +6,12 @@ description = "A persistant and embedded KV Database built for on-device caching
 license = "Apache-2.0"
 repository = "https://github.com/frozen-lab/turbocache"
 keywords = ["key-value", "database", "persistent", "store", "simd"]
+exclude = ["flake.nix", "flake.lock", "logger/", "hasher/"]
 
 [dependencies]
 memmap2 = "0.9.7"
-hasher = {path = "./hasher"}
-logger = {path = "./logger"}
+hasher = {path = "./hasher", version = "0.1.0"}
+logger = {path = "./logger", version = "0.1.0"}
 
 [dev-dependencies]
 sphur = "0.2.0"
