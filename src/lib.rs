@@ -4,6 +4,8 @@ use std::path::Path;
 mod bucket;
 mod error;
 mod hasher;
+#[macro_use]
+mod log_macros;
 mod logger;
 mod router;
 

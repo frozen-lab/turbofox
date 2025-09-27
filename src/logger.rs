@@ -35,65 +35,30 @@ impl Logger {
         log::logger().log(&record);
     }
 
-    #[inline]
-    pub fn trace_args(&self, args: std::fmt::Arguments) {
-        self.log_args(Level::Trace, args)
+    #[inline(always)]
+    pub fn trace(&self, msg: impl std::fmt::Display) {
+        self.log_args(Level::Trace, format_args!("{}", msg))
     }
 
-    #[inline]
-    pub fn debug_args(&self, args: std::fmt::Arguments) {
-        self.log_args(Level::Debug, args)
+    #[inline(always)]
+    pub fn debug(&self, msg: impl std::fmt::Display) {
+        self.log_args(Level::Debug, format_args!("{}", msg))
     }
 
-    #[inline]
-    pub fn info_args(&self, args: std::fmt::Arguments) {
-        self.log_args(Level::Info, args)
+    #[inline(always)]
+    pub fn info(&self, msg: impl std::fmt::Display) {
+        self.log_args(Level::Info, format_args!("{}", msg))
     }
 
-    #[inline]
-    pub fn warn_args(&self, args: std::fmt::Arguments) {
-        self.log_args(Level::Warn, args)
+    #[inline(always)]
+    pub fn warn(&self, msg: impl std::fmt::Display) {
+        self.log_args(Level::Warn, format_args!("{}", msg))
     }
 
-    #[inline]
-    pub fn error_args(&self, args: std::fmt::Arguments) {
-        self.log_args(Level::Error, args)
+    #[inline(always)]
+    pub fn error(&self, msg: impl std::fmt::Display) {
+        self.log_args(Level::Error, format_args!("{}", msg))
     }
-}
-
-#[macro_export]
-macro_rules! tracef {
-    ($logger:expr, $($arg:tt)+) => {
-        $logger.trace_args(format_args!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! debugf {
-    ($logger:expr, $($arg:tt)+) => {
-        $logger.debug_args(format_args!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! infof {
-    ($logger:expr, $($arg:tt)+) => {
-        $logger.info_args(format_args!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! warnf {
-    ($logger:expr, $($arg:tt)+) => {
-        $logger.warn_args(format_args!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! errorf {
-    ($logger:expr, $($arg:tt)+) => {
-        $logger.error_args(format_args!($($arg)+))
-    };
 }
 
 #[cfg(test)]
@@ -152,10 +117,10 @@ mod tests {
         let buf = init_test_logger(Level::Trace);
         let logger = Logger::new(true, "unit_test");
 
-        debugf!(logger, "debug message {}", 1);
-        infof!(logger, "info message");
-        warnf!(logger, "warning!");
-        errorf!(logger, "error!");
+        logger.debug(format_args!("debug message {}", 1));
+        logger.info("info message");
+        logger.warn("warning!");
+        logger.error("error!");
 
         let logs = buf.lock().unwrap().clone();
 
