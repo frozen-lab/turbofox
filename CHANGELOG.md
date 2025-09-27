@@ -1,3 +1,7 @@
+## 0.1.0 (BREAKING)
+
+- Simple fixed sized bucket w/ linear lookup.
+
 ## 0.0.5
 
 - Improved performance
