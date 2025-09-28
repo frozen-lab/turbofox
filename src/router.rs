@@ -5,6 +5,7 @@ use crate::{
     error::InternalResult,
 };
 
+#[derive(Debug)]
 pub(crate) struct Router {
     bucket: Bucket,
 }

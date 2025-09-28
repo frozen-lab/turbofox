@@ -230,6 +230,7 @@ impl Meta {
 /// Bucket File
 /// ----------------------------------------
 
+#[derive(Debug)]
 struct BucketFile {
     mmap: MmapMut,
     file: File,
@@ -720,6 +721,7 @@ mod bucket_file_tests {
 /// Bucket
 /// ----------------------------------------
 
+#[derive(Debug)]
 pub(crate) struct Bucket {
     file: BucketFile,
 }

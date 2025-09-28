@@ -1,5 +1,12 @@
-use crate::{error::TurboResult, router::Router};
-use std::path::Path;
+use crate::{
+    error::{TurboError, TurboResult},
+    router::Router,
+};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 mod bucket;
 mod error;
@@ -8,37 +15,130 @@ mod logger;
 mod router;
 
 pub struct TurboCache {
-    router: Router,
+    dirpath: PathBuf,
+    config: TurboConfig,
+    buckets: HashMap<&'static str, InternalTurboBucket>,
 }
 
 impl TurboCache {
-    pub fn new<P: AsRef<Path>>(
-        dirpath: P,
-        name: &'static str,
-        capacity: usize,
-    ) -> TurboResult<Self> {
-        // make sure the dir exists
-        std::fs::create_dir_all(&dirpath)?;
+    const DEFAULT: &'static str = "default";
 
-        let router = Router::open(dirpath, name, capacity)?;
-        Ok(Self { router })
+    pub fn new<P: AsRef<Path>>(dirpath: P, config: TurboConfig) -> TurboResult<Self> {
+        // make sure the dir exists
+        fs::create_dir_all(&dirpath)?;
+
+        Ok(Self {
+            dirpath: dirpath.as_ref().to_path_buf(),
+            config: config,
+            buckets: HashMap::new(),
+        })
     }
 
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<bool> {
-        let pair = (key.to_vec(), value.to_vec());
-        Ok(self.router.set(pair)?)
+        self.bucket(Self::DEFAULT, None).set(key, value)
     }
 
     pub fn get(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
-        Ok(self.router.get(key.to_vec())?)
+        self.bucket(Self::DEFAULT, None).get(key)
     }
 
     pub fn del(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
-        Ok(self.router.del(key.to_vec())?)
+        self.bucket(Self::DEFAULT, None).del(key)
     }
 
-    pub fn get_inserted_count(&self) -> TurboResult<usize> {
-        Ok(self.router.get_insert_count()?)
+    pub fn get_inserted_count(&mut self) -> TurboResult<usize> {
+        self.bucket(Self::DEFAULT, None).get_inserted_count()
+    }
+
+    pub fn bucket(&mut self, name: &'static str, config: Option<TurboConfig>) -> TurboBucket<'_> {
+        if !self.buckets.contains_key(name) {
+            let cfg = config.unwrap_or_else(|| self.config.clone());
+            self.buckets.insert(
+                name,
+                InternalTurboBucket {
+                    config: cfg,
+                    router: None,
+                },
+            );
+        }
+
+        TurboBucket { name, cache: self }
+    }
+
+    fn get_or_init_router(&mut self, name: &'static str) -> TurboResult<&mut Router> {
+        if let Some(entry) = self.buckets.get_mut(name) {
+            if entry.router.is_none() {
+                let router = Router::open(&self.dirpath, name, entry.config.capacity)?;
+                entry.router = Some(router);
+            }
+
+            return Ok(entry.router.as_mut().unwrap());
+        }
+
+        // HACK: This should never occur!
+        Err(TurboError::Unknown("Bucket not found".into()))
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct TurboConfig {
+    pub capacity: usize,
+    pub growable: bool,
+}
+
+impl Default for TurboConfig {
+    #[inline(always)]
+    fn default() -> Self {
+        Self {
+            capacity: 1024,
+            growable: true,
+        }
+    }
+}
+
+impl TurboConfig {
+    #[inline(always)]
+    pub const fn capacity(mut self, cap: usize) -> Self {
+        self.capacity = cap;
+        self
+    }
+
+    #[inline(always)]
+    pub const fn growable(mut self, grow: bool) -> Self {
+        self.growable = grow;
+        self
+    }
+}
+
+struct InternalTurboBucket {
+    config: TurboConfig,
+    router: Option<Router>,
+}
+
+pub struct TurboBucket<'a> {
+    name: &'static str,
+    cache: &'a mut TurboCache,
+}
+
+impl<'a> TurboBucket<'a> {
+    pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<bool> {
+        let router = self.cache.get_or_init_router(self.name)?;
+        Ok(router.set((key.to_vec(), value.to_vec()))?)
+    }
+
+    pub fn get(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
+        let router = self.cache.get_or_init_router(self.name)?;
+        Ok(router.get(key.to_vec())?)
+    }
+
+    pub fn del(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
+        let router = self.cache.get_or_init_router(self.name)?;
+        Ok(router.del(key.to_vec())?)
+    }
+
+    pub fn get_inserted_count(&mut self) -> TurboResult<usize> {
+        let router = self.cache.get_or_init_router(self.name)?;
+        Ok(router.get_insert_count()?)
     }
 }
 
@@ -47,14 +147,20 @@ mod turbo_tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn create_cache(capacity: usize) -> TurboCache {
+    fn create_cache(capacity: usize) -> (TurboCache, TempDir) {
         let tmp = TempDir::new().unwrap();
-        TurboCache::new(tmp.path().to_path_buf(), "test", capacity).unwrap()
+        let cache = TurboCache::new(
+            tmp.path().to_path_buf(),
+            TurboConfig::default().capacity(capacity),
+        )
+        .unwrap();
+
+        (cache, tmp)
     }
 
     #[test]
     fn insert_and_get() {
-        let mut cache = create_cache(10);
+        let (mut cache, _tmp) = create_cache(10);
         let key = b"foo".to_vec();
         let value = b"bar".to_vec();
 
@@ -64,7 +170,7 @@ mod turbo_tests {
 
     #[test]
     fn overwrite_value() {
-        let mut cache = create_cache(10);
+        let (mut cache, _tmp) = create_cache(10);
         let key = b"k1".to_vec();
 
         cache.set(&key, b"v1").unwrap();
@@ -75,7 +181,7 @@ mod turbo_tests {
 
     #[test]
     fn delete_and_exists() {
-        let mut cache = create_cache(10);
+        let (mut cache, _tmp) = create_cache(10);
         let key = b"hello".to_vec();
 
         cache.set(&key, b"world").unwrap();
@@ -88,7 +194,7 @@ mod turbo_tests {
 
     #[test]
     fn total_count_reflects_inserts_and_deletes() {
-        let mut cache = create_cache(10);
+        let (mut cache, _tmp) = create_cache(10);
 
         for i in 0..5 {
             cache.set(&[i], &[i]).unwrap();
@@ -104,7 +210,7 @@ mod turbo_tests {
 
     #[test]
     fn get_non_existent_key_returns_none() {
-        let mut cache = create_cache(10);
+        let (mut cache, _tmp) = create_cache(10);
         assert_eq!(cache.get(b"nope").unwrap(), None);
     }
 }
