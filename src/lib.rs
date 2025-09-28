@@ -213,4 +213,62 @@ mod turbo_tests {
         let (mut cache, _tmp) = create_cache(10);
         assert_eq!(cache.get(b"nope").unwrap(), None);
     }
+
+    #[test]
+    fn default_bucket_works_out_of_box() {
+        let (mut cache, _tmp) = create_cache(5);
+        cache.set(b"default-key", b"default-val").unwrap();
+
+        assert_eq!(
+            cache.get(b"default-key").unwrap(),
+            Some(b"default-val".to_vec())
+        );
+    }
+
+    #[test]
+    fn named_bucket_with_custom_config() {
+        let (mut cache, _tmp) = create_cache(5);
+        let mut users = cache.bucket("users", Some(TurboConfig::default().capacity(50)));
+
+        users.set(b"uid1", b"john").unwrap();
+        users.set(b"uid2", b"jane").unwrap();
+
+        assert_eq!(users.get(b"uid1").unwrap(), Some(b"john".to_vec()));
+        assert_eq!(users.get(b"uid2").unwrap(), Some(b"jane".to_vec()));
+    }
+
+    #[test]
+    fn bucket_inherits_global_config_if_not_provided() {
+        let (mut cache, _tmp) = create_cache(123);
+
+        cache.bucket("products", None);
+        let entry = cache.buckets.get("products").unwrap();
+        assert_eq!(entry.config.capacity, 123);
+
+        let mut products = cache.bucket("products", None);
+        products.set(b"p1", b"item").unwrap();
+        assert_eq!(products.get(b"p1").unwrap(), Some(b"item".to_vec()));
+    }
+
+    #[test]
+    fn router_is_lazy_initialized() {
+        let (mut cache, _tmp) = create_cache(5);
+
+        assert!(cache.buckets.get("orders").is_none());
+
+        {
+            let mut orders = cache.bucket("orders", None);
+            orders.set(b"id1", b"pending").unwrap();
+        }
+
+        assert!(cache.buckets.get("orders").unwrap().router.is_some());
+    }
+
+    #[test]
+    fn error_on_nonexistent_bucket_router() {
+        let (mut cache, _tmp) = create_cache(5);
+        let result = cache.get_or_init_router("ghost");
+
+        assert!(result.is_err());
+    }
 }
