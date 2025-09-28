@@ -34,7 +34,7 @@ impl Router {
         self.bucket.get_inserted_count()
     }
 
-    pub fn set(&mut self, pair: KeyValue) -> InternalResult<bool> {
+    pub fn set(&mut self, pair: KeyValue) -> InternalResult<()> {
         self.bucket.set(pair)
     }
 
@@ -154,8 +154,11 @@ mod tests {
         let key = Key::from("foo");
         let value = b"bar".to_vec();
 
-        let inserted = router.set((key.clone(), value.clone())).unwrap();
-        assert!(inserted, "Set should return true on first insert");
+        let inserted = router.set((key.clone(), value.clone()));
+        assert!(
+            inserted.is_ok(),
+            "Set should not return `Err()` on first insert"
+        );
 
         let retrieved = router.get(key.clone()).unwrap();
         assert_eq!(retrieved, Some(value));
@@ -202,8 +205,8 @@ mod tests {
             let key = Key::from(format!("key{i}"));
             let value = format!("val{i}").into_bytes();
 
-            let inserted = router.set((key, value)).unwrap();
-            assert!(inserted);
+            let inserted = router.set((key, value));
+            assert!(inserted.is_ok());
         }
 
         // Next insert should error

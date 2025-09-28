@@ -15,7 +15,7 @@ pub enum TurboError {
     /// The bucket has reached its maximum size and cannot grow further.
     ///
     /// The associated `usize` indicates the capacity at which it failed.
-    BucketOverflow(usize),
+    BucketOverflow,
 
     /// A fallback for unexpected or uncategorized errors.
     Unknown(String),
@@ -25,7 +25,7 @@ impl From<InternalError> for TurboError {
     fn from(err: InternalError) -> Self {
         match err {
             InternalError::Io(e) => TurboError::Io(e),
-            InternalError::BucketOverflow(n) => TurboError::BucketOverflow(n),
+            InternalError::BucketOverflow => TurboError::BucketOverflow,
             _ => TurboError::Unknown("Unknown error has occurred".into()),
         }
     }
@@ -42,10 +42,9 @@ impl std::fmt::Display for TurboError {
         match self {
             TurboError::Io(err) => write!(f, "I/O error: {err}"),
             TurboError::Unknown(err) => write!(f, "Unknown error: {err}"),
-            TurboError::BucketOverflow(n) => write!(
-                f,
-                "Overflow: Bucket is full and can not grow beyound {n} pairs"
-            ),
+            TurboError::BucketOverflow => {
+                write!(f, "Overflow: Bucket is full and can not grow any further")
+            }
         }
     }
 }
@@ -99,8 +98,7 @@ pub(crate) enum InternalError {
     /// - The insertion offset has reached its max cap of `2^40 - 1` i.e `u40::Max`
     ///
     /// NOTE: This is rare, but acts as a guard rail to prevent crash.
-    #[allow(unused)]
-    BucketOverflow(usize),
+    BucketOverflow,
 }
 
 impl From<std::io::Error> for InternalError {

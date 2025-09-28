@@ -81,10 +81,19 @@ struct Pair {
     offset: u64,
 }
 
-type RawPair = [u8; 10];
+type PairBytes = [u8; 10];
 
 impl Pair {
-    fn to_raw(&self) -> RawPair {
+    fn to_raw(&self) -> InternalResult<PairBytes> {
+        //
+        // Overflow check for [self.offset]
+        //
+        // NOTE: [self.offset] can not grow beyound (2^40 - 1)
+        //
+        if (self.offset & !((1u64 << 40) - 1)) != 0 {
+            return Err(InternalError::BucketOverflow);
+        };
+
         let mut out = [0u8; 10];
 
         // namespace
@@ -100,10 +109,10 @@ impl Pair {
         let offset_bytes = self.offset.to_le_bytes();
         out[5..10].copy_from_slice(&offset_bytes[..5]);
 
-        out
+        Ok(out)
     }
 
-    fn from_raw(slice: RawPair) -> InternalResult<Pair> {
+    fn from_raw(slice: PairBytes) -> InternalResult<Pair> {
         let ns = Namespace::try_from(slice[0])?;
 
         let klen = u16::from_le_bytes([slice[1], slice[2]]);
@@ -136,7 +145,7 @@ mod pair_tests {
             vlen: 200,
         };
 
-        let encoded = p.to_raw();
+        let encoded = p.to_raw().expect("Encode raw pair");
         let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
         assert_eq!(p.ns, decoded.ns);
@@ -154,7 +163,7 @@ mod pair_tests {
             vlen: 0,
         };
 
-        let encoded = p.to_raw();
+        let encoded = p.to_raw().expect("Encode raw pair");
         let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
         assert_eq!(p, decoded);
@@ -170,7 +179,7 @@ mod pair_tests {
             vlen: max_vlen,
         };
 
-        let encoded = p2.to_raw();
+        let encoded = p2.to_raw().expect("Encode raw pair");
         let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
         assert_eq!(p2, decoded);
@@ -195,11 +204,30 @@ mod pair_tests {
                 vlen,
             };
 
-            let encoded = p.to_raw();
+            let encoded = p.to_raw().expect("Encode raw pair");
             let decoded = Pair::from_raw(encoded).expect("Decode raw pair");
 
             assert_eq!(p, decoded, "Failed at iteration {i}");
         }
+    }
+
+    #[test]
+    fn test_offset_guard() {
+        let valid = Pair {
+            ns: Namespace::Base,
+            offset: (1u64 << 40) - 1,
+            klen: 10,
+            vlen: 10,
+        };
+        assert!(valid.to_raw().is_ok());
+
+        let invalid = Pair {
+            ns: Namespace::Base,
+            offset: 1u64 << 40,
+            klen: 10,
+            vlen: 10,
+        };
+        assert!(invalid.to_raw().is_err());
     }
 }
 
@@ -342,7 +370,7 @@ impl BucketFile {
     /// `sizeof(Meta) + (sizeof(Sign) * CAP) + (sizeof(PairRaw) * CAP)`
     #[inline(always)]
     const fn calc_header_size(capacity: usize) -> usize {
-        size_of::<Meta>() + (size_of::<Sign>() * capacity) + (size_of::<RawPair>() * capacity)
+        size_of::<Meta>() + (size_of::<Sign>() * capacity) + (size_of::<PairBytes>() * capacity)
     }
 
     /// Calculate threshold w/ given capacity for [Bucket]
@@ -382,18 +410,18 @@ impl BucketFile {
 
     /// Read a single [PairRaw] from an index, directly from the mmap
     #[inline(always)]
-    fn get_pair(&self, idx: usize) -> RawPair {
+    fn get_pair(&self, idx: usize) -> PairBytes {
         unsafe {
-            let ptr = self.mmap.as_ptr().add(self.pair_offset) as *const RawPair;
+            let ptr = self.mmap.as_ptr().add(self.pair_offset) as *const PairBytes;
             *ptr.add(idx)
         }
     }
 
     /// Write a new [PairRaw] at given index
     #[inline(always)]
-    fn set_pair(&mut self, idx: usize, pair: RawPair) {
+    fn set_pair(&mut self, idx: usize, pair: PairBytes) {
         unsafe {
-            let ptr = self.mmap.as_mut_ptr().add(self.pair_offset) as *mut RawPair;
+            let ptr = self.mmap.as_mut_ptr().add(self.pair_offset) as *mut PairBytes;
             *ptr.add(idx) = pair;
         }
     }
@@ -417,7 +445,7 @@ impl BucketFile {
     }
 
     /// Read a [KeyValue] from a given [PairRaw]
-    fn get_slot(&self, raw: RawPair) -> InternalResult<KeyValue> {
+    fn get_slot(&self, raw: PairBytes) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(raw)?;
         let klen = pair.klen as usize;
         let vlen = pair.vlen as usize;
@@ -432,7 +460,7 @@ impl BucketFile {
     }
 
     /// Write a [KeyValue] to the bucket and get [Pair]
-    fn set_slot(&self, pair: &KeyValue) -> InternalResult<RawPair> {
+    fn set_slot(&self, pair: &KeyValue) -> InternalResult<PairBytes> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
         let blen = klen + vlen;
@@ -456,7 +484,8 @@ impl BucketFile {
             ns: Namespace::Base,
         };
 
-        Ok(pair.to_raw())
+        let raw = pair.to_raw()?;
+        Ok(raw)
     }
 
     #[allow(unused)]
@@ -486,6 +515,7 @@ impl BucketFile {
             idx = (idx + 1) % self.capacity;
         }
 
+        // HACK: This should never reach
         Err(InternalError::BucketFull)
     }
 
@@ -691,11 +721,11 @@ mod bucket_file_tests {
             ns: Namespace::Base,
         };
 
-        let pair = fake_pair.to_raw();
+        let pair = fake_pair.to_raw().expect("Encode raw pair");
         bucket.set_pair(7, pair);
 
         let got_pair = bucket.get_pair(7);
-        let got_off = Pair::from_raw(got_pair).unwrap();
+        let got_off = Pair::from_raw(got_pair).expect("Decode raw pair");
 
         assert_eq!(got_off.klen, 1);
         assert_eq!(got_off.vlen, 2);
@@ -754,7 +784,7 @@ impl Bucket {
         Ok(Self { file })
     }
 
-    pub fn set(&mut self, kv: KeyValue) -> InternalResult<bool> {
+    pub fn set(&mut self, kv: KeyValue) -> InternalResult<()> {
         let sign = Hasher::new(&kv.0);
 
         // threshold has reached, so pair can not be inserted
@@ -775,7 +805,7 @@ impl Bucket {
         self.file.set_sign(idx, sign);
         self.file.set_pair(idx, pair);
 
-        return Ok(true);
+        return Ok(());
     }
 
     pub fn get(&self, key: Key) -> InternalResult<Option<Vec<u8>>> {
@@ -1202,7 +1232,6 @@ mod bucket_tests {
         // fill until threshold
         for i in 0..threshold {
             let key = vec![(i as u8).wrapping_add(1)];
-
             bucket.set((key, vec![0u8])).unwrap();
         }
 
@@ -1212,10 +1241,7 @@ mod bucket_tests {
         // delete one and now insert should succeed
         bucket.del(vec![1]).unwrap();
 
-        assert_eq!(
-            bucket.set((vec![0xFF], b"overflow".to_vec())).unwrap(),
-            true
-        );
+        assert!(bucket.set((vec![0xFF], b"overflow".to_vec())).is_ok());
 
         // live count should equal threshold again
         assert_eq!(bucket.get_inserted_count().unwrap(), threshold);

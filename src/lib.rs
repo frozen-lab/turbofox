@@ -33,15 +33,25 @@ impl TurboCache {
         })
     }
 
-    pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<bool> {
+    pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<()> {
+        // sanity checks
+        debug_assert!(key.len() < u16::MAX as usize, "Key is too large");
+        debug_assert!(key.len() < u16::MAX as usize, "Value is too large");
+
         self.bucket(Self::DEFAULT, None).set(key, value)
     }
 
     pub fn get(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
+        // sanity checks
+        debug_assert!(key.len() < u16::MAX as usize, "Key is too large");
+
         self.bucket(Self::DEFAULT, None).get(key)
     }
 
     pub fn del(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
+        // sanity checks
+        debug_assert!(key.len() < u16::MAX as usize, "Key is too large");
+
         self.bucket(Self::DEFAULT, None).del(key)
     }
 
@@ -120,7 +130,7 @@ pub struct TurboBucket<'a> {
 }
 
 impl<'a> TurboBucket<'a> {
-    pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<bool> {
+    pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<()> {
         let router = self.cache.get_or_init_router(self.name)?;
         Ok(router.set((key.to_vec(), value.to_vec()))?)
     }
