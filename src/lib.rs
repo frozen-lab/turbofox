@@ -1,7 +1,4 @@
-use crate::{
-    error::{TurboError, TurboResult},
-    router::Router,
-};
+use crate::router::Router;
 use std::{
     collections::HashMap,
     fs,
@@ -13,6 +10,8 @@ mod error;
 mod hasher;
 mod logger;
 mod router;
+
+pub use crate::error::{TurboError, TurboResult};
 
 pub struct TurboCache {
     dirpath: PathBuf,
