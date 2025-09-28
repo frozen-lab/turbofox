@@ -1,4 +1,5 @@
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[allow(unused)]
 pub(crate) enum ISA {
     // This SIMD ISA is an upgrade over SSE2 if available at runtime
     AVX2,
@@ -13,7 +14,8 @@ pub(crate) enum ISA {
 
 impl ISA {
     #[cfg(target_arch = "x86_64")]
-    fn detect_isa() -> ISA {
+    #[inline(always)]
+    pub fn detect_isa() -> ISA {
         if is_x86_feature_detected!("avx2") {
             return ISA::AVX2;
         }
@@ -22,7 +24,8 @@ impl ISA {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn detect_isa() -> ISA {
+    #[inline(always)]
+    pub const fn detect_isa() -> ISA {
         ISA::NEON
     }
 }

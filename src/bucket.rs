@@ -4,6 +4,7 @@
 
 use crate::error::{InternalError, InternalResult};
 use crate::hasher::{Hasher, EMPTY_SIGN, TOMBSTONE_SIGN};
+use crate::simd::ISA;
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
@@ -261,6 +262,7 @@ impl Meta {
 #[derive(Debug)]
 struct BucketFile {
     mmap: MmapMut,
+    isa: ISA,
     file: File,
     capacity: usize,
     header_size: usize,
@@ -302,6 +304,7 @@ impl BucketFile {
             sign_offset,
             pair_offset,
             threshold,
+            isa: ISA::detect_isa(),
         })
     }
 
@@ -360,6 +363,7 @@ impl BucketFile {
             sign_offset,
             pair_offset,
             threshold,
+            isa: ISA::detect_isa(),
         })
     }
 
