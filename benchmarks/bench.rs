@@ -1,10 +1,14 @@
 use std::time::Instant;
 use tempfile::TempDir;
-use turbocache::TurboCache;
+use turbocache::{TurboCache, TurboConfig};
 
-fn create_cache(capacity: usize, name: &'static str) -> TurboCache {
+fn create_cache(capacity: usize) -> TurboCache {
     let tmp = TempDir::new().unwrap();
-    TurboCache::new(tmp.path().to_path_buf(), name, capacity).unwrap()
+    TurboCache::new(
+        tmp.path().to_path_buf(),
+        TurboConfig::default().capacity(capacity),
+    )
+    .unwrap()
 }
 
 fn fetch_system_info() {
@@ -66,10 +70,13 @@ fn fetch_system_info() {
     println!("| RAM (GB)        | {:>28.2} |", total_mem_gb);
 }
 
-fn bench_operations<F>(mut func: F, iter: usize, ops: usize) -> f64
+fn bench_operations<F>(mut func: F) -> f64
 where
     F: FnMut() -> (),
 {
+    let iter: usize = 100;
+    let ops: usize = 4_096;
+
     let mut results = Vec::with_capacity(iter);
 
     // Warm-up
@@ -96,42 +103,24 @@ where
 }
 
 fn bench_set() -> f64 {
-    let mut cache = create_cache(2_500, "set_ops");
-    let bench = bench_operations(
-        || {
-            let _ = cache.set(&[1], &[2]);
-        },
-        50,
-        10000,
-    );
-
-    bench
+    let mut cache = create_cache(2_500);
+    bench_operations(|| {
+        let _ = cache.set(&[1], &[2]);
+    })
 }
 
 fn bench_get() -> f64 {
-    let mut cache = create_cache(2_500, "get_ops");
-    let bench = bench_operations(
-        || {
-            let _ = cache.get(&[1]);
-        },
-        50,
-        10000,
-    );
-
-    bench
+    let mut cache = create_cache(2_500);
+    bench_operations(|| {
+        let _ = cache.get(&[1]);
+    })
 }
 
 fn bench_del() -> f64 {
-    let mut cache = create_cache(2_500, "del_ops");
-    let bench = bench_operations(
-        || {
-            let _ = cache.del(&[1]);
-        },
-        50,
-        10000,
-    );
-
-    bench
+    let mut cache = create_cache(2_500);
+    bench_operations(|| {
+        let _ = cache.del(&[1]);
+    })
 }
 
 fn main() {
