@@ -2,6 +2,12 @@ use std::time::Instant;
 use tempfile::TempDir;
 use turbocache::{TurboCache, TurboConfig};
 
+// -----------------------------------------------------------------------------
+// Compile guard!
+// -----------------------------------------------------------------------------
+#[cfg(not(any(target_arch = "x86_64", target_os = "linux")))]
+compile_error!("[ERROR]: This bench requires 64-bit Linux runtime. Others are not supported.");
+
 fn create_cache(capacity: usize) -> TurboCache {
     let tmp = TempDir::new().unwrap();
     TurboCache::new(

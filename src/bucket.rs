@@ -381,13 +381,11 @@ impl BucketFile {
         cap.saturating_mul(4) / 5
     }
 
-    /// Returns an immutable reference to [Meta]
     #[inline(always)]
     fn meta(&self) -> &Meta {
         unsafe { &*(self.mmap.as_ptr() as *const Meta) }
     }
 
-    /// Returns a mutable reference to [Meta]
     #[inline(always)]
     fn meta_mut(&self) -> &mut Meta {
         unsafe { &mut *(self.mmap.as_ptr() as *mut Meta) }
@@ -408,7 +406,6 @@ impl BucketFile {
         self.meta_mut().inserts.fetch_sub(1, Ordering::Release);
     }
 
-    /// Read a single [PairRaw] from an index, directly from the mmap
     #[inline(always)]
     fn get_pair(&self, idx: usize) -> PairBytes {
         unsafe {
@@ -417,7 +414,6 @@ impl BucketFile {
         }
     }
 
-    /// Write a new [PairRaw] at given index
     #[inline(always)]
     fn set_pair(&mut self, idx: usize, pair: PairBytes) {
         unsafe {
@@ -426,7 +422,6 @@ impl BucketFile {
         }
     }
 
-    /// Returns an immutable reference to signatures slice
     #[inline(always)]
     fn get_signs(&self) -> &[Sign] {
         unsafe {
@@ -435,7 +430,6 @@ impl BucketFile {
         }
     }
 
-    /// Write a new [Sign] at given index
     #[inline(always)]
     fn set_sign(&mut self, idx: usize, sign: Sign) {
         unsafe {
@@ -444,7 +438,7 @@ impl BucketFile {
         }
     }
 
-    /// Read a [KeyValue] from a given [PairRaw]
+    /// Read a [KeyValue] from a given [PairBytes]
     fn get_slot(&self, raw: PairBytes) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(raw)?;
         let klen = pair.klen as usize;
@@ -459,7 +453,7 @@ impl BucketFile {
         Ok((buf, vbuf))
     }
 
-    /// Write a [KeyValue] to the bucket and get [Pair]
+    /// Write a [KeyValue] to the bucket and get [PairBytes]
     fn set_slot(&self, pair: &KeyValue) -> InternalResult<PairBytes> {
         let klen = pair.0.len();
         let vlen = pair.1.len();
@@ -488,7 +482,6 @@ impl BucketFile {
         Ok(raw)
     }
 
-    #[allow(unused)]
     fn lookup_slot(
         &self,
         mut idx: usize,
@@ -784,6 +777,10 @@ impl Bucket {
         Ok(Self { file })
     }
 
+    /// ## Errors
+    ///
+    /// - throws [InternalError::BucketFull] if slots are full (need to grow the bucket)
+    /// - throws [InternalError::BucketOverflow] when bucket is full (can not be grown further)
     pub fn set(&mut self, kv: KeyValue) -> InternalResult<()> {
         let sign = Hasher::new(&kv.0);
 

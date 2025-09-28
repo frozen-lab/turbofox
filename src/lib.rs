@@ -10,6 +10,7 @@ mod error;
 mod hasher;
 mod logger;
 mod router;
+mod simd;
 
 pub use crate::error::{TurboError, TurboResult};
 
