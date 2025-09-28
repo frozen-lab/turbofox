@@ -13,29 +13,21 @@ jobs:
   unit_tests:
     strategy:
       fail-fast: false
-      
       matrix:
         include:
           - os: ubuntu-latest
             arch: x86_64
-            
           - os: ubuntu-24.04-arm
             arch: aarch64
-
           - os: windows-latest
             arch: x86_64
-            
           - os: windows-11-arm
             arch: aarch64
-
           - os: macos-13
             arch: x86_64
-            
           - os: macos-latest
             arch: aarch64
-            
     runs-on: ${{ matrix.os }}
-    
     steps:
       - uses: actions/checkout@v4
 
@@ -70,3 +62,37 @@ jobs:
         env:
           RUSTFLAGS: "-C target-feature=+avx2"
         run: cargo test --workspace --release -- --nocapture
+
+  examples:
+    needs: unit_tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: windows-latest
+            arch: x86_64
+          - os: windows-11-arm
+            arch: aarch64
+          - os: macos-13
+            arch: x86_64
+          - os: macos-latest
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache-key: ${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Default Example
+        run: cargo run --example default --release
+
+      - name: Custom Buckets Example
+        run: cargo run --example custom --release
