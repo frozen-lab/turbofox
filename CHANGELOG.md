@@ -1,3 +1,7 @@
+## 0.1.1
+
+- Impl of `TurboBuckets`
+
 ## 0.1.0 (BREAKING)
 
 - Simple fixed sized bucket w/ linear lookup.
