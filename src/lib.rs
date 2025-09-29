@@ -8,6 +8,7 @@ use std::{
 mod bucket;
 mod error;
 mod hasher;
+mod kosh;
 mod logger;
 mod router;
 mod simd;
