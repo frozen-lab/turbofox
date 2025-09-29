@@ -262,6 +262,7 @@ impl Default for MetaView {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Meta {
     ptr: *mut MetaView,
 }

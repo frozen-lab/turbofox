@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use crate::router::Router;
 use std::{
     collections::HashMap,
@@ -11,7 +13,6 @@ mod hasher;
 mod kosh;
 mod logger;
 mod router;
-mod simd;
 
 pub use crate::error::{TurboError, TurboResult};
 
