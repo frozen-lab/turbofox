@@ -459,6 +459,9 @@ mod meta_tests {
         assert_eq!(meta.get_insert_count(), 0);
 
         // NOTE: For AtomicU64 on underflow it wrapps around. So we must prevent that!
+        // HACK: The code uses `debug_assert!` so there won't be any assertion in
+        // `--release` mode!
+        #[cfg(debug_assertions)]
         assert!(std::panic::catch_unwind(|| meta.decr_insert_count()).is_err());
     }
 }
