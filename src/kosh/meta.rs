@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) const VERSION: u32 = 3;
 pub(crate) const MAGIC: [u8; 4] = *b"TCv3";
 
-pub(crate) type Sign = u32;
 pub(crate) type KeyValue = (Vec<u8>, Vec<u8>);
 pub(crate) type Key = Vec<u8>;
 
@@ -280,6 +279,11 @@ impl Meta {
     }
 
     #[inline(always)]
+    pub fn get_write_pointer(&self) -> u64 {
+        self.meta().write_pointer.load(Ordering::Acquire) as u64
+    }
+
+    #[inline(always)]
     pub fn get_insert_count(&self) -> usize {
         self.meta().inserts.load(Ordering::Acquire) as usize
     }
@@ -362,6 +366,7 @@ mod meta_tests {
         // init
         assert!(meta.is_current_version(), "meta should match MAGIC/VERSION");
         assert_eq!(meta.get_insert_count(), 0);
+        assert_eq!(meta.get_write_pointer(), 0);
 
         // insert incr
         meta.incr_insert_count();
@@ -443,8 +448,13 @@ mod meta_tests {
         assert_eq!(prev_a, 10);
 
         // check final value by reading meta manually
-        let final_wp = unsafe { (&*meta_a.meta()).write_pointer.load(Ordering::Relaxed) };
-        assert_eq!(final_wp, 15);
+        let final_wp_raw = unsafe { (&*meta_a.meta()).write_pointer.load(Ordering::Relaxed) };
+        assert_eq!(final_wp_raw, 15);
+
+        // both [A] & [B] should have same updated write pointer
+        assert_eq!(meta_a.get_write_pointer(), meta_b.get_write_pointer());
+        assert_eq!(meta_a.get_write_pointer(), 15);
+        assert_eq!(meta_b.get_write_pointer(), 15);
     }
 
     #[test]

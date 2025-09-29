@@ -1,7 +1,41 @@
+//! [Patra] (पत्र) is an on disk, append only, custom I/O layer for [Kosh].
+//!
+//! ## File Contents
+//!
+//! ▶ Meta => File metadata (version, magic, stats, etc.)
+//! ▶ Signs => Fixed sized space to store (u32) signatures of key's of pairs stored
+//! ▶ PairBytes => Fixed sized space (u8 * 10) to store Pair offsets (klen, etc.)
+//! ▶ Data => Append only space to store raw KV pairs
+//!
+//! ## On-Disk Layout
+//!
+//! [ 0 <==> size_of::<Meta>() )
+//!    File metadata (signature, version, etc.)
+//!
+//! [ meta_region <==> meta_region + size_of::<Sign>() * capacity )
+//!     Signatures array (4 bytes per slot)
+//!     ├─ slot0_sign : Sign
+//!     ├─ ...
+//!     └─ slot(capacity-1)_sign : Sign
+//!     // Values can be EMPTY_SIGN, TOMBSTONE_SIGN, or Sign
+//!
+//! [ sign_region_end <==> sign_region_end + size_of::<PairBytes>() * capacity )
+//!     Pair offsets array (10 bytes per slot)
+//!     ├─ slot0_pair : PairBytes  // packed { namespace: 8b | position: 40b | klen: 16b | vlen: 16b }
+//!     ├─ ...
+//!     └─ slot(capacity-1)_pair : PairBytes
+//!
+//! [ header_size <==> EOF )
+//!     Data region (variable-length)
+//!     ├─ Entry0: [ key bytes (klen) ][ value bytes (vlen) ]
+//!     ├─ ...
+//!     └─ appended sequentially as write_offset grows
+//!
+
 use crate::{
-    error::InternalResult,
+    error::{InternalError, InternalResult},
     kosh::{
-        meta::{Meta, PairBytes, Sign},
+        meta::{Meta, PairBytes},
         simd::ISA,
     },
 };
@@ -9,7 +43,10 @@ use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
+    usize,
 };
+
+pub(crate) type Sign = u32;
 
 #[derive(Debug)]
 pub(crate) struct Patra {
@@ -30,7 +67,10 @@ struct Stats {
 }
 
 impl Patra {
-    fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+        // sanity check
+        debug_assert!(capacity % 16 == 0, "Capacity must be multiple of 16");
+
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -48,6 +88,74 @@ impl Patra {
 
         let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
         let meta = Meta::new(&mut mmap);
+
+        let isa = ISA::detect_isa();
+        let stats = Stats {
+            header_size,
+            capacity,
+            sign_offset,
+            pair_offset,
+            threshold,
+        };
+
+        Ok(Self {
+            file,
+            mmap,
+            meta,
+            isa,
+            stats,
+        })
+    }
+
+    pub fn open<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+        // sanity check
+        debug_assert!(capacity % 16 == 0, "Capacity must be multiple of 16");
+
+        let file = OpenOptions::new()
+            // Create the file just in case to avoid crash
+            //
+            // NOTE: If we throw IO error for non-existing file it'll be propogated
+            // to the users, so we create the file and throw an invalid file error
+            // as if the file is new, its not a valid [BucketFile] yet!
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+
+        let header_size = Self::calc_header_size(capacity);
+        let sign_offset = size_of::<Meta>();
+        let pair_offset = sign_offset + capacity * size_of::<Sign>();
+        let threshold = Self::calc_threshold(capacity);
+
+        let file_len = file.metadata()?.len();
+
+        // NOTE: If `file.len()` is smaller then `header_size`, it's a sign of
+        // invalid initilization or the file was tampered with! In this scenerio,
+        // we delete the file and create it again!
+        if file_len < header_size as u64 {
+            return Err(InternalError::InvalidFile);
+        }
+
+        let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
+        let meta = Meta::new(&mut mmap);
+
+        // NOTE: while validating version and magic of the file, if not matched,
+        // we should simply delete the file, as we do not have any earlier
+        // versions to support.
+        if !meta.is_current_version() {
+            return Err(InternalError::InvalidFile);
+        }
+
+        // safeguard for the write pointer
+        if meta.get_write_pointer() > file_len {
+            return Err(InternalError::InvalidFile);
+        }
+
+        // safeguard for the insert count
+        if meta.get_insert_count() > capacity {
+            return Err(InternalError::InvalidFile);
+        }
 
         let isa = ISA::detect_isa();
         let stats = Stats {
