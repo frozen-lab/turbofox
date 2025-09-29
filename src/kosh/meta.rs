@@ -1,8 +1,6 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use memmap2::MmapMut;
-
 use crate::error::{InternalError, InternalResult};
+use memmap2::MmapMut;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// ----------------------------------------
 /// Constants and Types
@@ -46,6 +44,39 @@ impl TryFrom<u8> for Namespace {
                 "Invalid namespace: {err_id}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+
+    const VARIANTS: [Namespace; 1] = [Namespace::Base];
+
+    #[test]
+    fn roundtrip_namespace_to_u8_and_back() {
+        for &ns in &VARIANTS {
+            let val: u8 = ns.into();
+            let round = Namespace::try_from(val).expect("roundtrip failed");
+
+            assert_eq!(round, ns, "Namespace {ns:?} did not roundtrip correctly");
+        }
+    }
+
+    #[test]
+    fn invalid_namespace_returns_error() {
+        let valid: Vec<u8> = VARIANTS.iter().map(|&ns| ns.into()).collect();
+
+        for v in 0..=u8::MAX {
+            if !valid.contains(&v) {
+                assert!(Namespace::try_from(v).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn base_namespace_is_zero() {
+        assert_eq!(u8::from(VARIANTS[0]), 0, "First value must be zero!");
     }
 }
 
@@ -258,7 +289,14 @@ impl Meta {
     }
 
     #[inline(always)]
+    /// NOTE: For AtomicU64 on underflow it wraps around. So we must prevent that!
     pub fn decr_insert_count(&self) {
+        // sanity check
+        debug_assert!(
+            self.meta().inserts.load(Ordering::Relaxed) > 0,
+            "Decr must not be called when insert is 0."
+        );
+
         self.meta().inserts.fetch_sub(1, Ordering::Release);
     }
 
@@ -271,5 +309,155 @@ impl Meta {
     pub fn is_current_version(&self) -> bool {
         let meta = self.meta();
         meta.magic == MAGIC && meta.version == VERSION
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_dummy_mmap_file() -> (MmapMut, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("meta.bin");
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open tmp file");
+
+        let header_size = size_of::<MetaView>();
+        file.set_len(header_size as u64).expect("set_len");
+
+        let mut mmap = unsafe { memmap2::MmapOptions::new().len(header_size).map_mut(&file) }
+            .expect("map_mut");
+
+        unsafe {
+            let meta_ptr = mmap.as_mut_ptr() as *mut MetaView;
+            meta_ptr.write(MetaView::default());
+        }
+
+        (mmap, tmp)
+    }
+
+    #[test]
+    fn test_meta_view_default() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        assert_eq!(meta.meta().magic, MAGIC);
+        assert_eq!(meta.meta().version, VERSION);
+        assert_eq!(meta.meta().write_pointer.load(Ordering::Relaxed), 0);
+        assert_eq!(meta.meta().inserts.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn basic_init_and_atomic_ops() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        // init
+        assert!(meta.is_current_version(), "meta should match MAGIC/VERSION");
+        assert_eq!(meta.get_insert_count(), 0);
+
+        // insert incr
+        meta.incr_insert_count();
+        meta.incr_insert_count();
+        assert_eq!(meta.get_insert_count(), 2);
+
+        // insert decr
+        meta.decr_insert_count();
+        assert_eq!(meta.get_insert_count(), 1);
+
+        // write offset
+        let prev = meta.update_write_offset(64);
+        assert_eq!(prev, 0);
+    }
+
+    #[test]
+    fn update_write_offset_works() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        let prev = meta.update_write_offset(64);
+        assert_eq!(prev, 0);
+
+        let prev2 = meta.update_write_offset(16);
+        assert_eq!(prev2, 64);
+
+        let wp = unsafe { (&*meta.meta()).write_pointer.load(Ordering::Relaxed) };
+        assert_eq!(wp, 80);
+    }
+
+    #[test]
+    fn version_magic_mismatch_detected() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+
+        // manually corrupt magic bytes (first 4 bytes)
+        unsafe {
+            let view_ptr = mmap.as_mut_ptr() as *mut MetaView;
+            (*view_ptr).magic = [0xff, 0xff, 0xff, 0xff];
+        }
+
+        let meta = Meta::new(&mut mmap);
+        assert!(
+            !meta.is_current_version(),
+            "corrupted magic should fail version check"
+        );
+
+        // manually corrupt version field (4 bytes after first 4 i.e `4..=7`)
+        unsafe {
+            let view_ptr = mmap.as_mut_ptr() as *mut MetaView;
+            (*view_ptr).version = 0xdead_beef;
+        }
+
+        let meta2 = Meta::new(&mut mmap);
+        assert!(
+            !meta2.is_current_version(),
+            "corrupted version should fail version check"
+        );
+    }
+
+    #[test]
+    fn multiple_meta_views_reflect_each_other() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+
+        // Multiple wrappers w/ same pointer
+        let meta_a = Meta::new(&mut mmap);
+        let meta_b = Meta::new(&mut mmap);
+
+        // mutate via [A]
+        meta_a.incr_insert_count();
+        meta_a.incr_insert_count();
+
+        // [B] should observe the changes
+        assert_eq!(meta_b.get_insert_count(), 2);
+
+        // update [B] and observe via [A]
+        let prev_b = meta_b.update_write_offset(10);
+        let prev_a = meta_a.update_write_offset(5);
+        assert_eq!(prev_b, 0);
+        assert_eq!(prev_a, 10);
+
+        // check final value by reading meta manually
+        let final_wp = unsafe { (&*meta_a.meta()).write_pointer.load(Ordering::Relaxed) };
+        assert_eq!(final_wp, 15);
+    }
+
+    #[test]
+    fn increment_and_decrement_edge_behavior() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        (0..3).for_each(|_| meta.incr_insert_count());
+        assert_eq!(meta.get_insert_count(), 3);
+
+        (0..3).for_each(|_| meta.decr_insert_count());
+        assert_eq!(meta.get_insert_count(), 0);
+
+        // NOTE: For AtomicU64 on underflow it wrapps around. So we must prevent that!
+        assert!(std::panic::catch_unwind(|| meta.decr_insert_count()).is_err());
     }
 }
