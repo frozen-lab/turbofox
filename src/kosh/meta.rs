@@ -94,6 +94,13 @@ pub(crate) struct Pair {
 
 pub(crate) type PairBytes = [u8; 10];
 
+// NOTE: [PairBytes] is `[u8; 10]`, i.e. the alignment = 1, size = 10.
+// This assert ensures size is always a multiple of `u8`.
+//
+// WARN: If [PairBytes] ever has to change, make sure it's size is multiple of u8
+// or the read/write on mmap needs to be updated!
+const _: () = assert!(size_of::<PairBytes>() % size_of::<u8>() == 0);
+
 impl Pair {
     fn to_raw(&self) -> InternalResult<PairBytes> {
         //

@@ -78,9 +78,10 @@ impl Patra {
             .truncate(true)
             .open(path)?;
 
-        let header_size = Self::calc_header_size(capacity);
         let sign_offset = size_of::<Meta>();
         let pair_offset = sign_offset + capacity * size_of::<Sign>();
+
+        let header_size = Self::calc_header_size(capacity);
         let threshold = Self::calc_threshold(capacity);
 
         // zero-init the file
@@ -123,9 +124,10 @@ impl Patra {
             .truncate(false)
             .open(path)?;
 
-        let header_size = Self::calc_header_size(capacity);
         let sign_offset = size_of::<Meta>();
         let pair_offset = sign_offset + capacity * size_of::<Sign>();
+
+        let header_size = Self::calc_header_size(capacity);
         let threshold = Self::calc_threshold(capacity);
 
         let file_len = file.metadata()?.len();
@@ -179,7 +181,7 @@ impl Patra {
     ///
     /// ### Size Calculation
     ///
-    /// `sizeof(Meta) + (sizeof(Sign) * CAP) + (sizeof(PairRaw) * CAP)`
+    /// `sizeof(Meta) + (sizeof(Sign) * CAP) + (sizeof(PairBytes) * CAP)`
     #[inline(always)]
     const fn calc_header_size(capacity: usize) -> usize {
         size_of::<Meta>() + (size_of::<Sign>() * capacity) + (size_of::<PairBytes>() * capacity)
@@ -191,5 +193,32 @@ impl Patra {
     #[inline(always)]
     const fn calc_threshold(cap: usize) -> usize {
         cap.saturating_mul(4) / 5
+    }
+
+    #[inline(always)]
+    fn read_pair(&self, idx: usize) -> PairBytes {
+        debug_assert!(
+            idx < self.stats.capacity,
+            "Index must not be bigger then the capacity"
+        );
+
+        unsafe {
+            let ptr = (self.mmap.as_ptr().add(self.stats.pair_offset) as *const PairBytes).add(idx);
+            std::ptr::read(ptr)
+        }
+    }
+
+    #[inline(always)]
+    fn insert_pair(&mut self, idx: usize, pair: PairBytes) {
+        debug_assert!(
+            idx < self.stats.capacity,
+            "Index must not be bigger then the capacity"
+        );
+
+        unsafe {
+            let ptr =
+                (self.mmap.as_mut_ptr().add(self.stats.pair_offset) as *mut PairBytes).add(idx);
+            std::ptr::write(ptr, pair);
+        }
     }
 }
