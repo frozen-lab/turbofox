@@ -9,9 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) const VERSION: u32 = 3;
 pub(crate) const MAGIC: [u8; 4] = *b"TCv3";
 
-pub(crate) type KeyValue = (Vec<u8>, Vec<u8>);
-pub(crate) type Key = Vec<u8>;
-
 /// ----------------------------------------
 /// Namespaces
 /// ----------------------------------------
@@ -86,10 +83,10 @@ mod namespace_tests {
 #[repr(align(16))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pair {
-    ns: Namespace,
-    klen: u16,
-    vlen: u16,
-    offset: u64,
+    pub ns: Namespace,
+    pub klen: u16,
+    pub vlen: u16,
+    pub offset: u64,
 }
 
 pub(crate) type PairBytes = [u8; 10];
@@ -102,7 +99,7 @@ pub(crate) type PairBytes = [u8; 10];
 const _: () = assert!(size_of::<PairBytes>() % size_of::<u8>() == 0);
 
 impl Pair {
-    fn to_raw(&self) -> InternalResult<PairBytes> {
+    pub fn to_raw(&self) -> InternalResult<PairBytes> {
         //
         // Overflow check for [self.offset]
         //
@@ -130,7 +127,7 @@ impl Pair {
         Ok(out)
     }
 
-    fn from_raw(slice: PairBytes) -> InternalResult<Pair> {
+    pub fn from_raw(slice: PairBytes) -> InternalResult<Pair> {
         let ns = Namespace::try_from(slice[0])?;
 
         let klen = u16::from_le_bytes([slice[1], slice[2]]);

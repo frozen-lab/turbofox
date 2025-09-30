@@ -35,7 +35,7 @@
 use crate::{
     error::{InternalError, InternalResult},
     kosh::{
-        meta::{Meta, PairBytes},
+        meta::{Meta, Namespace, Pair, PairBytes},
         simd::ISA,
     },
 };
@@ -46,7 +46,12 @@ use std::{
     usize,
 };
 
-pub(crate) type Sign = u32;
+type Sign = u32;
+
+pub(crate) type KeyValue = (Vec<u8>, Vec<u8>);
+pub(crate) type Key = Vec<u8>;
+
+pub(crate) const ROW_SIZE: usize = 16;
 
 #[derive(Debug)]
 pub(crate) struct Patra {
@@ -61,6 +66,7 @@ pub(crate) struct Patra {
 struct Stats {
     header_size: usize,
     capacity: usize,
+    sign_rows: usize,
     sign_offset: usize,
     pair_offset: usize,
     threshold: usize,
@@ -69,7 +75,7 @@ struct Stats {
 impl Patra {
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
         // sanity check
-        debug_assert!(capacity % 16 == 0, "Capacity must be multiple of 16");
+        debug_assert!(capacity % ROW_SIZE == 0, "Capacity must be multiple of 16");
 
         let file = OpenOptions::new()
             .create(true)
@@ -77,6 +83,9 @@ impl Patra {
             .write(true)
             .truncate(true)
             .open(path)?;
+
+        // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
+        let sign_rows = capacity.wrapping_div(ROW_SIZE);
 
         let sign_offset = size_of::<Meta>();
         let pair_offset = sign_offset + capacity * size_of::<Sign>();
@@ -94,6 +103,7 @@ impl Patra {
         let stats = Stats {
             header_size,
             capacity,
+            sign_rows,
             sign_offset,
             pair_offset,
             threshold,
@@ -123,6 +133,9 @@ impl Patra {
             .write(true)
             .truncate(false)
             .open(path)?;
+
+        // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
+        let sign_rows = capacity.wrapping_div(ROW_SIZE);
 
         let sign_offset = size_of::<Meta>();
         let pair_offset = sign_offset + capacity * size_of::<Sign>();
@@ -163,6 +176,7 @@ impl Patra {
         let stats = Stats {
             header_size,
             capacity,
+            sign_rows,
             sign_offset,
             pair_offset,
             threshold,
@@ -196,7 +210,8 @@ impl Patra {
     }
 
     #[inline(always)]
-    fn read_pair(&self, idx: usize) -> PairBytes {
+    fn get_pair_bytes(&self, idx: usize) -> PairBytes {
+        // sanity check
         debug_assert!(
             idx < self.stats.capacity,
             "Index must not be bigger then the capacity"
@@ -209,7 +224,8 @@ impl Patra {
     }
 
     #[inline(always)]
-    fn insert_pair(&mut self, idx: usize, pair: PairBytes) {
+    fn set_pair_bytes(&mut self, idx: usize, bytes: PairBytes) {
+        // sanity check
         debug_assert!(
             idx < self.stats.capacity,
             "Index must not be bigger then the capacity"
@@ -218,7 +234,160 @@ impl Patra {
         unsafe {
             let ptr =
                 (self.mmap.as_mut_ptr().add(self.stats.pair_offset) as *mut PairBytes).add(idx);
-            std::ptr::write(ptr, pair);
+            std::ptr::write(ptr, bytes);
         }
     }
+
+    #[inline(always)]
+    fn get_sign_slice(&self, slice_idx: usize) -> [Sign; ROW_SIZE] {
+        // sanity check
+        debug_assert!(
+            slice_idx < self.stats.sign_rows,
+            "Slice Index must not be bigger then total slices available"
+        );
+
+        unsafe {
+            let base = self.mmap.as_ptr().add(self.stats.sign_offset);
+            let ptr = base.add(slice_idx * ROW_SIZE);
+
+            *(ptr as *const [Sign; ROW_SIZE])
+        }
+    }
+
+    #[inline(always)]
+    fn set_sign(&mut self, idx: usize, sign: Sign) {
+        // sanity check
+        debug_assert!(
+            idx < self.stats.capacity,
+            "Index must not be bigger then the capacity"
+        );
+
+        unsafe {
+            let ptr = (self.mmap.as_mut_ptr().add(self.stats.pair_offset) as *mut Sign).add(idx);
+            std::ptr::write(ptr, sign);
+        }
+    }
+
+    pub fn read_pair_key(&mut self, bytes: PairBytes) -> InternalResult<Key> {
+        let pair = Pair::from_raw(bytes)?;
+
+        let mut buf = vec![0u8; pair.klen as usize];
+        read_exact_at(
+            &self.file,
+            &mut buf,
+            self.stats.header_size as u64 + pair.offset,
+        )?;
+
+        Ok(buf)
+    }
+
+    pub fn read_pair_key_value(&mut self, bytes: PairBytes) -> InternalResult<KeyValue> {
+        let pair = Pair::from_raw(bytes)?;
+
+        let klen = pair.klen as usize;
+        let vlen = pair.vlen as usize;
+
+        let mut buf = vec![0u8; klen + vlen];
+        read_exact_at(
+            &self.file,
+            &mut buf,
+            self.stats.header_size as u64 + pair.offset,
+        )?;
+
+        let vbuf = buf[klen..(klen + vlen)].to_owned();
+        buf.truncate(klen);
+
+        Ok((buf, vbuf))
+    }
+
+    pub fn write_pair_key_value(
+        &mut self,
+        ns: Namespace,
+        kv: KeyValue,
+    ) -> InternalResult<PairBytes> {
+        let klen = kv.0.len();
+        let vlen = kv.1.len();
+        let blen = klen + vlen;
+
+        let mut buf = vec![0u8; blen];
+        buf[..klen].copy_from_slice(&kv.0);
+        buf[klen..].copy_from_slice(&kv.1);
+
+        // this gets us write pointer before updating w/ current buffer length
+        let offset = self.meta.update_write_offset(blen as u64);
+
+        write_all_at(&self.file, &buf, self.stats.header_size as u64 + offset)?;
+
+        let pair = Pair {
+            offset,
+            ns,
+            klen: klen as u16,
+            vlen: vlen as u16,
+        };
+
+        Ok(pair.to_raw()?)
+    }
+}
+
+/// Read N bytes at a given offset
+///
+/// NOTE: this mimics the `pread` syscall on linux
+#[cfg(unix)]
+fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(f, buf, offset)
+}
+
+/// Write a buffer to a file at a given offset
+///
+/// NOTE: this mimic the `pwrite` syscall on linux
+#[cfg(unix)]
+fn write_all_at(f: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
+}
+
+/// Read N bytes at a given offset
+///
+/// NOTE: this mimics the `pread` syscall on linux
+#[cfg(windows)]
+fn read_exact_at(f: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match std::os::windows::fs::FileExt::seek_read(f, buf, offset) {
+            Ok(0) => break,
+
+            Ok(n) => {
+                let tmp = buf;
+                buf = &mut tmp[n..];
+                offset += n as u64;
+            }
+
+            Err(e) => return Err(e),
+        }
+    }
+
+    if !buf.is_empty() {
+        Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+    } else {
+        Ok(())
+    }
+}
+
+/// Write a buffer to a file at a given offset
+///
+/// NOTE: this mimic the `pwrite` syscall on linux
+#[cfg(windows)]
+fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match std::os::windows::fs::FileExt::seek_write(f, buf, offset) {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+
+            Ok(n) => {
+                buf = &buf[n..];
+                offset += n as u64;
+            }
+
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(())
 }
