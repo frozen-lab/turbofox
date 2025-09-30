@@ -35,10 +35,7 @@
 use crate::{
     error::{InternalError, InternalResult},
     hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
-    kosh::{
-        meta::{Meta, Namespace, Pair, PairBytes},
-        simd::ISA,
-    },
+    kosh::meta::{Meta, Namespace, Pair, PairBytes},
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::{
@@ -47,8 +44,7 @@ use std::{
     usize,
 };
 
-type Sign = u32;
-
+pub(crate) type Sign = u32;
 pub(crate) type Key = Vec<u8>;
 pub(crate) type Value = Vec<u8>;
 pub(crate) type KeyValue = (Key, Value);
@@ -58,10 +54,9 @@ pub(crate) const ROW_SIZE: usize = 16;
 #[derive(Debug)]
 pub(crate) struct Patra {
     meta: Meta,
+    stats: Stats,
     mmap: MmapMut,
     file: File,
-    isa: ISA,
-    stats: Stats,
 }
 
 #[derive(Debug)]
@@ -101,7 +96,6 @@ impl Patra {
         let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
         let meta = Meta::new(&mut mmap);
 
-        let isa = ISA::detect_isa();
         let stats = Stats {
             header_size,
             capacity,
@@ -115,14 +109,13 @@ impl Patra {
             file,
             mmap,
             meta,
-            isa,
             stats,
         })
     }
 
     pub fn open<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
         // sanity check
-        debug_assert!(capacity % 16 == 0, "Capacity must be multiple of 16");
+        debug_assert!(capacity % ROW_SIZE == 0, "Capacity must be multiple of 16");
 
         let file = OpenOptions::new()
             // Create the file just in case to avoid crash
@@ -155,7 +148,7 @@ impl Patra {
         }
 
         let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
-        let meta = Meta::new(&mut mmap);
+        let meta = Meta::open(&mut mmap);
 
         // NOTE: while validating version and magic of the file, if not matched,
         // we should simply delete the file, as we do not have any earlier
@@ -174,7 +167,6 @@ impl Patra {
             return Err(InternalError::InvalidFile);
         }
 
-        let isa = ISA::detect_isa();
         let stats = Stats {
             header_size,
             capacity,
@@ -188,7 +180,6 @@ impl Patra {
             file,
             mmap,
             meta,
-            isa,
             stats,
         })
     }
@@ -212,7 +203,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    fn get_pair_bytes(&self, idx: usize) -> PairBytes {
+    pub fn get_pair_bytes(&self, idx: usize) -> PairBytes {
         // sanity check
         debug_assert!(
             idx < self.stats.capacity,
@@ -241,7 +232,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    fn get_sign_slice(&self, slice_idx: usize) -> [Sign; ROW_SIZE] {
+    pub fn get_sign_slice(&self, slice_idx: usize) -> [Sign; ROW_SIZE] {
         // sanity check
         debug_assert!(
             slice_idx < self.stats.sign_rows,
@@ -265,12 +256,12 @@ impl Patra {
         );
 
         unsafe {
-            let ptr = (self.mmap.as_mut_ptr().add(self.stats.pair_offset) as *mut Sign).add(idx);
+            let ptr = (self.mmap.as_mut_ptr().add(self.stats.sign_offset) as *mut Sign).add(idx);
             std::ptr::write(ptr, sign);
         }
     }
 
-    fn read_pair_key(&mut self, bytes: PairBytes) -> InternalResult<Key> {
+    pub fn read_pair_key(&mut self, bytes: PairBytes) -> InternalResult<Key> {
         let pair = Pair::from_raw(bytes)?;
 
         let mut buf = vec![0u8; pair.klen as usize];
@@ -283,7 +274,7 @@ impl Patra {
         Ok(buf)
     }
 
-    fn read_pair_key_value(&mut self, bytes: PairBytes) -> InternalResult<KeyValue> {
+    pub fn read_pair_key_value(&mut self, bytes: PairBytes) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(bytes)?;
 
         let klen = pair.klen as usize;
@@ -330,14 +321,31 @@ impl Patra {
         Ok(pair.to_raw()?)
     }
 
-    /// find a slot to insert a key
-    ///
-    /// ## Returns
-    ///
-    /// - (idx, true) -> Insert a new pair at `idx`
-    /// - (idx, false) -> item w/ same key already exists, don't insert, update!
-    ///
-    pub fn lookup_insert_slot(
+    pub fn is_full(&self) -> InternalResult<bool> {
+        if self.meta.get_insert_count() >= self.stats.threshold {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub fn upsert_kv(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<()> {
+        let start_idx = self.get_sign_hash(sign);
+        let (idx, is_new) = self.lookup_upsert_slot(start_idx, sign, &kv.0)?;
+
+        let pair_bytes = self.write_pair_key_value(Namespace::Base, kv)?;
+
+        if is_new {
+            self.meta.incr_insert_count();
+            self.set_sign(idx, sign);
+        }
+
+        self.set_pair_bytes(idx, pair_bytes);
+
+        Ok(())
+    }
+
+    fn lookup_upsert_slot(
         &mut self,
         start_idx: usize,
         sign: Sign,
@@ -355,18 +363,15 @@ impl Patra {
 
                     // taken slot (check for update)
                     s if s == sign => {
-                        let item_idx = (idx * ROW_SIZE) + i;
-
+                        let item_idx = (start_idx * ROW_SIZE) + i;
                         let pair_bytes = self.get_pair_bytes(item_idx);
                         let kbuf = self.read_pair_key(pair_bytes)?;
-
                         if key == &kbuf {
                             return Ok((idx, false));
                         }
                     }
 
                     // invalid entry for sign,
-                    //
                     // NOTE: May occur if mamory is currupt or underlying file
                     // is tampered w/
                     _ => {
@@ -383,65 +388,8 @@ impl Patra {
         Ok((0, true))
     }
 
-    /// fetch a value by key
-    ///
-    /// ## Returns
-    ///
-    /// - Value
-    /// - index of pairs sign in signature space
-    ///
-    pub fn fetch_value_by_key(
-        &mut self,
-        start_idx: usize,
-        sign: Sign,
-        key: &Key,
-    ) -> InternalResult<Option<(Value, usize)>> {
-        let mut idx = start_idx;
-
-        for _ in 0..self.stats.sign_rows {
-            let sign_row = self.get_sign_slice(idx);
-
-            for (i, ss) in sign_row.iter().enumerate() {
-                match *ss {
-                    EMPTY_SIGN => return Ok(None),
-                    TOMBSTONE_SIGN => continue,
-
-                    // taken slot (check for update)
-                    s if s == sign => {
-                        let item_idx = (idx * ROW_SIZE) + i;
-
-                        let pair_bytes = self.get_pair_bytes(item_idx);
-                        let (kbuf, vbuf) = self.read_pair_key_value(pair_bytes)?;
-
-                        if key == &kbuf {
-                            return Ok(Some((vbuf, item_idx)));
-                        }
-                    }
-
-                    // invalid entry for sign,
-                    //
-                    // NOTE: May occur if mamory is currupt or underlying file
-                    // is tampered w/
-                    _ => {
-                        return Err(InternalError::InvalidEntry(format!(
-                            "Invalid sign bytes in sign row at {idx}"
-                        )))
-                    }
-                }
-            }
-
-            idx = (idx + 1) % self.stats.sign_rows;
-        }
-
-        Ok(None)
-    }
-
-    pub fn is_full(&self) -> InternalResult<bool> {
-        if self.meta.get_insert_count() >= self.stats.threshold {
-            return Ok(true);
-        }
-
-        Ok(false)
+    pub fn get_sign_hash(&self, sign: Sign) -> usize {
+        sign as usize % self.stats.sign_rows
     }
 }
 
@@ -510,137 +458,147 @@ fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()
 
 #[cfg(test)]
 mod patra_tests {
+    use crate::kosh::patra;
+
     use super::*;
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
-    const TEST_CAP: usize = ROW_SIZE;
+    const TEST_CAP: usize = ROW_SIZE * 2;
 
     fn open_patra() -> Patra {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("patra_test");
 
-        Patra::new(path, TEST_CAP).unwrap()
+        Patra::new(path, TEST_CAP).expect("create patra")
     }
 
     #[test]
-    fn test_new_and_meta_defaults() {
+    fn test_new_file_meta_and_layout() {
         let patra = open_patra();
 
         assert!(patra.meta.is_current_version());
         assert_eq!(patra.meta.get_insert_count(), 0);
 
-        // all signatures should be empty
+        // test zeroed space for signatures
         for row in 0..patra.stats.sign_rows {
-            let signs = patra.get_sign_slice(row);
-            assert!(signs.iter().all(|&s| s == EMPTY_SIGN));
+            let slice = patra.get_sign_slice(row);
+            assert!(slice.iter().all(|&s| s == EMPTY_SIGN));
+        }
+
+        // test zeroed space for pair bytes
+        for i in 0..patra.stats.capacity {
+            let raw = patra.get_pair_bytes(i);
+            let pair = Pair::from_raw(raw).unwrap();
+
+            assert_eq!(pair.klen, 0);
+            assert_eq!(pair.vlen, 0);
+            assert_eq!(pair.offset, 0);
+            assert_eq!(pair.ns, Namespace::Base);
         }
     }
 
     #[test]
-    fn test_open_and_capacity_mismatch() {
+    fn test_reopen_file() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("patra_open");
+        let path = tmp.path().join("patra_reopen");
+
+        let _ = Patra::new(&path, TEST_CAP).unwrap();
+        let reopened = Patra::open(&path, TEST_CAP).unwrap();
+
+        assert!(reopened.meta.is_current_version());
+        assert_eq!(reopened.meta.get_insert_count(), 0usize);
+        assert_eq!(reopened.meta.get_write_pointer(), 0u64);
+    }
+
+    #[test]
+    fn test_capacity_mismatch_should_fail() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("patra_badcap");
 
         {
             let _ = Patra::new(&path, TEST_CAP).unwrap();
         }
 
-        // correct capacity works
-        let _ = Patra::open(&path, TEST_CAP).unwrap();
-
-        // wrong capacity should fail
         assert!(Patra::open(&path, TEST_CAP * 2).is_err());
     }
 
     #[test]
-    fn test_write_and_read_pair_key_value() {
+    fn test_set_and_get_pair_bytes() {
         let mut patra = open_patra();
-        let kv = (b"foo".to_vec(), b"bar".to_vec());
 
-        let raw = patra
-            .write_pair_key_value(Namespace::Base, kv.clone())
-            .unwrap();
-        let got = patra.read_pair_key_value(raw).unwrap();
+        let pair = Pair {
+            offset: 42,
+            ns: Namespace::Base,
+            klen: 3,
+            vlen: 5,
+        };
 
-        assert_eq!(got, kv);
+        let raw = pair.to_raw().unwrap();
+        patra.set_pair_bytes(7, raw);
+
+        let back = patra.get_pair_bytes(7);
+        let parsed = Pair::from_raw(back).unwrap();
+
+        assert_eq!(parsed.offset, 42);
+        assert_eq!(parsed.klen, 3);
+        assert_eq!(parsed.vlen, 5);
     }
 
     #[test]
-    fn test_lookup_insert_and_fetch_value() {
+    fn test_set_and_get_sign() {
         let mut patra = open_patra();
 
-        let kv = (b"hello".to_vec(), b"world".to_vec());
-        let sign = 0xBEEF;
+        patra.set_sign(5, 0xBEEF);
 
-        // write pair first
+        let row = 5 / ROW_SIZE;
+        let slice = patra.get_sign_slice(row);
+        assert_eq!(slice[5 % ROW_SIZE], 0xBEEF);
+    }
+
+    #[test]
+    fn test_write_and_read_key_value() {
+        let mut patra = open_patra();
+
+        let kv = (b"abc".to_vec(), b"def".to_vec());
         let raw = patra
             .write_pair_key_value(Namespace::Base, kv.clone())
             .unwrap();
-        let (slot, is_new) = patra.lookup_insert_slot(0, sign, &kv.0).unwrap();
-        assert!(is_new);
 
-        patra.set_pair_bytes(slot, raw);
-        patra.set_sign(slot, sign);
+        patra.set_pair_bytes(0, raw);
         patra.meta.incr_insert_count();
 
-        let res = patra.fetch_value_by_key(0, sign, &kv.0).unwrap();
-        assert!(res.is_some());
+        let got_key = patra.read_pair_key(raw).unwrap();
+        assert_eq!(got_key, kv.0);
 
-        let (val, idx) = res.unwrap();
-        assert_eq!(val, kv.1);
-        assert_eq!(idx, slot);
-    }
-
-    #[test]
-    fn test_tombstone_reuse() {
-        let mut patra = open_patra();
-        let sign = 0xCAFE;
-
-        // First insert
-        let (idx1, is_new1) = patra
-            .lookup_insert_slot(0, sign, &"k".as_bytes().to_vec())
-            .unwrap();
-        assert!(is_new1);
-
-        // Mark tombstone
-        patra.set_sign(idx1 * ROW_SIZE, TOMBSTONE_SIGN);
-
-        // Should reuse same slot
-        let (idx2, is_new2) = patra
-            .lookup_insert_slot(0, sign, &"k2".as_bytes().to_vec())
-            .unwrap();
-        assert!(is_new2);
-        assert_eq!(idx1, idx2);
+        let got_kv = patra.read_pair_key_value(raw).unwrap();
+        assert_eq!(got_kv, kv);
     }
 
     #[test]
     fn test_is_full_behavior() {
         let mut patra = open_patra();
-        assert!(!patra.is_full().unwrap());
+        assert_eq!(patra.is_full().unwrap(), false);
 
         for _ in 0..patra.stats.threshold {
             patra.meta.incr_insert_count();
         }
 
-        assert!(patra.is_full().unwrap());
+        assert_eq!(patra.is_full().unwrap(), true);
     }
 
     #[test]
-    fn test_fetch_value_miss_and_invalid_sign() {
-        let mut patra = open_patra();
-        let sign = 0x1234;
+    fn test_invalid_file_rejects() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("patra_invalid");
 
-        // Miss: nothing inserted
-        let res = patra
-            .fetch_value_by_key(0, sign, &"missing".as_bytes().to_vec())
-            .unwrap();
-        assert!(res.is_none());
+        // invalid file
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(8).unwrap();
 
-        // Corruption: force invalid sign
-        patra.set_sign(0, 0xFFFF_FFFF);
-        assert!(patra
-            .fetch_value_by_key(0, sign, &"bad".as_bytes().to_vec())
-            .is_err());
+        assert!(matches!(
+            Patra::open(&path, TEST_CAP),
+            Err(InternalError::InvalidFile)
+        ));
     }
 }
