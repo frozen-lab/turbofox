@@ -274,6 +274,17 @@ impl Meta {
     #[inline(always)]
     pub fn new(mmap: &mut MmapMut) -> Self {
         let ptr = mmap.as_mut_ptr() as *mut MetaView;
+
+        unsafe {
+            ptr.write(MetaView::default());
+        }
+
+        Self { ptr }
+    }
+
+    #[inline(always)]
+    pub fn open(mmap: &mut MmapMut) -> Self {
+        let ptr = mmap.as_mut_ptr() as *mut MetaView;
         Self { ptr }
     }
 
@@ -340,13 +351,8 @@ mod meta_tests {
         let header_size = size_of::<MetaView>();
         file.set_len(header_size as u64).expect("set_len");
 
-        let mut mmap = unsafe { memmap2::MmapOptions::new().len(header_size).map_mut(&file) }
+        let mmap = unsafe { memmap2::MmapOptions::new().len(header_size).map_mut(&file) }
             .expect("map_mut");
-
-        unsafe {
-            let meta_ptr = mmap.as_mut_ptr() as *mut MetaView;
-            meta_ptr.write(MetaView::default());
-        }
 
         (mmap, tmp)
     }
@@ -411,7 +417,7 @@ mod meta_tests {
             (*view_ptr).magic = [0xff, 0xff, 0xff, 0xff];
         }
 
-        let meta = Meta::new(&mut mmap);
+        let meta = Meta::open(&mut mmap);
         assert!(
             !meta.is_current_version(),
             "corrupted magic should fail version check"
@@ -423,7 +429,7 @@ mod meta_tests {
             (*view_ptr).version = 0xdead_beef;
         }
 
-        let meta2 = Meta::new(&mut mmap);
+        let meta2 = Meta::open(&mut mmap);
         assert!(
             !meta2.is_current_version(),
             "corrupted version should fail version check"
@@ -477,5 +483,33 @@ mod meta_tests {
         // `--release` mode!
         #[cfg(debug_assertions)]
         assert!(std::panic::catch_unwind(|| meta.decr_insert_count()).is_err());
+    }
+
+    #[test]
+    fn test_meta_new_initializes_defaults() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        assert_eq!(meta.meta().magic, MAGIC);
+        assert_eq!(meta.meta().version, VERSION);
+        assert_eq!(meta.get_insert_count(), 0);
+        assert_eq!(meta.get_write_pointer(), 0);
+    }
+
+    #[test]
+    fn test_meta_open_reads_existing() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+
+        // Create & initialize
+        let meta_a = Meta::new(&mut mmap);
+        meta_a.incr_insert_count();
+        meta_a.update_write_offset(42);
+
+        // Re-open same mmap
+        let meta_b = Meta::open(&mut mmap);
+
+        assert_eq!(meta_b.get_insert_count(), 1);
+        assert_eq!(meta_b.get_write_pointer(), 42);
+        assert!(meta_b.is_current_version());
     }
 }
