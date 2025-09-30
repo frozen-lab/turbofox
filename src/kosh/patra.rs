@@ -34,6 +34,7 @@
 
 use crate::{
     error::{InternalError, InternalResult},
+    hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
     kosh::{
         meta::{Meta, Namespace, Pair, PairBytes},
         simd::ISA,
@@ -48,8 +49,9 @@ use std::{
 
 type Sign = u32;
 
-pub(crate) type KeyValue = (Vec<u8>, Vec<u8>);
 pub(crate) type Key = Vec<u8>;
+pub(crate) type Value = Vec<u8>;
+pub(crate) type KeyValue = (Key, Value);
 
 pub(crate) const ROW_SIZE: usize = 16;
 
@@ -268,7 +270,7 @@ impl Patra {
         }
     }
 
-    pub fn read_pair_key(&mut self, bytes: PairBytes) -> InternalResult<Key> {
+    fn read_pair_key(&mut self, bytes: PairBytes) -> InternalResult<Key> {
         let pair = Pair::from_raw(bytes)?;
 
         let mut buf = vec![0u8; pair.klen as usize];
@@ -281,7 +283,7 @@ impl Patra {
         Ok(buf)
     }
 
-    pub fn read_pair_key_value(&mut self, bytes: PairBytes) -> InternalResult<KeyValue> {
+    fn read_pair_key_value(&mut self, bytes: PairBytes) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(bytes)?;
 
         let klen = pair.klen as usize;
@@ -326,6 +328,110 @@ impl Patra {
         };
 
         Ok(pair.to_raw()?)
+    }
+
+    /// find a slot to insert a key
+    ///
+    /// ## Returns
+    ///
+    /// - (idx, true) -> item w/ same key already exists, don't insert, update!
+    /// - (idx, false) -> Insert a new pair at `idx`
+    pub fn lookup_insert_slot(
+        &mut self,
+        start_idx: usize,
+        sign: Sign,
+        key: &Key,
+    ) -> InternalResult<(usize, bool)> {
+        let mut idx = start_idx;
+
+        for _ in 0..self.stats.sign_rows {
+            let sign_row = self.get_sign_slice(idx);
+
+            for (i, ss) in sign_row.iter().enumerate() {
+                match *ss {
+                    // empty slot
+                    EMPTY_SIGN | TOMBSTONE_SIGN => return Ok((idx, true)),
+
+                    // taken slot (check for update)
+                    s if s == sign => {
+                        let item_idx = (start_idx * ROW_SIZE) + i;
+
+                        let pair_bytes = self.get_pair_bytes(item_idx);
+                        let kbuf = self.read_pair_key(pair_bytes)?;
+
+                        if key == &kbuf {
+                            return Ok((idx, false));
+                        }
+                    }
+
+                    // invalid entry for sign,
+                    //
+                    // NOTE: May occur if mamory is currupt or underlying file
+                    // is tampered w/
+                    _ => {
+                        return Err(InternalError::InvalidEntry(format!(
+                            "Invalid sign bytes in sign row at {idx}"
+                        )))
+                    }
+                }
+            }
+
+            idx = (idx + 1) % self.stats.sign_rows;
+        }
+
+        Ok((0, true))
+    }
+
+    /// fetch a value by key
+    ///
+    /// ## Returns
+    ///
+    /// - Value
+    /// - index of pairs sign in signature space
+    pub fn fetch_value_by_key(
+        &mut self,
+        start_idx: usize,
+        sign: Sign,
+        key: &Key,
+    ) -> InternalResult<Option<(Value, usize)>> {
+        let mut idx = start_idx;
+
+        for _ in 0..self.stats.sign_rows {
+            let sign_row = self.get_sign_slice(idx);
+
+            for (i, ss) in sign_row.iter().enumerate() {
+                match *ss {
+                    EMPTY_SIGN => return Ok(None),
+                    TOMBSTONE_SIGN => continue,
+
+                    // taken slot (check for update)
+                    s if s == sign => {
+                        let item_idx = (start_idx * ROW_SIZE) + i;
+
+                        let pair_bytes = self.get_pair_bytes(item_idx);
+                        let (kbuf, vbuf) = self.read_pair_key_value(pair_bytes)?;
+
+                        if key == &kbuf {
+                            return Ok(Some((vbuf, item_idx)));
+                        }
+                    }
+
+                    // invalid entry for sign,
+                    //
+                    // NOTE: May occur if mamory is currupt or underlying file
+                    // is tampered w/
+                    _ => {
+                        return Err(InternalError::InvalidEntry(format!(
+                            "Invalid sign bytes in sign row at {idx}"
+                        )))
+                    }
+                }
+            }
+
+            idx = (idx + 1) % self.stats.sign_rows;
+        }
+
+        Ok(None)
     }
 }
 

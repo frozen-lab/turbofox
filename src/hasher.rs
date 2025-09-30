@@ -4,6 +4,11 @@ pub(crate) const TOMBSTONE_SIGN: u32 = 1u32;
 /// Used as a default state for a signature for entry in [Bucket]
 pub(crate) const EMPTY_SIGN: u32 = 0u32;
 
+// WARN: [Patra] is zeroed on init, i.e. the sign space contains `0u32` values
+// by default, which is treated as empty slot! So the value of [EMPTY_SIGN] must
+// always be `0u32`, otherwise the lookup process will fail!
+const _: () = assert!(EMPTY_SIGN == 0u32);
+
 /// Default seed for [XxHash32]
 const DEFAULT_SEED: u32 = 0;
 
