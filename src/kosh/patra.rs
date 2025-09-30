@@ -226,7 +226,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    fn set_pair_bytes(&mut self, idx: usize, bytes: PairBytes) {
+    pub fn set_pair_bytes(&mut self, idx: usize, bytes: PairBytes) {
         // sanity check
         debug_assert!(
             idx < self.stats.capacity,
@@ -257,7 +257,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    fn set_sign(&mut self, idx: usize, sign: Sign) {
+    pub fn set_sign(&mut self, idx: usize, sign: Sign) {
         // sanity check
         debug_assert!(
             idx < self.stats.capacity,
@@ -334,8 +334,9 @@ impl Patra {
     ///
     /// ## Returns
     ///
-    /// - (idx, true) -> item w/ same key already exists, don't insert, update!
-    /// - (idx, false) -> Insert a new pair at `idx`
+    /// - (idx, true) -> Insert a new pair at `idx`
+    /// - (idx, false) -> item w/ same key already exists, don't insert, update!
+    ///
     pub fn lookup_insert_slot(
         &mut self,
         start_idx: usize,
@@ -354,7 +355,7 @@ impl Patra {
 
                     // taken slot (check for update)
                     s if s == sign => {
-                        let item_idx = (start_idx * ROW_SIZE) + i;
+                        let item_idx = (idx * ROW_SIZE) + i;
 
                         let pair_bytes = self.get_pair_bytes(item_idx);
                         let kbuf = self.read_pair_key(pair_bytes)?;
@@ -388,6 +389,7 @@ impl Patra {
     ///
     /// - Value
     /// - index of pairs sign in signature space
+    ///
     pub fn fetch_value_by_key(
         &mut self,
         start_idx: usize,
@@ -406,7 +408,7 @@ impl Patra {
 
                     // taken slot (check for update)
                     s if s == sign => {
-                        let item_idx = (start_idx * ROW_SIZE) + i;
+                        let item_idx = (idx * ROW_SIZE) + i;
 
                         let pair_bytes = self.get_pair_bytes(item_idx);
                         let (kbuf, vbuf) = self.read_pair_key_value(pair_bytes)?;
@@ -432,6 +434,14 @@ impl Patra {
         }
 
         Ok(None)
+    }
+
+    pub fn is_full(&self) -> InternalResult<bool> {
+        if self.meta.get_insert_count() >= self.stats.threshold {
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }
 
@@ -496,4 +506,141 @@ fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod patra_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use tempfile::TempDir;
+
+    const TEST_CAP: usize = ROW_SIZE;
+
+    fn open_patra() -> Patra {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("patra_test");
+
+        Patra::new(path, TEST_CAP).unwrap()
+    }
+
+    #[test]
+    fn test_new_and_meta_defaults() {
+        let patra = open_patra();
+
+        assert!(patra.meta.is_current_version());
+        assert_eq!(patra.meta.get_insert_count(), 0);
+
+        // all signatures should be empty
+        for row in 0..patra.stats.sign_rows {
+            let signs = patra.get_sign_slice(row);
+            assert!(signs.iter().all(|&s| s == EMPTY_SIGN));
+        }
+    }
+
+    #[test]
+    fn test_open_and_capacity_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("patra_open");
+
+        {
+            let _ = Patra::new(&path, TEST_CAP).unwrap();
+        }
+
+        // correct capacity works
+        let _ = Patra::open(&path, TEST_CAP).unwrap();
+
+        // wrong capacity should fail
+        assert!(Patra::open(&path, TEST_CAP * 2).is_err());
+    }
+
+    #[test]
+    fn test_write_and_read_pair_key_value() {
+        let mut patra = open_patra();
+        let kv = (b"foo".to_vec(), b"bar".to_vec());
+
+        let raw = patra
+            .write_pair_key_value(Namespace::Base, kv.clone())
+            .unwrap();
+        let got = patra.read_pair_key_value(raw).unwrap();
+
+        assert_eq!(got, kv);
+    }
+
+    #[test]
+    fn test_lookup_insert_and_fetch_value() {
+        let mut patra = open_patra();
+
+        let kv = (b"hello".to_vec(), b"world".to_vec());
+        let sign = 0xBEEF;
+
+        // write pair first
+        let raw = patra
+            .write_pair_key_value(Namespace::Base, kv.clone())
+            .unwrap();
+        let (slot, is_new) = patra.lookup_insert_slot(0, sign, &kv.0).unwrap();
+        assert!(is_new);
+
+        patra.set_pair_bytes(slot, raw);
+        patra.set_sign(slot, sign);
+        patra.meta.incr_insert_count();
+
+        let res = patra.fetch_value_by_key(0, sign, &kv.0).unwrap();
+        assert!(res.is_some());
+
+        let (val, idx) = res.unwrap();
+        assert_eq!(val, kv.1);
+        assert_eq!(idx, slot);
+    }
+
+    #[test]
+    fn test_tombstone_reuse() {
+        let mut patra = open_patra();
+        let sign = 0xCAFE;
+
+        // First insert
+        let (idx1, is_new1) = patra
+            .lookup_insert_slot(0, sign, &"k".as_bytes().to_vec())
+            .unwrap();
+        assert!(is_new1);
+
+        // Mark tombstone
+        patra.set_sign(idx1 * ROW_SIZE, TOMBSTONE_SIGN);
+
+        // Should reuse same slot
+        let (idx2, is_new2) = patra
+            .lookup_insert_slot(0, sign, &"k2".as_bytes().to_vec())
+            .unwrap();
+        assert!(is_new2);
+        assert_eq!(idx1, idx2);
+    }
+
+    #[test]
+    fn test_is_full_behavior() {
+        let mut patra = open_patra();
+        assert!(!patra.is_full().unwrap());
+
+        for _ in 0..patra.stats.threshold {
+            patra.meta.incr_insert_count();
+        }
+
+        assert!(patra.is_full().unwrap());
+    }
+
+    #[test]
+    fn test_fetch_value_miss_and_invalid_sign() {
+        let mut patra = open_patra();
+        let sign = 0x1234;
+
+        // Miss: nothing inserted
+        let res = patra
+            .fetch_value_by_key(0, sign, &"missing".as_bytes().to_vec())
+            .unwrap();
+        assert!(res.is_none());
+
+        // Corruption: force invalid sign
+        patra.set_sign(0, 0xFFFF_FFFF);
+        assert!(patra
+            .fetch_value_by_key(0, sign, &"bad".as_bytes().to_vec())
+            .is_err());
+    }
 }
