@@ -84,7 +84,7 @@ impl Patra {
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
         let sign_rows = capacity.wrapping_div(ROW_SIZE);
 
-        let sign_offset = size_of::<Meta>();
+        let sign_offset = Meta::size_of();
         let pair_offset = sign_offset + capacity * size_of::<Sign>();
 
         let header_size = Self::calc_header_size(capacity);
@@ -132,7 +132,7 @@ impl Patra {
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
         let sign_rows = capacity.wrapping_div(ROW_SIZE);
 
-        let sign_offset = size_of::<Meta>();
+        let sign_offset = Meta::size_of();
         let pair_offset = sign_offset + capacity * size_of::<Sign>();
 
         let header_size = Self::calc_header_size(capacity);
@@ -334,13 +334,12 @@ impl Patra {
         let (idx, is_new) = self.lookup_upsert_slot(start_idx, sign, &kv.0)?;
 
         let pair_bytes = self.write_pair_key_value(Namespace::Base, kv)?;
+        self.set_pair_bytes(idx, pair_bytes);
 
         if is_new {
             self.meta.incr_insert_count();
             self.set_sign(idx, sign);
         }
-
-        self.set_pair_bytes(idx, pair_bytes);
 
         Ok(())
     }
@@ -357,7 +356,7 @@ impl Patra {
             let sign_row = self.get_sign_slice(idx);
 
             for (i, ss) in sign_row.iter().enumerate() {
-                let item_idx = (start_idx * ROW_SIZE) + i;
+                let item_idx = (idx * ROW_SIZE + i) % self.stats.capacity;
 
                 match *ss {
                     // empty slot
@@ -369,7 +368,7 @@ impl Patra {
                         let kbuf = self.read_pair_key(pair_bytes)?;
 
                         if key == &kbuf {
-                            return Ok((idx, false));
+                            return Ok((item_idx, false));
                         }
                     }
 
@@ -463,9 +462,8 @@ fn write_all_at(f: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()
 
 #[cfg(test)]
 mod patra_tests {
-    use crate::kosh::patra;
-
     use super::*;
+    use crate::hasher::Hasher;
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
@@ -605,5 +603,117 @@ mod patra_tests {
             Patra::open(&path, TEST_CAP),
             Err(InternalError::InvalidFile)
         ));
+    }
+
+    #[test]
+    fn upsert_kv_inserts_and_updates() {
+        let mut patra = open_patra();
+
+        //
+        // KV1
+        //
+        let key = b"hello".to_vec();
+        let val1 = b"world1".to_vec();
+        let val2 = b"world2".to_vec();
+        let sign1 = Hasher::new(&key);
+        let start_idx1 = patra.get_sign_hash(sign1);
+
+        patra.upsert_kv(sign1, (key.clone(), val1.clone())).unwrap();
+        assert_eq!(patra.meta.get_insert_count(), 1);
+
+        let slot = patra.lookup_upsert_slot(start_idx1, sign1, &key).unwrap().0;
+        let pb = patra.get_pair_bytes(slot);
+        let (k, v) = patra.read_pair_key_value(pb).unwrap();
+        assert_eq!(k, key);
+        assert_eq!(v, val1);
+
+        patra.upsert_kv(sign1, (key.clone(), val2.clone())).unwrap();
+        assert_eq!(patra.meta.get_insert_count(), 1);
+
+        let slot = patra.lookup_upsert_slot(start_idx1, sign1, &key).unwrap().0;
+        let pb = patra.get_pair_bytes(slot);
+        let (_k, v) = patra.read_pair_key_value(pb).unwrap();
+
+        assert_eq!(v, val2);
+
+        //
+        // KV2
+        //
+        let other_key = b"foo".to_vec();
+        let other_val = b"bar".to_vec();
+        let sign2 = Hasher::new(&other_key);
+
+        patra
+            .upsert_kv(sign2, (other_key.clone(), other_val.clone()))
+            .unwrap();
+        assert_eq!(patra.meta.get_insert_count(), 2);
+    }
+
+    #[test]
+    fn lookup_invalid_sign_errors() {
+        let mut patra = open_patra();
+
+        // place an invalid sign into absolute slot 0
+        let invalid_sign: Sign = 0xDEAD_BEEF;
+        patra.set_sign(0, invalid_sign);
+
+        // choose a probing sign that maps to row 0 (TEST_CAP => sign_rows == 2 so any even sign maps to row 0)
+        let sign = 2u32;
+        let start_idx = patra.get_sign_hash(sign);
+        assert_eq!(start_idx, 0);
+
+        let key = b"somekey".to_vec();
+
+        let res = patra.lookup_upsert_slot(start_idx, sign, &key);
+        assert!(matches!(res, Err(InternalError::InvalidEntry(_))));
+    }
+
+    #[test]
+    fn reuse_tombstone_slot() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("patra_tombstone");
+        let mut patra = Patra::new(path.clone(), 16).unwrap();
+
+        //
+        // KV1
+        //
+        let key1 = b"k1".to_vec();
+        let val1 = b"v1".to_vec();
+        let sign1 = Hasher::new(&key1);
+        let start_idx1 = patra.get_sign_hash(sign1);
+
+        patra.upsert_kv(sign1, (key1.clone(), val1)).unwrap();
+        assert_eq!(patra.meta.get_insert_count(), 1);
+
+        let slot = patra
+            .lookup_upsert_slot(start_idx1, sign1, &key1)
+            .unwrap()
+            .0;
+        patra.set_sign(slot, TOMBSTONE_SIGN);
+
+        //
+        // KV2
+        //
+        let key2 = b"k2".to_vec();
+        let val2 = b"v2".to_vec();
+        let sign2 = Hasher::new(&key2);
+        let start_idx2 = patra.get_sign_hash(sign2);
+
+        patra
+            .upsert_kv(sign2, (key2.clone(), val2.clone()))
+            .unwrap();
+
+        assert_eq!(patra.meta.get_insert_count(), 2);
+
+        let slot2 = patra
+            .lookup_upsert_slot(start_idx2, sign2, &key2)
+            .unwrap()
+            .0;
+
+        let pb2 = patra.get_pair_bytes(slot2);
+        let (k, v) = patra.read_pair_key_value(pb2).unwrap();
+
+        assert_eq!(k, key2);
+        assert_eq!(v, val2);
     }
 }
