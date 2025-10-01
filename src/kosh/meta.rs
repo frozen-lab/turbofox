@@ -330,6 +330,11 @@ impl Meta {
         let meta = self.meta();
         meta.magic == MAGIC && meta.version == VERSION
     }
+
+    #[inline(always)]
+    pub const fn size_of() -> usize {
+        std::mem::size_of::<MetaView>()
+    }
 }
 
 #[cfg(test)]

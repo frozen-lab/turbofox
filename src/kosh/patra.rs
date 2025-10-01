@@ -191,7 +191,7 @@ impl Patra {
     /// `sizeof(Meta) + (sizeof(Sign) * CAP) + (sizeof(PairBytes) * CAP)`
     #[inline(always)]
     const fn calc_header_size(capacity: usize) -> usize {
-        size_of::<Meta>() + (size_of::<Sign>() * capacity) + (size_of::<PairBytes>() * capacity)
+        Meta::size_of() + (size_of::<Sign>() * capacity) + (size_of::<PairBytes>() * capacity)
     }
 
     /// Calculate threshold w/ given capacity for [Bucket]
@@ -357,15 +357,17 @@ impl Patra {
             let sign_row = self.get_sign_slice(idx);
 
             for (i, ss) in sign_row.iter().enumerate() {
+                let item_idx = (start_idx * ROW_SIZE) + i;
+
                 match *ss {
                     // empty slot
-                    EMPTY_SIGN | TOMBSTONE_SIGN => return Ok((idx, true)),
+                    EMPTY_SIGN | TOMBSTONE_SIGN => return Ok((item_idx, true)),
 
                     // taken slot (check for update)
                     s if s == sign => {
-                        let item_idx = (start_idx * ROW_SIZE) + i;
                         let pair_bytes = self.get_pair_bytes(item_idx);
                         let kbuf = self.read_pair_key(pair_bytes)?;
+
                         if key == &kbuf {
                             return Ok((idx, false));
                         }
@@ -389,6 +391,9 @@ impl Patra {
     }
 
     pub fn get_sign_hash(&self, sign: Sign) -> usize {
+        // sanity check
+        debug_assert!(self.stats.sign_rows != 0, "No of rows must not be 0");
+
         sign as usize % self.stats.sign_rows
     }
 }
