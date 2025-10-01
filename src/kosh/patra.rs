@@ -345,6 +345,12 @@ impl Patra {
         self.set_pair_bytes(idx, pair_bytes);
 
         if is_new {
+            // sanity check (only for new insertions)
+            debug_assert!(
+                self.meta.get_insert_count() <= self.stats.threshold,
+                "Insertions are not allowed beyound threshold limit"
+            );
+
             self.meta.incr_insert_count();
             self.set_sign(idx, sign);
         }
@@ -387,7 +393,7 @@ impl Patra {
             idx = (idx + 1) % self.stats.sign_rows;
         }
 
-        Ok((0, true))
+        Err(InternalError::BucketFull)
     }
 
     pub fn get_sign_hash(&self, sign: Sign) -> usize {
@@ -562,6 +568,13 @@ mod patra_tests {
             Patra::new(path, TEST_CAP).expect("create patra")
         }
 
+        fn open_patra_with_cap(cap: usize) -> Patra {
+            let tmp = TempDir::new().expect("tempdir");
+            let path = tmp.path().join("patra_test");
+
+            Patra::new(path, cap).expect("create patra")
+        }
+
         #[test]
         fn test_new_init_file_meta_and_correct_defaults() {
             let patra = open_patra();
@@ -612,6 +625,136 @@ mod patra_tests {
             }
 
             assert!(Patra::open(&path, TEST_CAP * 2).is_err());
+        }
+
+        #[test]
+        fn test_space_integrity_for_signature_space_in_mmap() {
+            let mut patra = open_patra_with_cap(128);
+
+            for row in 0..patra.stats.sign_rows {
+                let slice = patra.get_sign_slice(row);
+                assert!(slice.iter().all(|&s| s == EMPTY_SIGN));
+            }
+
+            for i in 0..patra.stats.capacity {
+                patra.set_sign(i, 1234u32);
+
+                let row = i / ROW_SIZE;
+                let slice = patra.get_sign_slice(row);
+
+                assert!(slice.contains(&1234u32));
+            }
+        }
+
+        #[test]
+        fn test_upsert_kv_new_and_update() {
+            let mut patra = open_patra();
+
+            let val = b"world".to_vec();
+            let val2 = b"rustacean".to_vec();
+
+            let key = b"hello".to_vec();
+            let sign1 = Hasher::new(&key);
+            let start_idx1 = patra.get_sign_hash(sign1);
+
+            patra.upsert_kv(sign1, (key.clone(), val.clone())).unwrap();
+
+            // verify write
+            let slot = patra.lookup_upsert_slot(start_idx1, sign1, &key).unwrap().0;
+            let pb = patra.get_pair_bytes(slot);
+            let (k, v) = patra.read_pair_key_value(pb).unwrap();
+
+            assert_eq!(k, key);
+            assert_eq!(v, val);
+
+            // update
+            patra.upsert_kv(sign1, (key.clone(), val2.clone())).unwrap();
+
+            // verify write
+            let slot = patra.lookup_upsert_slot(start_idx1, sign1, &key).unwrap().0;
+            let pb = patra.get_pair_bytes(slot);
+            let (k, v) = patra.read_pair_key_value(pb).unwrap();
+
+            assert_eq!(k, key);
+            assert_eq!(v, val2);
+
+            assert_eq!(
+                patra.meta.get_insert_count(),
+                1,
+                "Insert count should not incr for upsert for existing key"
+            );
+        }
+
+        #[test]
+        fn test_wraparound_for_row_when_inserting_with_custom_collisions() {
+            let mut patra = open_patra();
+
+            // same exact sign for every key (custom collision)
+            let sign = Hasher::new("dummy".as_bytes());
+            let row_idx = patra.get_sign_hash(sign);
+
+            // dummy keys (all insert into same row)
+            for i in 0..ROW_SIZE {
+                let k = format!("key{i}").as_bytes().to_vec();
+                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
+            }
+
+            // new key (collision case, as no space left in the row)
+            let n_k = b"special".to_vec();
+            let n_v = b"y".to_vec();
+
+            patra.upsert_kv(sign, (n_k.clone(), n_v.clone())).unwrap();
+
+            // verify write
+            let slot = patra.lookup_upsert_slot(row_idx, sign, &n_k).unwrap().0;
+            let pb = patra.get_pair_bytes(slot);
+            let (k, v) = patra.read_pair_key_value(pb).unwrap();
+
+            assert_eq!(k, n_k);
+            assert_eq!(v, n_v);
+        }
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_upsert_kv_till_full_capacity() {
+            let mut patra = open_patra_with_cap(32);
+            let mut rng = sphur::Sphur::new_seeded(0x10203040);
+
+            loop {
+                let i = rng.gen_u32();
+                let k = format!("key{i}").into_bytes();
+                let sign = Hasher::new(&k);
+
+                if patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).is_err() {
+                    break;
+                }
+            }
+
+            assert!(patra.is_full().unwrap());
+        }
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_full_capacity() {
+            let mut patra = open_patra_with_cap(32);
+
+            for i in 0..patra.stats.capacity {
+                let k = format!("key{i}").into_bytes();
+                let sign = Hasher::new(&k);
+
+                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
+            }
+
+            assert!(patra.is_full().unwrap());
+
+            let k = b"extra".to_vec();
+            let v = b"boom".to_vec();
+            let sign = Hasher::new(&k);
+
+            assert!(
+                patra.upsert_kv(sign, (k, v)).is_err(),
+                "upserting new entry must fail when cap is full"
+            );
         }
 
         #[test]
