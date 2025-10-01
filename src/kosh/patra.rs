@@ -327,7 +327,7 @@ impl Patra {
 
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        self.meta.get_insert_count() == self.stats.threshold
+        self.meta.get_insert_count() >= self.stats.threshold
     }
 
     #[inline(always)]
