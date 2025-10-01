@@ -715,49 +715,6 @@ mod patra_tests {
         }
 
         #[test]
-        #[cfg(not(debug_assertions))]
-        fn test_upsert_kv_till_full_capacity() {
-            let mut patra = open_patra_with_cap(32);
-            let mut rng = sphur::Sphur::new_seeded(0x10203040);
-
-            loop {
-                let i = rng.gen_u32();
-                let k = format!("key{i}").into_bytes();
-                let sign = Hasher::new(&k);
-
-                if patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).is_err() {
-                    break;
-                }
-            }
-
-            assert!(patra.is_full().unwrap());
-        }
-
-        #[test]
-        #[cfg(not(debug_assertions))]
-        fn test_full_capacity() {
-            let mut patra = open_patra_with_cap(32);
-
-            for i in 0..patra.stats.capacity {
-                let k = format!("key{i}").into_bytes();
-                let sign = Hasher::new(&k);
-
-                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
-            }
-
-            assert!(patra.is_full().unwrap());
-
-            let k = b"extra".to_vec();
-            let v = b"boom".to_vec();
-            let sign = Hasher::new(&k);
-
-            assert!(
-                patra.upsert_kv(sign, (k, v)).is_err(),
-                "upserting new entry must fail when cap is full"
-            );
-        }
-
-        #[test]
         fn test_set_and_get_pair_bytes() {
             let mut patra = open_patra();
 
@@ -960,6 +917,174 @@ mod patra_tests {
 
             assert_eq!(k, key2);
             assert_eq!(v, val2);
+        }
+
+        #[test]
+        fn test_new_inserts_correctly_updates_file_write_pointer() {
+            let mut patra = open_patra();
+
+            let key1 = b"k1".to_vec();
+            let val1 = vec![1u8; 10];
+            let sign1 = crate::hasher::Hasher::new(&key1);
+
+            patra
+                .upsert_kv(sign1, (key1.clone(), val1.clone()))
+                .unwrap();
+            let off1 = patra.meta.get_write_pointer();
+
+            let key2 = b"k2".to_vec();
+            let val2 = vec![2u8; 20];
+            let sign2 = crate::hasher::Hasher::new(&key2);
+
+            patra
+                .upsert_kv(sign2, (key2.clone(), val2.clone()))
+                .unwrap();
+            let off2 = patra.meta.get_write_pointer();
+
+            let key3 = b"k3".to_vec();
+            let val3 = vec![3u8; 30];
+            let sign3 = crate::hasher::Hasher::new(&key3);
+
+            patra
+                .upsert_kv(sign3, (key3.clone(), val3.clone()))
+                .unwrap();
+            let off3 = patra.meta.get_write_pointer();
+
+            // offset must increase
+            assert!(off1 < off2);
+            assert!(off2 < off3);
+        }
+
+        #[test]
+        fn test_upsert_on_collision_stores_sign_with_probing() {
+            let mut patra = Patra::new(
+                tempfile::tempdir().unwrap().path().join("patra_collision"),
+                ROW_SIZE * 2,
+            )
+            .unwrap();
+
+            // Craft two keys with same row hash
+            let key1 = b"a_key".to_vec();
+            let key2 = b"b_key".to_vec();
+
+            let mut sign1 = crate::hasher::Hasher::new(&key1);
+            let mut sign2 = crate::hasher::Hasher::new(&key1);
+
+            let start_idx1 = patra.get_sign_hash(sign1);
+            assert_eq!(start_idx1, patra.get_sign_hash(sign2));
+
+            // insert k1
+            patra
+                .upsert_kv(sign1, (key1.clone(), b"v1".to_vec()))
+                .unwrap();
+
+            // insert k2 w/ collision
+            patra
+                .upsert_kv(sign2, (key2.clone(), b"v2".to_vec()))
+                .unwrap();
+
+            let slot1 = patra
+                .lookup_upsert_slot(start_idx1, sign1, &key1)
+                .unwrap()
+                .0;
+
+            let pb1 = patra.get_pair_bytes(slot1);
+            let (rk1, rv1) = patra.read_pair_key_value(pb1).unwrap();
+
+            assert_eq!(rk1, key1);
+            assert_eq!(rv1, b"v1");
+
+            let slot2 = patra
+                .lookup_upsert_slot(start_idx1, sign2, &key2)
+                .unwrap()
+                .0;
+
+            let pb2 = patra.get_pair_bytes(slot2);
+            let (rk2, rv2) = patra.read_pair_key_value(pb2).unwrap();
+
+            assert_eq!(rk2, key2);
+            assert_eq!(rv2, b"v2");
+        }
+
+        #[test]
+        fn test_patra_reopen_after_creation_correctly_preserves_state() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("patra_reopen_state");
+
+            // creation
+            {
+                let mut patra = Patra::new(&path, TEST_CAP).unwrap();
+
+                let key = b"persist".to_vec();
+                let val = b"data".to_vec();
+                let sign = crate::hasher::Hasher::new(&key);
+
+                patra.upsert_kv(sign, (key.clone(), val.clone())).unwrap();
+                assert_eq!(patra.meta.get_insert_count(), 1);
+            }
+
+            // re-open
+            {
+                let mut reopened = Patra::open(&path, TEST_CAP).unwrap();
+                assert_eq!(reopened.meta.get_insert_count(), 1);
+
+                let key = b"persist".to_vec();
+                let sign = crate::hasher::Hasher::new(&key);
+                let start_idx = reopened.get_sign_hash(sign);
+                let slot = reopened
+                    .lookup_upsert_slot(start_idx, sign, &key)
+                    .unwrap()
+                    .0;
+
+                let pb = reopened.get_pair_bytes(slot);
+                let (rk, rv) = reopened.read_pair_key_value(pb).unwrap();
+
+                assert_eq!(rk, b"persist");
+                assert_eq!(rv, b"data");
+            }
+        }
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_upsert_kv_till_full_capacity() {
+            let mut patra = open_patra_with_cap(32);
+            let mut rng = sphur::Sphur::new_seeded(0x10203040);
+
+            loop {
+                let i = rng.gen_u32();
+                let k = format!("key{i}").into_bytes();
+                let sign = Hasher::new(&k);
+
+                if patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).is_err() {
+                    break;
+                }
+            }
+
+            assert!(patra.is_full().unwrap());
+        }
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_full_capacity() {
+            let mut patra = open_patra_with_cap(32);
+
+            for i in 0..patra.stats.capacity {
+                let k = format!("key{i}").into_bytes();
+                let sign = Hasher::new(&k);
+
+                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
+            }
+
+            assert!(patra.is_full().unwrap());
+
+            let k = b"extra".to_vec();
+            let v = b"boom".to_vec();
+            let sign = Hasher::new(&k);
+
+            assert!(
+                patra.upsert_kv(sign, (k, v)).is_err(),
+                "upserting new entry must fail when cap is full"
+            );
         }
     }
 }
