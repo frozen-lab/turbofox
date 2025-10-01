@@ -282,7 +282,7 @@ impl Patra {
         Ok(buf)
     }
 
-    pub fn read_pair_key_value(&self, bytes: PairBytes) -> InternalResult<KeyValue> {
+    fn read_pair_key_value(&self, bytes: PairBytes) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(bytes)?;
 
         let klen = pair.klen as usize;
@@ -301,11 +301,7 @@ impl Patra {
         Ok((buf, vbuf))
     }
 
-    pub fn write_pair_key_value(
-        &mut self,
-        ns: Namespace,
-        kv: KeyValue,
-    ) -> InternalResult<PairBytes> {
+    fn write_pair_key_value(&mut self, ns: Namespace, kv: KeyValue) -> InternalResult<PairBytes> {
         let klen = kv.0.len();
         let vlen = kv.1.len();
         let blen = klen + vlen;
@@ -329,12 +325,14 @@ impl Patra {
         Ok(pair.to_raw()?)
     }
 
-    pub fn is_full(&self) -> InternalResult<bool> {
-        if self.meta.get_insert_count() >= self.stats.threshold {
-            return Ok(true);
-        }
+    #[inline(always)]
+    pub fn is_full(&self) -> bool {
+        self.meta.get_insert_count() == self.stats.threshold
+    }
 
-        Ok(false)
+    #[inline(always)]
+    pub fn pair_count(&self) -> usize {
+        self.meta.get_insert_count()
     }
 
     pub fn upsert_kv(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<()> {
@@ -358,20 +356,20 @@ impl Patra {
         Ok(())
     }
 
-    pub fn fetch_value(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<Option<Value>> {
+    pub fn fetch_value(&self, sign: Sign, key: Key) -> InternalResult<Option<Value>> {
         let start_idx = self.get_sign_hash(sign);
 
-        if let Some((_, vbuf)) = self.lookup_existing_pair(start_idx, sign, &kv.0)? {
+        if let Some((_, vbuf)) = self.lookup_existing_pair(start_idx, sign, &key)? {
             return Ok(Some(vbuf));
         }
 
         Ok(None)
     }
 
-    pub fn yank_key(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<Option<Value>> {
+    pub fn yank_key(&mut self, sign: Sign, key: Key) -> InternalResult<Option<Value>> {
         let start_idx = self.get_sign_hash(sign);
 
-        if let Some((idx, vbuf)) = self.lookup_existing_pair(start_idx, sign, &kv.0)? {
+        if let Some((idx, vbuf)) = self.lookup_existing_pair(start_idx, sign, &key)? {
             self.meta.decr_insert_count();
             self.set_pair_bytes(idx, EMPTY_PAIR_BYTES);
             self.set_sign(idx, TOMBSTONE_SIGN);
@@ -831,13 +829,13 @@ mod patra_tests {
         #[test]
         fn test_threshold_match_behavior_of_is_full_func() {
             let mut patra = open_patra();
-            assert_eq!(patra.is_full().unwrap(), false);
+            assert_eq!(patra.is_full(), false);
 
             for _ in 0..patra.stats.threshold {
                 patra.meta.incr_insert_count();
             }
 
-            assert_eq!(patra.is_full().unwrap(), true);
+            assert_eq!(patra.is_full(), true);
         }
 
         #[test]
@@ -1122,7 +1120,7 @@ mod patra_tests {
                 }
             }
 
-            assert!(patra.is_full().unwrap());
+            assert!(patra.is_full());
         }
 
         #[test]
@@ -1137,7 +1135,7 @@ mod patra_tests {
                 patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
             }
 
-            assert!(patra.is_full().unwrap());
+            assert!(patra.is_full());
 
             let k = b"extra".to_vec();
             let v = b"boom".to_vec();

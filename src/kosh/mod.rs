@@ -35,24 +35,45 @@ impl Kosh {
         Ok(Self { patra })
     }
 
+    #[inline(always)]
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
-        let patra = Patra::new(path, capacity)?;
-
-        Ok(Self { patra })
+        Ok(Self {
+            patra: Patra::new(path, capacity)?,
+        })
     }
 
     /// ## Errors
     ///
     /// - throws [InternalError::BucketFull] if slots are full (need to grow the bucket)
     /// - throws [InternalError::BucketOverflow] when bucket is full (can not be grown further)
-    pub fn set(&mut self, kv: KeyValue) -> InternalResult<()> {
+    pub fn upsert(&mut self, kv: KeyValue) -> InternalResult<()> {
         let sign = Hasher::new(&kv.0);
 
         // threshold has reached, so pair can't be inserted
-        if self.patra.is_full()? {
+        if self.patra.is_full() {
             return Err(InternalError::BucketFull);
         }
 
         self.patra.upsert_kv(sign, kv)
+    }
+
+    pub fn fetch(&self, key: Key) -> InternalResult<Option<Value>> {
+        let sign = Hasher::new(&key);
+        self.patra.fetch_value(sign, key)
+    }
+
+    pub fn yank(&mut self, key: Key) -> InternalResult<Option<Value>> {
+        let sign = Hasher::new(&key);
+        self.patra.yank_key(sign, key)
+    }
+
+    #[inline(always)]
+    pub fn pair_count(&self) -> InternalResult<usize> {
+        Ok(self.patra.pair_count())
+    }
+
+    #[inline(always)]
+    pub fn is_full(&self) -> InternalResult<bool> {
+        Ok(self.patra.is_full())
     }
 }

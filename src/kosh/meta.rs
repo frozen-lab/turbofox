@@ -184,7 +184,7 @@ impl Meta {
     pub fn decr_insert_count(&self) {
         // sanity check
         debug_assert!(
-            self.meta().inserts.load(Ordering::Relaxed) == 0,
+            self.meta().inserts.load(Ordering::Relaxed) > 0,
             "Decr must not be called when inserts are at 0."
         );
 
