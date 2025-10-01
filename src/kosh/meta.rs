@@ -147,7 +147,7 @@ impl Pair {
 
 #[cfg(test)]
 mod pair_tests {
-    use super::{Namespace, Pair};
+    use super::*;
 
     #[test]
     fn test_basic_round_trip() {
@@ -230,7 +230,6 @@ mod pair_tests {
             klen: 10,
             vlen: 10,
         };
-        assert!(valid.to_raw().is_ok());
 
         let invalid = Pair {
             ns: Namespace::Base,
@@ -238,7 +237,18 @@ mod pair_tests {
             klen: 10,
             vlen: 10,
         };
+
+        assert!(valid.to_raw().is_ok());
         assert!(invalid.to_raw().is_err());
+    }
+
+    #[test]
+    fn pair_from_raw_invalid_namespace() {
+        let mut raw: PairBytes = [0; 10];
+        raw[0] = 0xff;
+
+        let res = Pair::from_raw(raw);
+        assert!(res.is_err(), "Expected error for invalid namespace");
     }
 }
 
@@ -340,7 +350,12 @@ impl Meta {
 #[cfg(test)]
 mod meta_tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use tempfile::TempDir;
+
+    unsafe impl Send for Meta {}
+    unsafe impl Sync for Meta {}
 
     fn create_dummy_mmap_file() -> (MmapMut, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
@@ -363,7 +378,7 @@ mod meta_tests {
     }
 
     #[test]
-    fn test_meta_view_default() {
+    fn test_meta_view_default_init() {
         let (mut mmap, _tmp) = create_dummy_mmap_file();
         let meta = Meta::new(&mut mmap);
 
@@ -398,7 +413,7 @@ mod meta_tests {
     }
 
     #[test]
-    fn update_write_offset_works() {
+    fn updating_write_offset_works() {
         let (mut mmap, _tmp) = create_dummy_mmap_file();
         let meta = Meta::new(&mut mmap);
 
@@ -413,7 +428,7 @@ mod meta_tests {
     }
 
     #[test]
-    fn version_magic_mismatch_detected() {
+    fn version_magic_mismatch_detected_on_corrupt() {
         let (mut mmap, _tmp) = create_dummy_mmap_file();
 
         // manually corrupt magic bytes (first 4 bytes)
@@ -442,7 +457,7 @@ mod meta_tests {
     }
 
     #[test]
-    fn multiple_meta_views_reflect_each_other() {
+    fn validate_multiple_meta_views_syncup_on_parallel_update() {
         let (mut mmap, _tmp) = create_dummy_mmap_file();
 
         // Multiple wrappers w/ same pointer
@@ -473,7 +488,7 @@ mod meta_tests {
     }
 
     #[test]
-    fn increment_and_decrement_edge_behavior() {
+    fn validate_underflow_with_increment_and_decrement_at_edges() {
         let (mut mmap, _tmp) = create_dummy_mmap_file();
         let meta = Meta::new(&mut mmap);
 
@@ -491,7 +506,7 @@ mod meta_tests {
     }
 
     #[test]
-    fn test_meta_new_initializes_defaults() {
+    fn test_initializes_defaults() {
         let (mut mmap, _tmp) = create_dummy_mmap_file();
         let meta = Meta::new(&mut mmap);
 
@@ -502,7 +517,7 @@ mod meta_tests {
     }
 
     #[test]
-    fn test_meta_open_reads_existing() {
+    fn test_open_reads_existing() {
         let (mut mmap, _tmp) = create_dummy_mmap_file();
 
         // Create & initialize
@@ -516,5 +531,130 @@ mod meta_tests {
         assert_eq!(meta_b.get_insert_count(), 1);
         assert_eq!(meta_b.get_write_pointer(), 42);
         assert!(meta_b.is_current_version());
+    }
+
+    #[test]
+    fn test_size_of_matches_metaview() {
+        assert_eq!(Meta::size_of(), std::mem::size_of::<MetaView>());
+    }
+
+    #[test]
+    fn atomic_ops_sync_correctly_across_threads() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+
+        let meta = Arc::new(Meta::new(&mut mmap));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let writer = {
+            let meta = Arc::clone(&meta);
+            let barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                barrier.wait();
+
+                for _ in 0..5 {
+                    meta.incr_insert_count();
+                }
+
+                meta.update_write_offset(123);
+            })
+        };
+
+        let reader = {
+            let meta = Arc::clone(&meta);
+            let barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                barrier.wait();
+
+                let mut seen_count = 0;
+                let mut seen_wp = 0;
+
+                for _ in 0..10_000 {
+                    seen_count = meta.get_insert_count();
+                    seen_wp = meta.get_write_pointer();
+
+                    if seen_count == 5 && seen_wp >= 123 {
+                        break;
+                    }
+
+                    std::thread::yield_now();
+                }
+
+                assert_eq!(seen_count, 5, "reader must observe 5 inserts");
+                assert_eq!(seen_wp, 123, "reader must observe write offset 123");
+            })
+        };
+
+        writer.join().unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn validate_write_offset_update_for_underflow_overflow() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        assert_eq!(meta.get_write_pointer(), 0);
+
+        let prev = meta.update_write_offset(0);
+        assert_eq!(prev, 0);
+        assert_eq!(meta.get_write_pointer(), 0);
+
+        meta.update_write_offset(100);
+        assert_eq!(meta.get_write_pointer(), 100);
+
+        let prev2 = meta.update_write_offset(u64::MAX - 50);
+        assert_eq!(prev2, 100);
+
+        let expected = 100u128.wrapping_add((u64::MAX - 50) as u128) as u64;
+        assert_eq!(meta.get_write_pointer(), expected);
+    }
+
+    #[test]
+    fn init_on_corrupted_meta_counters() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        unsafe {
+            let view_ptr = mmap.as_mut_ptr() as *mut MetaView;
+
+            (*view_ptr).inserts = AtomicU64::new(u64::MAX - 1);
+            (*view_ptr).write_pointer = AtomicU64::new(u64::MAX - 123);
+        }
+
+        assert_eq!(meta.get_insert_count(), (u64::MAX - 1) as usize);
+        assert_eq!(meta.get_write_pointer(), u64::MAX - 123);
+    }
+
+    #[test]
+    fn explicit_insert_decr_from_multiple_objects() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+        let meta = Meta::new(&mut mmap);
+
+        for _ in 0..5 {
+            meta.incr_insert_count();
+        }
+
+        assert_eq!(meta.get_insert_count(), 5);
+
+        for expected in (0..5).rev() {
+            meta.decr_insert_count();
+            assert_eq!(meta.get_insert_count(), expected);
+        }
+    }
+
+    #[test]
+    fn init_open_after_new_without_modifications_are_synced() {
+        let (mut mmap, _tmp) = create_dummy_mmap_file();
+
+        let meta_a = Meta::new(&mut mmap);
+        let meta_b = Meta::open(&mut mmap);
+
+        assert!(meta_b.is_current_version());
+        assert_eq!(meta_a.get_insert_count(), 0);
+        assert_eq!(meta_b.get_insert_count(), 0);
+        assert_eq!(meta_a.get_write_pointer(), 0);
+        assert_eq!(meta_b.get_write_pointer(), 0);
     }
 }
