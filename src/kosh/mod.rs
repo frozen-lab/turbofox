@@ -1,7 +1,7 @@
 use crate::{
     error::{InternalError, InternalResult},
     hasher::Hasher,
-    kosh::patra::{Key, KeyValue, Patra, Sign},
+    kosh::patra::{Key, KeyValue, Patra, Sign, Value},
 };
 use std::path::Path;
 

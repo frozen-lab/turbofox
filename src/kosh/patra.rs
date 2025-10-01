@@ -35,7 +35,7 @@
 use crate::{
     error::{InternalError, InternalResult},
     hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
-    kosh::meta::{Meta, Namespace, Pair, PairBytes},
+    kosh::meta::{Meta, Namespace, Pair, PairBytes, EMPTY_PAIR_BYTES},
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::{
@@ -269,7 +269,7 @@ impl Patra {
         }
     }
 
-    pub fn read_pair_key(&mut self, bytes: PairBytes) -> InternalResult<Key> {
+    pub fn read_pair_key(&self, bytes: PairBytes) -> InternalResult<Key> {
         let pair = Pair::from_raw(bytes)?;
 
         let mut buf = vec![0u8; pair.klen as usize];
@@ -282,7 +282,7 @@ impl Patra {
         Ok(buf)
     }
 
-    pub fn read_pair_key_value(&mut self, bytes: PairBytes) -> InternalResult<KeyValue> {
+    pub fn read_pair_key_value(&self, bytes: PairBytes) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(bytes)?;
 
         let klen = pair.klen as usize;
@@ -358,8 +358,70 @@ impl Patra {
         Ok(())
     }
 
+    pub fn fetch_value(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<Option<Value>> {
+        let start_idx = self.get_sign_hash(sign);
+
+        if let Some((_, vbuf)) = self.lookup_existing_pair(start_idx, sign, &kv.0)? {
+            return Ok(Some(vbuf));
+        }
+
+        Ok(None)
+    }
+
+    pub fn yank_key(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<Option<Value>> {
+        let start_idx = self.get_sign_hash(sign);
+
+        if let Some((idx, vbuf)) = self.lookup_existing_pair(start_idx, sign, &kv.0)? {
+            self.meta.decr_insert_count();
+            self.set_pair_bytes(idx, EMPTY_PAIR_BYTES);
+            self.set_sign(idx, TOMBSTONE_SIGN);
+
+            return Ok(Some(vbuf));
+        }
+
+        Ok(None)
+    }
+
+    fn lookup_existing_pair(
+        &self,
+        start_idx: usize,
+        sign: Sign,
+        key: &Key,
+    ) -> InternalResult<Option<(usize, Vec<u8>)>> {
+        let mut idx = start_idx;
+
+        for _ in 0..self.stats.sign_rows {
+            let sign_row = self.get_sign_slice(idx);
+
+            for (i, ss) in sign_row.iter().enumerate() {
+                let item_idx = (idx * ROW_SIZE + i) % self.stats.capacity;
+
+                match *ss {
+                    // empty slot
+                    EMPTY_SIGN => return Ok(None),
+
+                    // taken slot (check for update)
+                    s if s == sign => {
+                        let pair_bytes = self.get_pair_bytes(item_idx);
+                        let (kbuf, vbuf) = self.read_pair_key_value(pair_bytes)?;
+
+                        if key == &kbuf {
+                            return Ok(Some((item_idx, vbuf)));
+                        }
+                    }
+
+                    _ => continue,
+                }
+            }
+
+            idx = (idx + 1) % self.stats.sign_rows;
+        }
+
+        Ok(None)
+    }
+
     fn lookup_upsert_slot(
-        &mut self,
+        &self,
         start_idx: usize,
         sign: Sign,
         key: &Key,
@@ -373,7 +435,7 @@ impl Patra {
                 let item_idx = (idx * ROW_SIZE + i) % self.stats.capacity;
 
                 match *ss {
-                    // empty slot
+                    // empty or deleted slot
                     EMPTY_SIGN | TOMBSTONE_SIGN => return Ok((item_idx, true)),
 
                     // taken slot (check for update)

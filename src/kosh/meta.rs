@@ -57,6 +57,7 @@ pub(crate) struct Pair {
 }
 
 pub(crate) type PairBytes = [u8; 10];
+pub(crate) const EMPTY_PAIR_BYTES: PairBytes = [0u8; 10];
 
 // NOTE: [PairBytes] is `[u8; 10]`, i.e. the alignment = 1, size = 10.
 // This assert ensures size is always a multiple of `u8`.
@@ -183,8 +184,8 @@ impl Meta {
     pub fn decr_insert_count(&self) {
         // sanity check
         debug_assert!(
-            self.meta().inserts.load(Ordering::Relaxed) > 0,
-            "Decr must not be called when insert is 0."
+            self.meta().inserts.load(Ordering::Relaxed) == 0,
+            "Decr must not be called when inserts are at 0."
         );
 
         self.meta().inserts.fetch_sub(1, Ordering::Release);
