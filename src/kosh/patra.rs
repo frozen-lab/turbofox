@@ -1146,5 +1146,93 @@ mod patra_tests {
                 "upserting new entry must fail when cap is full"
             );
         }
+
+        #[test]
+        fn test_fetch_value_for_existing_and_non_existing_keys() {
+            let mut patra = open_patra();
+
+            let key = b"hello".to_vec();
+            let val = b"world".to_vec();
+            let sign = Hasher::new(&key);
+
+            assert_eq!(
+                patra.fetch_value(sign, key.clone()).unwrap(),
+                None,
+                "Should return None for non-existent key"
+            );
+
+            patra.upsert_kv(sign, (key.clone(), val.clone())).unwrap();
+            let fetched = patra.fetch_value(sign, key.clone()).unwrap();
+
+            assert_eq!(
+                fetched,
+                Some(val),
+                "Must return correct value for an existing key"
+            );
+        }
+
+        #[test]
+        fn test_yank_key_removes_pair_and_returns_correct_value() {
+            let mut patra = open_patra();
+
+            let key = b"k1".to_vec();
+            let val = b"v1".to_vec();
+            let sign = Hasher::new(&key);
+
+            patra.upsert_kv(sign, (key.clone(), val.clone())).unwrap();
+            assert_eq!(patra.meta.get_insert_count(), 1);
+
+            let removed = patra.yank_key(sign, key.clone()).unwrap();
+            let res = patra.fetch_value(sign, key.clone()).unwrap();
+
+            assert_eq!(patra.meta.get_insert_count(), 0);
+            assert_eq!(res, None, "Should be None for non-existent key");
+            assert_eq!(
+                removed,
+                Some(val),
+                "yank should return the value and tombstone slot"
+            );
+        }
+
+        #[test]
+        fn test_yank_key_on_non_existent_key_returns_none() {
+            let mut patra = open_patra();
+
+            let key = b"ghost".to_vec();
+            let sign = Hasher::new(&key);
+            let removed = patra.yank_key(sign, key.clone()).unwrap();
+
+            assert!(removed.is_none());
+        }
+
+        #[test]
+        fn test_tombstone_reuse_after_yank() {
+            let mut patra = open_patra();
+
+            let key1 = b"k1".to_vec();
+            let val1 = b"v1".to_vec();
+            let sign1 = Hasher::new(&key1);
+
+            patra
+                .upsert_kv(sign1, (key1.clone(), val1.clone()))
+                .unwrap();
+            assert_eq!(patra.meta.get_insert_count(), 1);
+
+            let _ = patra.yank_key(sign1, key1.clone()).unwrap();
+            assert_eq!(patra.meta.get_insert_count(), 0);
+
+            // new key should reuse freed tombstone slot
+            let key2 = b"k2".to_vec();
+            let val2 = b"v2".to_vec();
+            let sign2 = Hasher::new(&key2);
+
+            patra
+                .upsert_kv(sign2, (key2.clone(), val2.clone()))
+                .unwrap();
+            assert_eq!(patra.meta.get_insert_count(), 1);
+
+            let fetched = patra.fetch_value(sign2, key2.clone()).unwrap();
+            assert_eq!(fetched, Some(val2));
+        }
     }
 }
