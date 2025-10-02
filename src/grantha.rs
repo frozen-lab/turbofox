@@ -1,6 +1,6 @@
 use crate::{
     error::InternalResult,
-    kosh::{Key, KeyValue, Kosh, Value},
+    kosh::{Key, KeyValue, Kosh, KoshConfig, Value},
 };
 use std::{
     ffi::OsString,
@@ -14,16 +14,26 @@ pub(crate) struct Grantha {
 }
 
 impl Grantha {
-    pub fn open<P: AsRef<Path>>(
-        dirpath: P,
+    pub fn open(
+        dirpath: impl AsRef<Path>,
         name: &'static str,
-        capacity: usize,
+        new_cap: usize,
     ) -> InternalResult<Self> {
-        let kosh = match Self::find_from_dir(&dirpath, name)? {
-            Some((path, cap)) => Kosh::open(path, cap)?,
+        let kosh = match Self::find_from_dir(dirpath.as_ref(), name)? {
+            Some((path, cap)) => {
+                let config = KoshConfig { path, name, cap };
+                Kosh::open(config)?
+            }
+
             None => {
-                let path = Self::create_file_path(&dirpath, name, capacity);
-                Kosh::new(path, capacity)?
+                let path = Self::create_file_path(dirpath.as_ref(), name, new_cap);
+                let config = KoshConfig {
+                    path,
+                    name,
+                    cap: new_cap,
+                };
+
+                Kosh::new(config)?
             }
         };
 
@@ -56,10 +66,7 @@ impl Grantha {
         Ok(self.kosh.is_full()?)
     }
 
-    fn find_from_dir<P: AsRef<Path>>(
-        dirpath: P,
-        name: &str,
-    ) -> InternalResult<Option<(PathBuf, usize)>> {
+    fn find_from_dir(dirpath: &Path, name: &str) -> InternalResult<Option<(PathBuf, usize)>> {
         for entry in fs::read_dir(dirpath)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
@@ -92,7 +99,7 @@ impl Grantha {
         cap_str.parse::<usize>().ok()
     }
 
-    fn create_file_path<P: AsRef<Path>>(dirpath: P, name: &str, cap: usize) -> PathBuf {
-        dirpath.as_ref().join(format!("{name}_{cap}"))
+    fn create_file_path(dirpath: &Path, name: &str, cap: usize) -> PathBuf {
+        dirpath.join(format!("{name}_{cap}"))
     }
 }

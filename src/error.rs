@@ -1,3 +1,5 @@
+use crate::kosh::KoshConfig;
+
 /// A specialized `Result` type for operations in [TurboCache]
 pub type TurboResult<T> = Result<T, TurboError>;
 
@@ -15,7 +17,7 @@ pub enum TurboError {
     /// The bucket has reached its maximum size and cannot grow further.
     ///
     /// The associated `usize` indicates the capacity at which it failed.
-    BucketOverflow,
+    BucketOverflow(String),
 
     /// A fallback for unexpected or uncategorized errors.
     Unknown,
@@ -25,7 +27,17 @@ impl From<InternalError> for TurboError {
     fn from(err: InternalError) -> Self {
         match err {
             InternalError::Io(e) => TurboError::Io(e),
-            InternalError::BucketOverflow => TurboError::BucketOverflow,
+            InternalError::BucketOverflow(config) => {
+                let bkt = {
+                    if let Some(cfg) = config {
+                        cfg.name
+                    } else {
+                        "unknown bucket"
+                    }
+                };
+
+                TurboError::BucketOverflow(bkt.to_string())
+            }
             _ => TurboError::Unknown,
         }
     }
@@ -42,8 +54,12 @@ impl std::fmt::Display for TurboError {
         match self {
             TurboError::Io(err) => write!(f, "[ERROR]: {}\n{err}", IO_ERROR),
             TurboError::Unknown => write!(f, "[ERROR]: {}", UNK_ERROR),
-            TurboError::BucketOverflow => {
-                write!(f, "[ERROR]: {}", BKT_OVERFLOW_ERROR)
+            TurboError::BucketOverflow(bkt) => {
+                write!(
+                    f,
+                    "[ERROR]: {}\nOverflow for {bkt} Bucket",
+                    BKT_OVERFLOW_ERROR
+                )
             }
         }
     }
@@ -76,7 +92,7 @@ pub(crate) enum InternalError {
     /// it has old (outdated) version
     ///
     /// **Must be handled internally**
-    InvalidFile,
+    InvalidFile(Option<KoshConfig>),
 
     /// Implies that the underlying bucket is full
     ///
@@ -84,7 +100,7 @@ pub(crate) enum InternalError {
     /// we spawn staging bucket
     ///
     /// **Must be handled internally**
-    BucketFull,
+    BucketFull(Option<KoshConfig>),
 
     /// The bucket contains an invalid entry
     ///
@@ -93,7 +109,7 @@ pub(crate) enum InternalError {
     /// - Invalid [Namespace] value
     ///
     /// **Must be handled internally**
-    InvalidEntry(String),
+    InvalidEntry(Option<KoshConfig>),
 
     /// The bucket has reached its max capacity and can not be grown further.
     ///
@@ -103,7 +119,7 @@ pub(crate) enum InternalError {
     /// - The insertion offset has reached its max cap of `2^40 - 1` i.e `u40::Max`
     ///
     /// NOTE: This is rare, but acts as a guard rail to prevent crash.
-    BucketOverflow,
+    BucketOverflow(Option<KoshConfig>),
 }
 
 impl From<std::io::Error> for InternalError {

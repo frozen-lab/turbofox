@@ -1,50 +1,62 @@
+mod meta;
+mod patra;
+mod simd;
+
+pub(crate) use crate::kosh::patra::{Key, KeyValue, Value};
+
 use crate::{
     error::{InternalError, InternalResult},
     hasher::Hasher,
     kosh::patra::{Patra, Sign, ROW_SIZE},
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub(crate) use crate::kosh::patra::{Key, KeyValue, Value};
-
-mod meta;
-mod patra;
-mod simd;
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub(crate) struct KoshConfig {
+    pub path: PathBuf,
+    pub name: &'static str,
+    pub cap: usize,
+}
 
 #[derive(Debug)]
 pub(crate) struct Kosh {
+    config: KoshConfig,
     patra: Patra,
 }
 
 impl Kosh {
-    pub fn open<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
-        let patra = match Patra::open(&path, capacity) {
+    pub fn open(config: KoshConfig) -> InternalResult<Self> {
+        let patra = match Patra::open(&config) {
             Ok(f) => f,
 
-            Err(InternalError::InvalidFile) => {
+            Err(InternalError::InvalidFile(_)) => {
                 // returns IO error if something goes wrong
-                std::fs::remove_file(&path)?;
+                std::fs::remove_file(&config.path)?;
 
                 // now we create a new bucket file
                 //
                 // NOTE: if the same or any error occurs again,
                 // we simply throw it out!
-                Patra::new(&path, capacity)?
+                Patra::new(&config)?
             }
 
             Err(e) => return Err(e),
         };
 
-        Ok(Self { patra })
+        Ok(Self { config, patra })
     }
 
     #[inline(always)]
-    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+    pub fn new(config: KoshConfig) -> InternalResult<Self> {
         // sanity check
-        debug_assert!(capacity % ROW_SIZE == 0, "Capacity must be multiple of 16");
+        debug_assert!(
+            config.cap % ROW_SIZE == 0,
+            "Capacity must be multiple of 16"
+        );
 
         Ok(Self {
-            patra: Patra::new(path, capacity)?,
+            patra: Patra::new(&config)?,
+            config,
         })
     }
 
@@ -57,7 +69,7 @@ impl Kosh {
 
         // threshold has reached, so pair can't be inserted
         if self.patra.is_full() {
-            return Err(InternalError::BucketFull);
+            return Err(InternalError::BucketFull(Some(self.config.clone())));
         }
 
         self.patra.upsert_kv(sign, kv)
@@ -86,23 +98,35 @@ impl Kosh {
 
 #[cfg(test)]
 mod kosh_tests {
+    use std::path::PathBuf;
+
     use super::*;
     use tempfile::TempDir;
 
     const TEST_CAP: usize = ROW_SIZE * 2;
 
+    fn create_config(path: PathBuf, cap: usize) -> KoshConfig {
+        KoshConfig {
+            name: "kosh_test",
+            path,
+            cap,
+        }
+    }
+
     fn open_kosh() -> Kosh {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("kosh_test");
+        let config = create_config(path, TEST_CAP);
 
-        Kosh::new(path, TEST_CAP).expect("create kosh")
+        Kosh::new(config).expect("create kosh")
     }
 
     fn open_kosh_with_cap(cap: usize) -> Kosh {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("kosh_test");
+        let config = create_config(path, TEST_CAP);
 
-        Kosh::new(path, cap).expect("create kosh")
+        Kosh::new(config).expect("create kosh")
     }
 
     #[test]
@@ -176,7 +200,9 @@ mod kosh_tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(8).unwrap();
 
-        let k = Kosh::open(&path, TEST_CAP).unwrap();
+        let cfg = create_config(path, TEST_CAP);
+        let k = Kosh::open(cfg).unwrap();
+
         assert_eq!(k.pair_count().unwrap(), 0);
         assert_eq!(k.is_full().unwrap(), false);
     }
@@ -185,10 +211,13 @@ mod kosh_tests {
     fn test_kosh_open_on_capacity_mismatch_reinits_without_failure() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("kosh_cap");
-        let _ = Kosh::new(&path, TEST_CAP).unwrap();
+        let cfg = create_config(path.clone(), TEST_CAP);
+        let cfg2 = create_config(path, TEST_CAP * 2);
+
+        let _ = Kosh::new(cfg).unwrap();
 
         assert!(
-            Kosh::open(&path, TEST_CAP * 2).is_ok(),
+            Kosh::open(cfg2).is_ok(),
             "invalid or diff cap creates invalid file, so we must re-init it"
         );
     }
@@ -208,7 +237,7 @@ mod kosh_tests {
                 }
 
                 Err(e) => {
-                    assert!(matches!(e, InternalError::BucketFull));
+                    assert!(matches!(e, InternalError::BucketFull(_)));
                     break;
                 }
             }

@@ -35,12 +35,15 @@
 use crate::{
     error::{InternalError, InternalResult},
     hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
-    kosh::meta::{Meta, Namespace, Pair, PairBytes, EMPTY_PAIR_BYTES},
+    kosh::{
+        meta::{Meta, Namespace, Pair, PairBytes, EMPTY_PAIR_BYTES},
+        KoshConfig,
+    },
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
-    path::Path,
+    path::{Path, PathBuf},
     usize,
 };
 
@@ -75,28 +78,32 @@ pub(crate) struct Patra {
     stats: Stats,
     mmap: MmapMut,
     file: File,
+    config: KoshConfig,
 }
 
 impl Patra {
-    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+    pub fn new(config: &KoshConfig) -> InternalResult<Self> {
         // sanity check
-        debug_assert!(capacity % ROW_SIZE == 0, "Capacity must be multiple of 16");
+        debug_assert!(
+            config.cap % ROW_SIZE == 0,
+            "Capacity must be multiple of 16"
+        );
 
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(true)
-            .open(path)?;
+            .open(&config.path)?;
 
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
-        let sign_rows = capacity.wrapping_div(ROW_SIZE);
+        let sign_rows = config.cap.wrapping_div(ROW_SIZE);
 
         let sign_offset = Meta::size_of();
-        let pair_offset = sign_offset + capacity * size_of::<Sign>();
+        let pair_offset = sign_offset + config.cap * size_of::<Sign>();
 
-        let header_size = Self::calc_header_size(capacity);
-        let threshold = Self::calc_threshold(capacity);
+        let header_size = Self::calc_header_size(config.cap);
+        let threshold = Self::calc_threshold(config.cap);
 
         // zero-init the file
         file.set_len(header_size as u64)?;
@@ -105,8 +112,8 @@ impl Patra {
         let meta = Meta::new(&mut mmap);
 
         let stats = Stats {
+            capacity: config.cap,
             header_size,
-            capacity,
             sign_rows,
             sign_offset,
             pair_offset,
@@ -118,12 +125,16 @@ impl Patra {
             mmap,
             meta,
             stats,
+            config: config.clone(),
         })
     }
 
-    pub fn open<P: AsRef<Path>>(path: P, capacity: usize) -> InternalResult<Self> {
+    pub fn open(config: &KoshConfig) -> InternalResult<Self> {
         // sanity check
-        debug_assert!(capacity % ROW_SIZE == 0, "Capacity must be multiple of 16");
+        debug_assert!(
+            config.cap % ROW_SIZE == 0,
+            "Capacity must be multiple of 16"
+        );
 
         let file = OpenOptions::new()
             // Create the file just in case to avoid crash
@@ -135,16 +146,16 @@ impl Patra {
             .read(true)
             .write(true)
             .truncate(false)
-            .open(path)?;
+            .open(&config.path)?;
 
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
-        let sign_rows = capacity.wrapping_div(ROW_SIZE);
+        let sign_rows = config.cap.wrapping_div(ROW_SIZE);
 
         let sign_offset = Meta::size_of();
-        let pair_offset = sign_offset + capacity * size_of::<Sign>();
+        let pair_offset = sign_offset + config.cap * size_of::<Sign>();
 
-        let header_size = Self::calc_header_size(capacity);
-        let threshold = Self::calc_threshold(capacity);
+        let header_size = Self::calc_header_size(config.cap);
+        let threshold = Self::calc_threshold(config.cap);
 
         let file_len = file.metadata()?.len();
 
@@ -152,7 +163,7 @@ impl Patra {
         // invalid initilization or the file was tampered with! In this scenerio,
         // we delete the file and create it again!
         if file_len < header_size as u64 {
-            return Err(InternalError::InvalidFile);
+            return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
         let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
@@ -162,22 +173,22 @@ impl Patra {
         // we should simply delete the file, as we do not have any earlier
         // versions to support.
         if !meta.is_current_version() {
-            return Err(InternalError::InvalidFile);
+            return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
         // safeguard for the write pointer
         if meta.get_write_pointer() > file_len {
-            return Err(InternalError::InvalidFile);
+            return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
         // safeguard for the insert count
-        if meta.get_insert_count() > capacity {
-            return Err(InternalError::InvalidFile);
+        if meta.get_insert_count() > config.cap {
+            return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
         let stats = Stats {
+            capacity: config.cap,
             header_size,
-            capacity,
             sign_rows,
             sign_offset,
             pair_offset,
@@ -189,6 +200,7 @@ impl Patra {
             mmap,
             meta,
             stats,
+            config: config.clone(),
         })
     }
 
@@ -453,7 +465,7 @@ impl Patra {
             idx = (idx + 1) % self.stats.sign_rows;
         }
 
-        Err(InternalError::BucketFull)
+        Err(InternalError::BucketFull(Some(self.config.clone())))
     }
 
     pub fn get_sign_hash(&self, sign: Sign) -> usize {
@@ -621,18 +633,28 @@ mod patra_tests {
 
         const TEST_CAP: usize = ROW_SIZE * 2;
 
+        fn create_config(path: PathBuf, cap: usize) -> KoshConfig {
+            KoshConfig {
+                name: "kosh_test",
+                path,
+                cap,
+            }
+        }
+
         fn open_patra() -> Patra {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("patra_test");
+            let cfg = create_config(path, TEST_CAP);
 
-            Patra::new(path, TEST_CAP).expect("create patra")
+            Patra::new(&cfg).expect("create patra")
         }
 
         fn open_patra_with_cap(cap: usize) -> Patra {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("patra_test");
+            let cfg = create_config(path, cap);
 
-            Patra::new(path, cap).expect("create patra")
+            Patra::new(&cfg).expect("create patra")
         }
 
         #[test]
@@ -667,8 +689,9 @@ mod patra_tests {
             let tmp = TempDir::new().unwrap();
             let path = tmp.path().join("patra_reopen");
 
-            let _ = Patra::new(&path, TEST_CAP).unwrap();
-            let reopened = Patra::open(&path, TEST_CAP).unwrap();
+            let cfg = create_config(path, TEST_CAP);
+            let _ = Patra::new(&cfg).unwrap();
+            let reopened = Patra::open(&cfg).unwrap();
 
             assert!(reopened.meta.is_current_version());
             assert_eq!(reopened.meta.get_insert_count(), 0usize);
@@ -681,10 +704,12 @@ mod patra_tests {
             let path = tmp.path().join("patra_badcap");
 
             {
-                let _ = Patra::new(&path, TEST_CAP).unwrap();
+                let cfg = create_config(path.clone(), TEST_CAP);
+                let _ = Patra::new(&cfg).unwrap();
             }
 
-            assert!(Patra::open(&path, TEST_CAP * 2).is_err());
+            let cfg = create_config(path, TEST_CAP * 2);
+            assert!(Patra::open(&cfg).is_err());
         }
 
         #[test]
@@ -842,14 +867,15 @@ mod patra_tests {
         fn test_rejection_on_courrepted_file() {
             let tmp = TempDir::new().unwrap();
             let path = tmp.path().join("patra_invalid");
+            let cfg = create_config(path.clone(), TEST_CAP);
 
             // invalid file
             let f = std::fs::File::create(&path).unwrap();
             f.set_len(8).unwrap();
 
             assert!(matches!(
-                Patra::open(&path, TEST_CAP),
-                Err(InternalError::InvalidFile)
+                Patra::open(&cfg),
+                Err(InternalError::InvalidFile(_))
             ));
         }
 
@@ -934,7 +960,8 @@ mod patra_tests {
         fn test_tombstone_slot_reuse_for_insert() {
             let td = TempDir::new().unwrap();
             let path = td.path().join("patra_tombstone");
-            let mut patra = Patra::new(path.clone(), 16).unwrap();
+            let cfg = create_config(path.clone(), TEST_CAP);
+            let mut patra = Patra::new(&cfg).unwrap();
 
             //
             // KV1
@@ -1017,11 +1044,11 @@ mod patra_tests {
 
         #[test]
         fn test_upsert_on_collision_stores_sign_with_probing() {
-            let mut patra = Patra::new(
-                tempfile::tempdir().unwrap().path().join("patra_collision"),
-                ROW_SIZE * 2,
-            )
-            .unwrap();
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("patra_collision");
+            let cfg = create_config(path, ROW_SIZE * 2);
+
+            let mut patra = Patra::new(&cfg).unwrap();
 
             // Craft two keys with same row hash
             let key1 = b"a_key".to_vec();
@@ -1073,7 +1100,8 @@ mod patra_tests {
 
             // creation
             {
-                let mut patra = Patra::new(&path, TEST_CAP).unwrap();
+                let cfg = create_config(path.clone(), TEST_CAP);
+                let mut patra = Patra::new(&cfg).unwrap();
 
                 let key = b"persist".to_vec();
                 let val = b"data".to_vec();
@@ -1085,7 +1113,8 @@ mod patra_tests {
 
             // re-open
             {
-                let mut reopened = Patra::open(&path, TEST_CAP).unwrap();
+                let cfg = create_config(path, TEST_CAP);
+                let mut reopened = Patra::open(&cfg).unwrap();
                 assert_eq!(reopened.meta.get_insert_count(), 1);
 
                 let key = b"persist".to_vec();
@@ -1102,49 +1131,6 @@ mod patra_tests {
                 assert_eq!(rk, b"persist");
                 assert_eq!(rv, b"data");
             }
-        }
-
-        #[test]
-        #[cfg(not(debug_assertions))]
-        fn test_upsert_kv_till_full_capacity() {
-            let mut patra = open_patra_with_cap(32);
-            let mut rng = sphur::Sphur::new_seeded(0x10203040);
-
-            loop {
-                let i = rng.gen_u32();
-                let k = format!("key{i}").into_bytes();
-                let sign = Hasher::new(&k);
-
-                if patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).is_err() {
-                    break;
-                }
-            }
-
-            assert!(patra.is_full());
-        }
-
-        #[test]
-        #[cfg(not(debug_assertions))]
-        fn test_full_capacity() {
-            let mut patra = open_patra_with_cap(32);
-
-            for i in 0..patra.stats.capacity {
-                let k = format!("key{i}").into_bytes();
-                let sign = Hasher::new(&k);
-
-                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
-            }
-
-            assert!(patra.is_full());
-
-            let k = b"extra".to_vec();
-            let v = b"boom".to_vec();
-            let sign = Hasher::new(&k);
-
-            assert!(
-                patra.upsert_kv(sign, (k, v)).is_err(),
-                "upserting new entry must fail when cap is full"
-            );
         }
 
         #[test]
@@ -1233,6 +1219,49 @@ mod patra_tests {
 
             let fetched = patra.fetch_value(sign2, key2.clone()).unwrap();
             assert_eq!(fetched, Some(val2));
+        }
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_upsert_kv_till_full_capacity() {
+            let mut patra = open_patra_with_cap(32);
+            let mut rng = sphur::Sphur::new_seeded(0x10203040);
+
+            loop {
+                let i = rng.gen_u32();
+                let k = format!("key{i}").into_bytes();
+                let sign = Hasher::new(&k);
+
+                if patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).is_err() {
+                    break;
+                }
+            }
+
+            assert!(patra.is_full());
+        }
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_full_capacity() {
+            let mut patra = open_patra_with_cap(32);
+
+            for i in 0..patra.stats.capacity {
+                let k = format!("key{i}").into_bytes();
+                let sign = Hasher::new(&k);
+
+                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
+            }
+
+            assert!(patra.is_full());
+
+            let k = b"extra".to_vec();
+            let v = b"boom".to_vec();
+            let sign = Hasher::new(&k);
+
+            assert!(
+                patra.upsert_kv(sign, (k, v)).is_err(),
+                "upserting new entry must fail when cap is full"
+            );
         }
     }
 }

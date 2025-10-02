@@ -36,9 +36,7 @@ impl TryFrom<u8> for Namespace {
     fn try_from(value: u8) -> InternalResult<Namespace> {
         match value {
             0 => Ok(Namespace::Base),
-            err_id => Err(InternalError::InvalidEntry(format!(
-                "Invalid namespace: {err_id}"
-            ))),
+            err_id => Err(InternalError::InvalidEntry(None)),
         }
     }
 }
@@ -74,7 +72,7 @@ impl Pair {
         // NOTE: [self.offset] can not grow beyound (2^40 - 1)
         //
         if (self.offset & !((1u64 << 40) - 1)) != 0 {
-            return Err(InternalError::BucketOverflow);
+            return Err(InternalError::BucketOverflow(None));
         };
 
         let mut out = [0u8; 10];
