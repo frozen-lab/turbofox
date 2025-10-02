@@ -18,7 +18,7 @@ pub enum TurboError {
     BucketOverflow,
 
     /// A fallback for unexpected or uncategorized errors.
-    Unknown(String),
+    Unknown,
 }
 
 impl From<InternalError> for TurboError {
@@ -26,7 +26,7 @@ impl From<InternalError> for TurboError {
         match err {
             InternalError::Io(e) => TurboError::Io(e),
             InternalError::BucketOverflow => TurboError::BucketOverflow,
-            _ => TurboError::Unknown("Unknown error has occurred".into()),
+            _ => TurboError::Unknown,
         }
     }
 }
@@ -40,14 +40,19 @@ impl From<std::io::Error> for TurboError {
 impl std::fmt::Display for TurboError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TurboError::Io(err) => write!(f, "I/O error: {err}"),
-            TurboError::Unknown(err) => write!(f, "Unknown error: {err}"),
+            TurboError::Io(err) => write!(f, "[ERROR]: {}\n{err}", IO_ERROR),
+            TurboError::Unknown => write!(f, "[ERROR]: {}", UNK_ERROR),
             TurboError::BucketOverflow => {
-                write!(f, "Overflow: Bucket is full and can not grow any further")
+                write!(f, "[ERROR]: {}", BKT_OVERFLOW_ERROR)
             }
         }
     }
 }
+
+const IO_ERROR: &'static str = "An I/O releated error has occurred ;[";
+const UNK_ERROR: &'static str = "Some unknown error has occurred ¬_¬";
+const BKT_OVERFLOW_ERROR: &'static str =
+    "Bucket has reached it's max capacity and can't be grown further ;_;";
 
 /// A custom result type for internal error handleing
 pub(crate) type InternalResult<T> = Result<T, InternalError>;

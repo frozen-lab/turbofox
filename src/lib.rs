@@ -9,6 +9,7 @@ use std::{
 
 mod bucket;
 mod error;
+mod grantha;
 mod hasher;
 mod kosh;
 mod logger;
@@ -88,7 +89,7 @@ impl TurboCache {
         }
 
         // HACK: This should never occur!
-        Err(TurboError::Unknown("Bucket not found".into()))
+        Err(TurboError::Unknown)
     }
 }
 

@@ -1,14 +1,17 @@
 use crate::{
     error::{InternalError, InternalResult},
     hasher::Hasher,
-    kosh::patra::{Key, KeyValue, Patra, Sign, Value, ROW_SIZE},
+    kosh::patra::{Patra, Sign, ROW_SIZE},
 };
 use std::path::Path;
+
+pub(crate) use crate::kosh::patra::{Key, KeyValue, Value};
 
 mod meta;
 mod patra;
 mod simd;
 
+#[derive(Debug)]
 pub(crate) struct Kosh {
     patra: Patra,
 }
