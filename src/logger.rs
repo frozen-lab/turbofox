@@ -1,14 +1,13 @@
 use log::{Level, Record};
 
-#[derive(Clone)]
-#[allow(unused)]
+#[derive(Debug, Clone)]
 pub(crate) struct Logger {
     pub enabled: bool,
     pub target: String,
 }
 
-#[allow(unused)]
 impl Logger {
+    #[inline(always)]
     pub fn new(enabled: bool, target: impl Into<String>) -> Self {
         Self {
             enabled,
@@ -16,7 +15,7 @@ impl Logger {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -61,72 +60,120 @@ impl Logger {
     }
 }
 
+pub(crate) struct DebugLogger;
+
+impl DebugLogger {
+    #[inline(always)]
+    pub fn trace(msg: impl std::fmt::Display) {
+        #[cfg(debug_assertions)]
+        {
+            println!("[TRACE] {}", msg);
+        }
+    }
+
+    #[inline(always)]
+    pub fn debug(msg: impl std::fmt::Display) {
+        #[cfg(debug_assertions)]
+        {
+            println!("[DEBUG] {}", msg);
+        }
+    }
+
+    #[inline(always)]
+    pub fn info(msg: impl std::fmt::Display) {
+        #[cfg(debug_assertions)]
+        {
+            println!("[INFO] {}", msg);
+        }
+    }
+
+    #[inline(always)]
+    pub fn warn(msg: impl std::fmt::Display) {
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[WARN] {}", msg);
+        }
+    }
+
+    #[inline(always)]
+    pub fn error(msg: impl std::fmt::Display) {
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[ERROR] {}", msg);
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests {
+mod logger_tests {
     use super::*;
-    use log::{Level, Metadata, Record};
-    use once_cell::sync::OnceCell;
-    use std::sync::{Arc, Mutex};
 
-    // a dummy looger that writes into shared buffer
-    struct DummyLogger {
-        buf: Arc<Mutex<Vec<String>>>,
-        level: Level,
-    }
+    mod logger {
+        use super::*;
+        use log::{Level, Metadata, Record};
+        use once_cell::sync::OnceCell;
+        use std::sync::{Arc, Mutex};
 
-    impl log::Log for DummyLogger {
-        fn enabled(&self, metadata: &Metadata) -> bool {
-            metadata.level() <= self.level
+        // a dummy looger that writes into shared buffer
+        struct DummyLogger {
+            buf: Arc<Mutex<Vec<String>>>,
+            level: Level,
         }
 
-        fn log(&self, record: &Record) {
-            if self.enabled(record.metadata()) {
-                let msg = format!(
-                    "[{}][{}] {}",
-                    record.level(),
-                    record.target(),
-                    record.args()
-                );
-
-                self.buf.lock().unwrap().push(msg);
+        impl log::Log for DummyLogger {
+            fn enabled(&self, metadata: &Metadata) -> bool {
+                metadata.level() <= self.level
             }
+
+            fn log(&self, record: &Record) {
+                if self.enabled(record.metadata()) {
+                    let msg = format!(
+                        "[{}][{}] {}",
+                        record.level(),
+                        record.target(),
+                        record.args()
+                    );
+
+                    self.buf.lock().unwrap().push(msg);
+                }
+            }
+
+            fn flush(&self) {}
         }
 
-        fn flush(&self) {}
-    }
+        static INIT: OnceCell<Arc<Mutex<Vec<String>>>> = OnceCell::new();
 
-    static INIT: OnceCell<Arc<Mutex<Vec<String>>>> = OnceCell::new();
+        fn init_test_logger(level: Level) -> Arc<Mutex<Vec<String>>> {
+            INIT.get_or_init(|| {
+                let buf = Arc::new(Mutex::new(Vec::new()));
+                let logger = DummyLogger {
+                    buf: buf.clone(),
+                    level,
+                };
+                let _ = log::set_boxed_logger(Box::new(logger));
 
-    fn init_test_logger(level: Level) -> Arc<Mutex<Vec<String>>> {
-        INIT.get_or_init(|| {
-            let buf = Arc::new(Mutex::new(Vec::new()));
-            let logger = DummyLogger {
-                buf: buf.clone(),
-                level,
-            };
-            let _ = log::set_boxed_logger(Box::new(logger));
+                log::set_max_level(level.to_level_filter());
+                buf
+            })
+            .clone()
+        }
 
-            log::set_max_level(level.to_level_filter());
-            buf
-        })
-        .clone()
-    }
+        #[test]
+        fn test_logging() {
+            let buf = init_test_logger(Level::Trace);
+            let logger = Logger::new(true, "unit_test");
 
-    #[test]
-    fn test_logging() {
-        let buf = init_test_logger(Level::Trace);
-        let logger = Logger::new(true, "unit_test");
+            logger.debug(format_args!("debug message {}", 1));
+            logger.info("info message");
+            logger.warn("warning!");
+            logger.error("error!");
 
-        logger.debug(format_args!("debug message {}", 1));
-        logger.info("info message");
-        logger.warn("warning!");
-        logger.error("error!");
+            let logs = buf.lock().unwrap();
 
-        let logs = buf.lock().unwrap().clone();
-
-        assert!(logs.iter().any(|l| l.contains("debug message 1")));
-        assert!(logs.iter().any(|l| l.contains("info message")));
-        assert!(logs.iter().any(|l| l.contains("warning!")));
-        assert!(logs.iter().any(|l| l.contains("error!")));
+            assert!(logs.iter().any(|l| l.contains("debug message 1")));
+            assert!(logs.iter().any(|l| l.contains("info message")));
+            assert!(logs.iter().any(|l| l.contains("warning!")));
+            assert!(logs.iter().any(|l| l.contains("error!")));
+        }
     }
 }
