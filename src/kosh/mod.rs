@@ -1,15 +1,30 @@
+use crate::{
+    error::{InternalError, InternalResult},
+    hasher::Hasher,
+    kosh::patra::Patra,
+};
+use std::path::{Path, PathBuf};
+
 mod meta;
 mod patra;
 mod simd;
 
-pub(crate) use crate::kosh::patra::{Key, KeyValue, Value};
+/// ----------------------------------------
+/// Constants and Types
+/// ----------------------------------------
 
-use crate::{
-    error::{InternalError, InternalResult},
-    hasher::Hasher,
-    kosh::patra::{Patra, Sign, ROW_SIZE},
-};
-use std::path::{Path, PathBuf};
+pub(crate) const VERSION: u32 = 3;
+pub(crate) const MAGIC: [u8; 4] = *b"TCv3";
+pub(crate) const ROW_SIZE: usize = 16;
+
+pub(crate) type Sign = u32;
+pub(crate) type Key = Vec<u8>;
+pub(crate) type Value = Vec<u8>;
+pub(crate) type KeyValue = (Key, Value);
+
+/// ----------------------------------------
+/// Config
+/// ----------------------------------------
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct KoshConfig {
@@ -17,6 +32,10 @@ pub(crate) struct KoshConfig {
     pub name: &'static str,
     pub cap: usize,
 }
+
+/// ----------------------------------------
+/// Kosh
+/// ----------------------------------------
 
 #[derive(Debug)]
 pub(crate) struct Kosh {

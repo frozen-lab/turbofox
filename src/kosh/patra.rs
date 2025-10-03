@@ -38,7 +38,7 @@ use crate::{
     hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
     kosh::{
         meta::{Meta, Namespace, Pair, PairBytes, EMPTY_PAIR_BYTES},
-        KoshConfig,
+        Key, KeyValue, KoshConfig, Sign, Value, ROW_SIZE,
     },
 };
 use memmap2::{MmapMut, MmapOptions};
@@ -47,17 +47,6 @@ use std::{
     path::{Path, PathBuf},
     usize,
 };
-
-/// ----------------------------------------
-/// Constants and Types
-/// ----------------------------------------
-
-pub(crate) type Sign = u32;
-pub(crate) type Key = Vec<u8>;
-pub(crate) type Value = Vec<u8>;
-pub(crate) type KeyValue = (Key, Value);
-
-pub(crate) const ROW_SIZE: usize = 16;
 
 /// ----------------------------------------
 /// Stats

@@ -1,16 +1,10 @@
 use crate::{
     debug_error,
     error::{InternalError, InternalResult},
+    kosh::{MAGIC, VERSION},
 };
 use memmap2::MmapMut;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// ----------------------------------------
-/// Constants and Types
-/// ----------------------------------------
-
-pub(crate) const VERSION: u32 = 3;
-pub(crate) const MAGIC: [u8; 4] = *b"TCv3";
 
 /// ----------------------------------------
 /// Namespaces
