@@ -67,6 +67,8 @@ impl Grantha {
     }
 
     fn find_from_dir(dirpath: &Path, name: &str) -> InternalResult<Option<(PathBuf, usize)>> {
+        let mut best: Option<(PathBuf, usize)> = None;
+
         for entry in fs::read_dir(dirpath)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
@@ -75,19 +77,21 @@ impl Grantha {
                 continue;
             }
 
-            let filename = entry.file_name();
-
-            let filename = match filename.to_str() {
+            let tmp = entry.file_name();
+            let filename = match tmp.to_str() {
                 Some(f) => f,
                 None => continue,
             };
 
             if let Some(cap) = Self::extract_capacity(filename, name) {
-                return Ok(Some((entry.path(), cap)));
+                match &best {
+                    Some((_, best_cap)) if *best_cap >= cap => {}
+                    _ => best = Some((entry.path(), cap)),
+                }
             }
         }
 
-        Ok(None)
+        Ok(best)
     }
 
     fn extract_capacity(filename: &str, name: &str) -> Option<usize> {
