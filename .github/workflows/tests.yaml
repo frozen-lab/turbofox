@@ -92,7 +92,7 @@ jobs:
           cache-key: ${{ hashFiles('**/Cargo.lock') }}
 
       - name: Default Example
-        run: cargo run --example default --release
+        run: cargo run --example basic --release
 
-      - name: Custom Buckets Example
-        run: cargo run --example custom --release
+      - name: Turbo Buckets Example
+        run: cargo run --example turbo_buckets --release
