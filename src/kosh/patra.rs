@@ -633,18 +633,27 @@ impl Patra {
                     // taken slot (check for update)
                     s if s == sign => {
                         let pair_bytes = self.get_pair_bytes(item_idx);
-                        let (kbuf, vbuf) = self.read_pair_key_value(pair_bytes).map_err(|e| {
-                            // TODO: IMP logs, must use of Logger
-                            debug_error!(
-                                "Patra ({}) had IO error while reading data buf for key ({:?})",
-                                self.config.name,
-                                key
-                            );
-                            e
-                        })?;
 
-                        if key == &kbuf {
-                            return Ok(Some((item_idx, vbuf)));
+                        match self.read_pair_key_value(pair_bytes) {
+                            Ok((kbuf, vbuf)) => {
+                                if key == &kbuf {
+                                    return Ok(Some((item_idx, vbuf)));
+                                }
+                            }
+
+                            Err(e) => {
+                                debug_error!(
+                                    "Patra ({}) had IO error while reading data buf for key ({:?}): {:?}",
+                                    self.config.name,
+                                    key,
+                                    e
+                                );
+
+                                // DEBUG: If we found an invalid entry, we just continue to the next
+                                // slot. We could yank the pair or re-init the entire [Patra], but that
+                                // could be hard!
+                                continue;
+                            }
                         }
                     }
 
@@ -685,18 +694,27 @@ impl Patra {
                     // taken slot (check for update)
                     s if s == sign => {
                         let pair_bytes = self.get_pair_bytes(item_idx);
-                        let kbuf = self.read_pair_key(pair_bytes).map_err(|e| {
-                            // TODO: IMP logs, must use of Logger
-                            debug_error!(
-                                "Patra ({}) had IO error while reading data buf for key ({:?})",
-                                self.config.name,
-                                key
-                            );
-                            e
-                        })?;
 
-                        if key == &kbuf {
-                            return Ok((item_idx, false));
+                        match self.read_pair_key(pair_bytes) {
+                            Ok(kbuf) => {
+                                if key == &kbuf {
+                                    return Ok((item_idx, false));
+                                }
+                            }
+
+                            Err(e) => {
+                                debug_error!(
+                                    "Patra ({}) had IO error while reading data buf for key ({:?}): {:?}",
+                                    self.config.name,
+                                    key,
+                                    e
+                                );
+
+                                // DEBUG: If we found an invalid entry, we just continue to the next
+                                // slot. We could yank the pair or re-init the entire [Patra], but that
+                                // could be hard!
+                                continue;
+                            }
                         }
                     }
 
