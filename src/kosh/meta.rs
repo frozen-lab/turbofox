@@ -1,4 +1,7 @@
-use crate::error::{InternalError, InternalResult};
+use crate::{
+    debug_error,
+    error::{InternalError, InternalResult},
+};
 use memmap2::MmapMut;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,7 +39,7 @@ impl TryFrom<u8> for Namespace {
     fn try_from(value: u8) -> InternalResult<Namespace> {
         match value {
             0 => Ok(Namespace::Base),
-            err_id => Err(InternalError::InvalidEntry(None)),
+            _ => Err(InternalError::InvalidEntry(None)),
         }
     }
 }
@@ -65,6 +68,15 @@ pub(crate) const EMPTY_PAIR_BYTES: PairBytes = [0u8; 10];
 const _: () = assert!(size_of::<PairBytes>() % size_of::<u8>() == 0);
 
 impl Pair {
+    pub fn new(offset: u64, ns: Namespace, klen: usize, vlen: usize) -> Self {
+        Self {
+            offset,
+            ns,
+            klen: klen as u16,
+            vlen: vlen as u16,
+        }
+    }
+
     pub fn to_raw(&self) -> InternalResult<PairBytes> {
         //
         // Overflow check for [self.offset]
@@ -72,6 +84,7 @@ impl Pair {
         // NOTE: [self.offset] can not grow beyound (2^40 - 1)
         //
         if (self.offset & !((1u64 << 40) - 1)) != 0 {
+            debug_error!("Pair offset ({}) is beyound limit of u40", self.offset);
             return Err(InternalError::BucketOverflow(None));
         };
 
@@ -94,13 +107,26 @@ impl Pair {
     }
 
     pub fn from_raw(slice: PairBytes) -> InternalResult<Pair> {
-        let ns = Namespace::try_from(slice[0])?;
+        let ns = Namespace::try_from(slice[0]).map_err(|e| {
+            debug_error!("PairBytes contains invalid namespace value ({})", slice[0]);
+            e
+        })?;
 
         let klen = u16::from_le_bytes([slice[1], slice[2]]);
         let vlen = u16::from_le_bytes([slice[3], slice[4]]);
 
         let offset =
             u64::from_le_bytes([slice[5], slice[6], slice[7], slice[8], slice[9], 0, 0, 0]);
+
+        //
+        // Overflow check for [self.offset]
+        //
+        // NOTE: [self.offset] can not grow beyound (2^40 - 1)
+        //
+        if (offset & !((1u64 << 40) - 1)) != 0 {
+            debug_error!("Pair offset ({}) is beyound limit of u40", offset);
+            return Err(InternalError::InvalidEntry(None));
+        };
 
         Ok(Pair {
             ns,

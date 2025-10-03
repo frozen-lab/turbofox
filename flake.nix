@@ -27,7 +27,7 @@
             ];
 
             shellHook = ''
-              export RUST_BACKTRACE="full"
+              # export RUST_BACKTRACE="full"
               echo " : $(rustc --version)"
             '';
           };

@@ -60,48 +60,62 @@ impl Logger {
     }
 }
 
+#[allow(unused)]
 pub(crate) struct DebugLogger;
 
+#[allow(unused)]
 impl DebugLogger {
     #[inline(always)]
-    pub fn trace(msg: impl std::fmt::Display) {
+    pub fn log(level: &str, args: std::fmt::Arguments) {
         #[cfg(debug_assertions)]
         {
-            println!("[TRACE] {}", msg);
+            if level == "ERROR" || level == "WARN" {
+                eprintln!("[{}] {}", level, args);
+            } else {
+                println!("[{}] {}", level, args);
+            }
         }
     }
+}
 
-    #[inline(always)]
-    pub fn debug(msg: impl std::fmt::Display) {
+#[macro_export]
+macro_rules! debug_trace {
+    ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
-        {
-            println!("[DEBUG] {}", msg);
-        }
-    }
+        $crate::logger::DebugLogger::log("TRACE", format_args!($($arg)*));
+    };
+}
 
-    #[inline(always)]
-    pub fn info(msg: impl std::fmt::Display) {
+#[macro_export]
+macro_rules! debug_debug {
+    ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
-        {
-            println!("[INFO] {}", msg);
-        }
-    }
+        $crate::logger::DebugLogger::log("DEBUG", format_args!($($arg)*));
+    };
+}
 
-    #[inline(always)]
-    pub fn warn(msg: impl std::fmt::Display) {
+#[macro_export]
+macro_rules! debug_info {
+    ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
-        {
-            eprintln!("[WARN] {}", msg);
-        }
-    }
+        $crate::logger::DebugLogger::log("INFO", format_args!($($arg)*));
+    };
+}
 
-    #[inline(always)]
-    pub fn error(msg: impl std::fmt::Display) {
+#[macro_export]
+macro_rules! debug_warn {
+    ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
-        {
-            eprintln!("[ERROR] {}", msg);
-        }
-    }
+        $crate::logger::DebugLogger::log("WARN", format_args!($($arg)*));
+    };
+}
+
+#[macro_export]
+macro_rules! debug_error {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::logger::DebugLogger::log("ERROR", format_args!($($arg)*));
+    };
 }
 
 #[cfg(test)]

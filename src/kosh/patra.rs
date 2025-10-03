@@ -223,7 +223,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    pub fn get_pair_bytes(&self, idx: usize) -> PairBytes {
+    fn get_pair_bytes(&self, idx: usize) -> PairBytes {
         // sanity check
         debug_assert!(
             idx < self.stats.capacity,
@@ -237,7 +237,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    pub fn set_pair_bytes(&mut self, idx: usize, bytes: PairBytes) {
+    fn set_pair_bytes(&mut self, idx: usize, bytes: PairBytes) {
         // sanity check
         debug_assert!(
             idx < self.stats.capacity,
@@ -252,7 +252,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    pub fn get_sign_slice(&self, slice_idx: usize) -> [Sign; ROW_SIZE] {
+    fn get_sign_slice(&self, slice_idx: usize) -> [Sign; ROW_SIZE] {
         // sanity check
         debug_assert!(
             slice_idx < self.stats.sign_rows,
@@ -268,7 +268,7 @@ impl Patra {
     }
 
     #[inline(always)]
-    pub fn set_sign(&mut self, idx: usize, sign: Sign) {
+    fn set_sign(&mut self, idx: usize, sign: Sign) {
         // sanity check
         debug_assert!(
             idx < self.stats.capacity,
@@ -281,10 +281,10 @@ impl Patra {
         }
     }
 
-    pub fn read_pair_key(&self, bytes: PairBytes) -> InternalResult<Key> {
+    fn read_pair_key(&self, bytes: PairBytes) -> InternalResult<Key> {
         let pair = Pair::from_raw(bytes)?;
-
         let mut buf = vec![0u8; pair.klen as usize];
+
         read_exact_at(
             &self.file,
             &mut buf,
@@ -295,7 +295,10 @@ impl Patra {
     }
 
     fn read_pair_key_value(&self, bytes: PairBytes) -> InternalResult<KeyValue> {
-        let pair = Pair::from_raw(bytes)?;
+        let pair = Pair::from_raw(bytes).map_err(|e| {
+            println!("[ERROR]: Found an invalid entry! {e:?}");
+            e
+        })?;
 
         let klen = pair.klen as usize;
         let vlen = pair.vlen as usize;
@@ -325,16 +328,15 @@ impl Patra {
         // this gets us write pointer before updating w/ current buffer length
         let offset = self.meta.update_write_offset(blen as u64);
 
+        let pair = Pair::new(offset, ns, klen, vlen);
+        let raw = pair.to_raw().map_err(|e| {
+            println!("[ERROR]: pair.to_raw() failed: {e:?}");
+            e
+        })?;
+
         write_all_at(&self.file, &buf, self.stats.header_size as u64 + offset)?;
 
-        let pair = Pair {
-            offset,
-            ns,
-            klen: klen as u16,
-            vlen: vlen as u16,
-        };
-
-        Ok(pair.to_raw()?)
+        Ok(raw)
     }
 
     #[inline(always)]
