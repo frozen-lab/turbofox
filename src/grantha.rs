@@ -103,3 +103,140 @@ impl Grantha {
         dirpath.join(format!("{name}_{cap}"))
     }
 }
+
+#[cfg(test)]
+mod grantha_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    const TEST_CAP: usize = 32;
+
+    fn open_grantha(temp: &TempDir, cap: usize) -> Grantha {
+        let dir = temp.path();
+        Grantha::open(dir, "grantha_test", cap).expect("grantha open")
+    }
+
+    #[test]
+    fn test_create_new_grantha_creates_file() {
+        let tmp = TempDir::new().unwrap();
+
+        let g = open_grantha(&tmp, TEST_CAP);
+        let entries: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
+        let fname = entries[0]
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+
+        assert!(g.pair_count().unwrap() == 0);
+        assert!(fname.starts_with("grantha_test_"));
+        assert_eq!(
+            entries.len(),
+            1,
+            "grantha should create exactly one patra file"
+        );
+    }
+
+    #[test]
+    fn test_open_existing_grantha_reuses_file() {
+        let tmp = TempDir::new().unwrap();
+
+        // open w/ init
+        let mut g1 = open_grantha(&tmp, TEST_CAP);
+        g1.upsert((b"k".to_vec(), b"v".to_vec())).unwrap();
+        drop(g1);
+
+        // re-open should not re-init
+        let g2 = Grantha::open(tmp.path(), "grantha_test", TEST_CAP * 2).unwrap();
+
+        assert_eq!(
+            g2.pair_count().unwrap(),
+            1,
+            "existing data should persist if valid"
+        );
+    }
+
+    #[test]
+    fn test_upsert_fetch_yank_cycle() {
+        let tmp = TempDir::new().unwrap();
+        let mut g = open_grantha(&tmp, TEST_CAP);
+
+        let k = b"hello".to_vec();
+        let v = b"world".to_vec();
+        g.upsert((k.clone(), v.clone())).unwrap();
+
+        assert_eq!(g.fetch(k.clone()).unwrap(), Some(v.clone()));
+        assert_eq!(g.pair_count().unwrap(), 1);
+
+        let removed = g.yank(k.clone()).unwrap();
+        assert_eq!(removed, Some(v));
+        assert_eq!(g.fetch(k).unwrap(), None);
+    }
+
+    #[test]
+    fn test_capacity_mismatch_reinits() {
+        let tmp = TempDir::new().unwrap();
+        let path = Grantha::create_file_path(tmp.path(), "grantha_test", TEST_CAP);
+
+        // manually create corrupt file
+        let f = fs::File::create(&path).unwrap();
+        f.set_len(8).unwrap();
+
+        let g = Grantha::open(tmp.path(), "grantha_test", TEST_CAP).unwrap();
+        assert_eq!(
+            g.pair_count().unwrap(),
+            0,
+            "should reinit on mismatch/corrupt"
+        );
+    }
+
+    #[test]
+    fn test_grantha_skips_non_utf8_filename() {
+        let tmp = TempDir::new().unwrap();
+        let badfile = tmp.path().join("invalid_\u{FFFD}");
+
+        fs::File::create(&badfile).unwrap();
+        let g = open_grantha(&tmp, TEST_CAP);
+
+        assert!(
+            g.pair_count().is_ok(),
+            "should not fail on non-utf8 filename"
+        );
+    }
+
+    #[test]
+    fn test_multiple_files_picks_correct_one() {
+        let tmp = TempDir::new().unwrap();
+
+        let p16 = Grantha::create_file_path(tmp.path(), "grantha_test", 16);
+        let p64 = Grantha::create_file_path(tmp.path(), "grantha_test", 64);
+
+        let cfg16 = KoshConfig {
+            path: p16.clone(),
+            name: "grantha_test",
+            cap: 16,
+        };
+        let cfg64 = KoshConfig {
+            path: p64.clone(),
+            name: "grantha_test",
+            cap: 64,
+        };
+
+        {
+            let mut k16 = Kosh::new(cfg16).unwrap();
+            k16.upsert((b"from16".to_vec(), b"v16".to_vec())).unwrap();
+        }
+
+        {
+            let mut k64 = Kosh::new(cfg64).unwrap();
+            k64.upsert((b"from64".to_vec(), b"v64".to_vec())).unwrap();
+        }
+
+        let g = Grantha::open(tmp.path(), "grantha_test", TEST_CAP).unwrap();
+
+        assert_eq!(g.fetch(b"from64".to_vec()).unwrap(), Some(b"v64".to_vec()));
+        assert_eq!(g.fetch(b"from16".to_vec()).unwrap(), None);
+    }
+}
