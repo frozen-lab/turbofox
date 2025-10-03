@@ -33,6 +33,7 @@
 //!
 
 use crate::{
+    debug_error, debug_trace, debug_warn,
     error::{InternalError, InternalResult},
     hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
     kosh::{
@@ -57,6 +58,10 @@ pub(crate) type Value = Vec<u8>;
 pub(crate) type KeyValue = (Key, Value);
 
 pub(crate) const ROW_SIZE: usize = 16;
+
+/// ----------------------------------------
+/// Stats
+/// ----------------------------------------
 
 #[derive(Debug)]
 struct Stats {
@@ -94,7 +99,12 @@ impl Patra {
             .read(true)
             .write(true)
             .truncate(true)
-            .open(&config.path)?;
+            .open(&config.path)
+            .map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!("Unable to create a new Patra: {e}");
+                e
+            })?;
 
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
         let sign_rows = config.cap.wrapping_div(ROW_SIZE);
@@ -106,9 +116,19 @@ impl Patra {
         let threshold = Self::calc_threshold(config.cap);
 
         // zero-init the file
-        file.set_len(header_size as u64)?;
+        file.set_len(header_size as u64).map_err(|e| {
+            // TODO: IMP logs, must use of Logger
+            debug_error!("Unable to set len for new Patra: {e}");
+            e
+        })?;
 
-        let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
+        let mut mmap =
+            unsafe { MmapOptions::new().len(header_size).map_mut(&file) }.map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!("Unable to create Mmap for new Patra: {e}");
+                e
+            })?;
+
         let meta = Meta::new(&mut mmap);
 
         let stats = Stats {
@@ -119,6 +139,9 @@ impl Patra {
             pair_offset,
             threshold,
         };
+
+        // TODO: Imp log, use Logger!
+        debug_trace!("Created a new Patra ({})", config.name);
 
         Ok(Self {
             file,
@@ -146,7 +169,12 @@ impl Patra {
             .read(true)
             .write(true)
             .truncate(false)
-            .open(&config.path)?;
+            .open(&config.path)
+            .map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!("Unable to open existing Patra: {e}");
+                e
+            })?;
 
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
         let sign_rows = config.cap.wrapping_div(ROW_SIZE);
@@ -157,7 +185,14 @@ impl Patra {
         let header_size = Self::calc_header_size(config.cap);
         let threshold = Self::calc_threshold(config.cap);
 
-        let file_len = file.metadata()?.len();
+        let file_len = file
+            .metadata()
+            .map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!("Unable to fetch metadata for existing Patra: {e}");
+                e
+            })?
+            .len();
 
         // NOTE: If `file.len()` is smaller then `header_size`, it's a sign of
         // invalid initilization or the file was tampered with! In this scenerio,
@@ -166,23 +201,47 @@ impl Patra {
             return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
-        let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }?;
+        let mut mmap =
+            unsafe { MmapOptions::new().len(header_size).map_mut(&file) }.map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!("Unable to create a Mmap for existing Patra: {e}");
+                e
+            })?;
+
         let meta = Meta::open(&mut mmap);
 
         // NOTE: while validating version and magic of the file, if not matched,
         // we should simply delete the file, as we do not have any earlier
         // versions to support.
         if !meta.is_current_version() {
+            // TODO: IMP logs, must use of Logger
+            debug_error!(
+                "Existing Patra ({}) contains invalid version or magic",
+                config.name
+            );
+
             return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
         // safeguard for the write pointer
         if meta.get_write_pointer() > file_len {
+            // TODO: IMP logs, must use of Logger
+            debug_error!(
+                "Existing Patra ({}) has write pointer which had overflown beyound limit",
+                config.name
+            );
+
             return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
         // safeguard for the insert count
         if meta.get_insert_count() > config.cap {
+            // TODO: IMP logs, must use of Logger
+            debug_error!(
+                "Existing Patra ({}) contains invalid version or magic",
+                config.name
+            );
+
             return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
@@ -194,6 +253,9 @@ impl Patra {
             pair_offset,
             threshold,
         };
+
+        // TODO: Imp log, use Logger!
+        debug_trace!("Opened existing Patra ({})", config.name);
 
         Ok(Self {
             file,
@@ -232,7 +294,15 @@ impl Patra {
 
         unsafe {
             let ptr = (self.mmap.as_ptr().add(self.stats.pair_offset) as *const PairBytes).add(idx);
-            std::ptr::read(ptr)
+            let bytes = std::ptr::read(ptr);
+
+            // TODO: Imp log, use Logger!
+            debug_trace!(
+                "Fetched pair bytes at IDX ({idx}) for Patra ({})",
+                self.config.name
+            );
+
+            bytes
         }
     }
 
@@ -249,6 +319,12 @@ impl Patra {
                 (self.mmap.as_mut_ptr().add(self.stats.pair_offset) as *mut PairBytes).add(idx);
             std::ptr::write(ptr, bytes);
         }
+
+        // TODO: Imp log, use Logger!
+        debug_trace!(
+            "Updated pair bytes at IDX ({idx}) for Patra ({})",
+            self.config.name
+        );
     }
 
     #[inline(always)]
@@ -262,8 +338,15 @@ impl Patra {
         unsafe {
             let base = self.mmap.as_ptr().add(self.stats.sign_offset);
             let ptr = base.add(slice_idx * ROW_SIZE * std::mem::size_of::<Sign>());
+            let slice = *(ptr as *const [Sign; ROW_SIZE]);
 
-            *(ptr as *const [Sign; ROW_SIZE])
+            // TODO: Imp log, use Logger!
+            debug_trace!(
+                "Fetched signature row at IDX ({slice_idx}) for Patra ({})",
+                self.config.name
+            );
+
+            slice
         }
     }
 
@@ -279,24 +362,46 @@ impl Patra {
             let ptr = (self.mmap.as_mut_ptr().add(self.stats.sign_offset) as *mut Sign).add(idx);
             std::ptr::write(ptr, sign);
         }
+
+        // TODO: Imp log, use Logger!
+        debug_trace!(
+            "Updated sign ({sign}) at IDX ({idx}) for Patra ({})",
+            self.config.name
+        );
     }
 
     fn read_pair_key(&self, bytes: PairBytes) -> InternalResult<Key> {
-        let pair = Pair::from_raw(bytes)?;
+        let pair = Pair::from_raw(bytes).map_err(|e| {
+            // TODO: IMP logs, must use of Logger
+            debug_error!("Patra ({}) contains invalid entry", self.config.name);
+            e
+        })?;
+
         let mut buf = vec![0u8; pair.klen as usize];
 
         read_exact_at(
             &self.file,
             &mut buf,
             self.stats.header_size as u64 + pair.offset,
-        )?;
+        )
+        .map_err(|e| {
+            // TODO: IMP logs, must use of Logger
+            debug_error!(
+                "Patra ({}) had IO error while reading data buf",
+                self.config.name
+            );
+            e
+        })?;
+
+        // TODO: Imp log, use Logger!
+        debug_trace!("Fetched key buffer for Patra ({})", self.config.name);
 
         Ok(buf)
     }
 
     fn read_pair_key_value(&self, bytes: PairBytes) -> InternalResult<KeyValue> {
         let pair = Pair::from_raw(bytes).map_err(|e| {
-            println!("[ERROR]: Found an invalid entry! {e:?}");
+            debug_error!("Patra ({}) contains invalid entry", self.config.name);
             e
         })?;
 
@@ -308,15 +413,26 @@ impl Patra {
             &self.file,
             &mut buf,
             self.stats.header_size as u64 + pair.offset,
-        )?;
+        )
+        .map_err(|e| {
+            // TODO: IMP logs, must use of Logger
+            debug_error!(
+                "Patra ({}) had IO error while reading data buf",
+                self.config.name
+            );
+            e
+        })?;
 
         let vbuf = buf[klen..(klen + vlen)].to_owned();
         buf.truncate(klen);
 
+        // TODO: Imp log, use Logger!
+        debug_trace!("Fetched kv buffer for Patra ({})", self.config.name);
+
         Ok((buf, vbuf))
     }
 
-    fn write_pair_key_value(&mut self, ns: Namespace, kv: KeyValue) -> InternalResult<PairBytes> {
+    fn write_pair_key_value(&mut self, ns: Namespace, kv: &KeyValue) -> InternalResult<PairBytes> {
         let klen = kv.0.len();
         let vlen = kv.1.len();
         let blen = klen + vlen;
@@ -334,7 +450,22 @@ impl Patra {
             e
         })?;
 
-        write_all_at(&self.file, &buf, self.stats.header_size as u64 + offset)?;
+        write_all_at(&self.file, &buf, self.stats.header_size as u64 + offset).map_err(|e| {
+            // TODO: IMP logs, must use of Logger
+            debug_error!(
+                "Patra ({}) had IO error while writing data buf for key ({:?})",
+                self.config.name,
+                kv.0
+            );
+            e
+        })?;
+
+        // TODO: Imp log, use Logger!
+        debug_trace!(
+            "Wrote kv buffer w/ key ({:?}) for Patra ({})",
+            kv.0,
+            self.config.name
+        );
 
         Ok(raw)
     }
@@ -351,9 +482,30 @@ impl Patra {
 
     pub fn upsert_kv(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<()> {
         let start_idx = self.get_sign_hash(sign);
-        let (idx, is_new) = self.lookup_upsert_slot(start_idx, sign, &kv.0)?;
+        let (idx, is_new) = self
+            .lookup_upsert_slot(start_idx, sign, &kv.0)
+            .map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!(
+                    "Unable to upsert kv pair for key ({:?}) in Patra ({})",
+                    kv.0,
+                    self.config.name,
+                );
+                e
+            })?;
 
-        let pair_bytes = self.write_pair_key_value(Namespace::Base, kv)?;
+        let pair_bytes = self
+            .write_pair_key_value(Namespace::Base, &kv)
+            .map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!(
+                    "Patra ({}) had IO error while writing data buf for key ({:?})",
+                    self.config.name,
+                    kv.0
+                );
+                e
+            })?;
+
         self.set_pair_bytes(idx, pair_bytes);
 
         if is_new {
@@ -367,15 +519,56 @@ impl Patra {
             self.set_sign(idx, sign);
         }
 
+        if is_new {
+            // TODO: Imp log, use Logger!
+            debug_trace!(
+                "Inserted kv pair w/ key ({:?}) for Patra ({})",
+                kv.0,
+                self.config.name
+            );
+        } else {
+            // TODO: Imp log, use Logger!
+            debug_trace!(
+                "Updated kv pair w/ key ({:?}) for Patra ({})",
+                kv.0,
+                self.config.name
+            );
+        }
+
         Ok(())
     }
 
     pub fn fetch_value(&self, sign: Sign, key: Key) -> InternalResult<Option<Value>> {
         let start_idx = self.get_sign_hash(sign);
 
-        if let Some((_, vbuf)) = self.lookup_existing_pair(start_idx, sign, &key)? {
+        if let Some((_, vbuf)) = self
+            .lookup_existing_pair(start_idx, sign, &key)
+            .map_err(|e| {
+                // TODO: IMP logs, must use of Logger
+                debug_error!(
+                    "Unable to fetch value for key ({:?}) in Patra ({})",
+                    key,
+                    self.config.name,
+                );
+                e
+            })?
+        {
+            // TODO: Imp log, use Logger!
+            debug_trace!(
+                "Fetched value for key ({:?}) for Patra ({})",
+                key,
+                self.config.name
+            );
+
             return Ok(Some(vbuf));
         }
+
+        // TODO: Imp log, use Logger!
+        debug_trace!(
+            "Unable to fetch! Key ({:?}) not found in Patra ({})",
+            key,
+            self.config.name
+        );
 
         Ok(None)
     }
@@ -383,13 +576,38 @@ impl Patra {
     pub fn yank_key(&mut self, sign: Sign, key: Key) -> InternalResult<Option<Value>> {
         let start_idx = self.get_sign_hash(sign);
 
-        if let Some((idx, vbuf)) = self.lookup_existing_pair(start_idx, sign, &key)? {
+        if let Some((idx, vbuf)) =
+            self.lookup_existing_pair(start_idx, sign, &key)
+                .map_err(|e| {
+                    // TODO: IMP logs, must use of Logger
+                    debug_error!(
+                        "Unable to yank kv pair for key ({:?}) in Patra ({})",
+                        key,
+                        self.config.name,
+                    );
+                    e
+                })?
+        {
             self.meta.decr_insert_count();
             self.set_pair_bytes(idx, EMPTY_PAIR_BYTES);
             self.set_sign(idx, TOMBSTONE_SIGN);
 
+            // TODO: Imp log, use Logger!
+            debug_trace!(
+                "Yanked kv pair w/ key ({:?}) for Patra ({})",
+                key,
+                self.config.name
+            );
+
             return Ok(Some(vbuf));
         }
+
+        // TODO: Imp log, use Logger!
+        debug_trace!(
+            "Unable to yank! Key ({:?}) not found in Patra ({})",
+            key,
+            self.config.name
+        );
 
         Ok(None)
     }
@@ -415,7 +633,15 @@ impl Patra {
                     // taken slot (check for update)
                     s if s == sign => {
                         let pair_bytes = self.get_pair_bytes(item_idx);
-                        let (kbuf, vbuf) = self.read_pair_key_value(pair_bytes)?;
+                        let (kbuf, vbuf) = self.read_pair_key_value(pair_bytes).map_err(|e| {
+                            // TODO: IMP logs, must use of Logger
+                            debug_error!(
+                                "Patra ({}) had IO error while reading data buf for key ({:?})",
+                                self.config.name,
+                                key
+                            );
+                            e
+                        })?;
 
                         if key == &kbuf {
                             return Ok(Some((item_idx, vbuf)));
@@ -428,6 +654,12 @@ impl Patra {
 
             idx = (idx + 1) % self.stats.sign_rows;
         }
+
+        // TODO: IMP logs, must use of Logger
+        debug_warn!(
+            "Pair not found in Patra ({}) after searching the entire space",
+            self.config.name,
+        );
 
         Ok(None)
     }
@@ -453,7 +685,15 @@ impl Patra {
                     // taken slot (check for update)
                     s if s == sign => {
                         let pair_bytes = self.get_pair_bytes(item_idx);
-                        let kbuf = self.read_pair_key(pair_bytes)?;
+                        let kbuf = self.read_pair_key(pair_bytes).map_err(|e| {
+                            // TODO: IMP logs, must use of Logger
+                            debug_error!(
+                                "Patra ({}) had IO error while reading data buf for key ({:?})",
+                                self.config.name,
+                                key
+                            );
+                            e
+                        })?;
 
                         if key == &kbuf {
                             return Ok((item_idx, false));
@@ -466,6 +706,12 @@ impl Patra {
 
             idx = (idx + 1) % self.stats.sign_rows;
         }
+
+        // TODO: IMP logs, must use of Logger
+        debug_error!(
+            "Patra ({}) is full. No more inserts are allowed!",
+            self.config.name,
+        );
 
         Err(InternalError::BucketFull(Some(self.config.clone())))
     }
@@ -839,9 +1085,7 @@ mod patra_tests {
             let mut patra = open_patra();
 
             let kv = (b"abc".to_vec(), b"def".to_vec());
-            let raw = patra
-                .write_pair_key_value(Namespace::Base, kv.clone())
-                .unwrap();
+            let raw = patra.write_pair_key_value(Namespace::Base, &kv).unwrap();
 
             patra.set_pair_bytes(0, raw);
             patra.meta.incr_insert_count();
