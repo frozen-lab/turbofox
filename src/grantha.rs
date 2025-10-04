@@ -1,6 +1,7 @@
 use crate::{
     error::InternalResult,
-    kosh::{Key, KeyValue, Kosh, KoshConfig, Value},
+    kosh::{Key, KeyValue, Kosh, KoshConfig, Value, ROW_SIZE},
+    BucketCfg,
 };
 use std::{
     ffi::OsString,
@@ -17,21 +18,18 @@ impl Grantha {
     pub fn open(
         dirpath: impl AsRef<Path>,
         name: &'static str,
-        new_cap: usize,
+        cfg: &BucketCfg,
     ) -> InternalResult<Self> {
         let kosh = match Self::find_from_dir(dirpath.as_ref(), name)? {
             Some((path, cap)) => {
-                let config = KoshConfig { path, name, cap };
+                let config = KoshConfig::new(path, name, cap);
                 Kosh::open(config)?
             }
 
             None => {
+                let new_cap = Self::calc_new_cap(cfg.rows);
                 let path = Self::create_file_path(dirpath.as_ref(), name, new_cap);
-                let config = KoshConfig {
-                    path,
-                    name,
-                    cap: new_cap,
-                };
+                let config = KoshConfig::new(path, name, new_cap);
 
                 Kosh::new(config)?
             }
@@ -103,8 +101,19 @@ impl Grantha {
         cap_str.parse::<usize>().ok()
     }
 
+    #[inline(always)]
     fn create_file_path(dirpath: &Path, name: &str, cap: usize) -> PathBuf {
         dirpath.join(format!("{name}_{cap}"))
+    }
+
+    #[inline(always)]
+    const fn calc_new_cap(rows: usize) -> usize {
+        debug_assert!(
+            (rows * ROW_SIZE) % 16 == 0,
+            "Capacity must be multiple of 16"
+        );
+
+        rows * ROW_SIZE
     }
 }
 
@@ -114,18 +123,20 @@ mod grantha_tests {
     use std::fs;
     use tempfile::TempDir;
 
-    const TEST_CAP: usize = 32;
+    const TEST_ROWS: usize = 2;
 
-    fn open_grantha(temp: &TempDir, cap: usize) -> Grantha {
+    fn open_grantha(temp: &TempDir, rows: usize) -> Grantha {
         let dir = temp.path();
-        Grantha::open(dir, "grantha_test", cap).expect("grantha open")
+        let cfg = BucketCfg::default().rows(rows);
+
+        Grantha::open(dir, "grantha_test", &cfg).expect("grantha open")
     }
 
     #[test]
     fn test_create_new_grantha_creates_file() {
         let tmp = TempDir::new().unwrap();
 
-        let g = open_grantha(&tmp, TEST_CAP);
+        let g = open_grantha(&tmp, TEST_ROWS);
         let entries: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
         let fname = entries[0]
             .as_ref()
@@ -148,12 +159,13 @@ mod grantha_tests {
         let tmp = TempDir::new().unwrap();
 
         // open w/ init
-        let mut g1 = open_grantha(&tmp, TEST_CAP);
+        let mut g1 = open_grantha(&tmp, TEST_ROWS);
         g1.upsert((b"k".to_vec(), b"v".to_vec())).unwrap();
         drop(g1);
 
         // re-open should not re-init
-        let g2 = Grantha::open(tmp.path(), "grantha_test", TEST_CAP * 2).unwrap();
+        let cfg = BucketCfg::default().rows(TEST_ROWS * 2);
+        let g2 = Grantha::open(tmp.path(), "grantha_test", &cfg).unwrap();
 
         assert_eq!(
             g2.pair_count().unwrap(),
@@ -165,7 +177,7 @@ mod grantha_tests {
     #[test]
     fn test_upsert_fetch_yank_cycle() {
         let tmp = TempDir::new().unwrap();
-        let mut g = open_grantha(&tmp, TEST_CAP);
+        let mut g = open_grantha(&tmp, TEST_ROWS);
 
         let k = b"hello".to_vec();
         let v = b"world".to_vec();
@@ -182,13 +194,18 @@ mod grantha_tests {
     #[test]
     fn test_capacity_mismatch_reinits() {
         let tmp = TempDir::new().unwrap();
-        let path = Grantha::create_file_path(tmp.path(), "grantha_test", TEST_CAP);
 
-        // manually create corrupt file
+        let custom_cap = Grantha::calc_new_cap(TEST_ROWS);
+        let path = Grantha::create_file_path(tmp.path(), "grantha_test", custom_cap);
+
+        // manually corrupt file
         let f = fs::File::create(&path).unwrap();
         f.set_len(8).unwrap();
 
-        let g = Grantha::open(tmp.path(), "grantha_test", TEST_CAP).unwrap();
+        // re-init
+        let cfg = BucketCfg::default().rows(TEST_ROWS);
+        let g = Grantha::open(tmp.path(), "grantha_test", &cfg).unwrap();
+
         assert_eq!(
             g.pair_count().unwrap(),
             0,
@@ -202,7 +219,7 @@ mod grantha_tests {
         let badfile = tmp.path().join("invalid_\u{FFFD}");
 
         fs::File::create(&badfile).unwrap();
-        let g = open_grantha(&tmp, TEST_CAP);
+        let g = open_grantha(&tmp, TEST_ROWS);
 
         assert!(
             g.pair_count().is_ok(),
@@ -238,9 +255,19 @@ mod grantha_tests {
             k64.upsert((b"from64".to_vec(), b"v64".to_vec())).unwrap();
         }
 
-        let g = Grantha::open(tmp.path(), "grantha_test", TEST_CAP).unwrap();
+        let cfg = BucketCfg::default().rows(TEST_ROWS);
+        let g = Grantha::open(tmp.path(), "grantha_test", &cfg).unwrap();
 
         assert_eq!(g.fetch(b"from64".to_vec()).unwrap(), Some(b"v64".to_vec()));
         assert_eq!(g.fetch(b"from16".to_vec()).unwrap(), None);
+    }
+
+    #[test]
+    fn test_calc_new_cap_is_multiple_of_row_size() {
+        let rows = 64;
+        let cap = Grantha::calc_new_cap(rows);
+
+        assert_eq!(cap, rows * ROW_SIZE);
+        assert_eq!(cap % ROW_SIZE, 0);
     }
 }

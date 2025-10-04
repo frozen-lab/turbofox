@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 pub use crate::error::{TurboError, TurboResult};
-use crate::{grantha::Grantha, kosh::ROW_SIZE, logger::Logger};
+use crate::{grantha::Grantha, logger::Logger};
 use std::{
     collections::HashMap,
     fs,
@@ -141,8 +141,7 @@ impl TurboCache {
     fn get_or_init_grantha(&mut self, name: &'static str) -> TurboResult<&mut Grantha> {
         if let Some(entry) = self.buckets.get_mut(name) {
             if entry.grantha.is_none() {
-                let grantha =
-                    Grantha::open(&self.dirpath, name, Self::calc_new_cap(self.cfg.rows))?;
+                let grantha = Grantha::open(&self.dirpath, name, &entry.cfg)?;
                 entry.grantha = Some(grantha);
             }
 
@@ -151,16 +150,6 @@ impl TurboCache {
 
         // HACK: This should never occur!
         Err(TurboError::Unknown)
-    }
-
-    #[inline(always)]
-    fn calc_new_cap(rows: usize) -> usize {
-        debug_assert!(
-            (rows * ROW_SIZE) % 16 == 0,
-            "Capacity must be multiple of 16"
-        );
-
-        rows * ROW_SIZE
     }
 }
 
@@ -194,8 +183,8 @@ impl From<TurboCfg> for BucketCfg {
 
 impl BucketCfg {
     #[inline(always)]
-    pub const fn rows(mut self, cap: usize) -> Self {
-        self.rows = cap;
+    pub const fn rows(mut self, rows: usize) -> Self {
+        self.rows = rows;
         self
     }
 
@@ -375,15 +364,6 @@ mod turbo_tests {
             let result = cache.get_or_init_grantha("ghost");
 
             assert!(result.is_err());
-        }
-
-        #[test]
-        fn test_turbo_init_calc_new_cap_is_multiple_of_row_size() {
-            let rows = 64;
-            let cap = TurboCache::calc_new_cap(rows);
-
-            assert_eq!(cap, rows * ROW_SIZE);
-            assert_eq!(cap % ROW_SIZE, 0);
         }
     }
 

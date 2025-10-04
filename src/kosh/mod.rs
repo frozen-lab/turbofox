@@ -33,6 +33,12 @@ pub(crate) struct KoshConfig {
     pub cap: usize,
 }
 
+impl KoshConfig {
+    pub fn new(path: PathBuf, name: &'static str, cap: usize) -> Self {
+        Self { path, name, cap }
+    }
+}
+
 /// ----------------------------------------
 /// Kosh
 /// ----------------------------------------
