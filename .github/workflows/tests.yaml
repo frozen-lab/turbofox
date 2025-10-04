@@ -96,3 +96,33 @@ jobs:
 
       - name: Turbo Buckets Example
         run: cargo run --example turbo_buckets --release
+
+  benchmarks:
+    runs-on: ubuntu-latest
+    needs: unit_tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache-key: ${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Run Benchmarks
+        run: python3 bench.py
+
+      - name: Print Summery
+        run: |
+          echo "Printing benchmark summary to job summary..."
+          cat BENCH_RESULTS.md >> $GITHUB_STEP_SUMMARY
+
