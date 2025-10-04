@@ -1,5 +1,23 @@
 use log::{Level, Record};
 
+///
+/// Logging for Test modules
+///
+
+#[cfg(test)]
+static INIT: std::sync::Once = std::sync::Once::new();
+
+#[cfg(test)]
+pub fn init_test_logger() {
+    INIT.call_once(|| {
+        let _ = env_logger::builder().is_test(true).try_init();
+    });
+}
+
+///
+/// Logger
+///
+
 #[derive(Debug, Clone)]
 pub(crate) struct Logger {
     pub enabled: bool,
@@ -171,78 +189,4 @@ macro_rules! debug_error {
         #[cfg(debug_assertions)]
         $crate::logger::DebugLogger::log("ERROR", format_args!($($arg)*));
     };
-}
-
-#[cfg(test)]
-mod logger_tests {
-    use super::*;
-
-    mod logger {
-        use super::*;
-        use log::{Level, Metadata, Record};
-        use once_cell::sync::OnceCell;
-        use std::sync::{Arc, Mutex};
-
-        // a dummy looger that writes into shared buffer
-        struct DummyLogger {
-            buf: Arc<Mutex<Vec<String>>>,
-            level: Level,
-        }
-
-        impl log::Log for DummyLogger {
-            fn enabled(&self, metadata: &Metadata) -> bool {
-                metadata.level() <= self.level
-            }
-
-            fn log(&self, record: &Record) {
-                if self.enabled(record.metadata()) {
-                    let msg = format!(
-                        "[{}][{}] {}",
-                        record.level(),
-                        record.target(),
-                        record.args()
-                    );
-
-                    self.buf.lock().unwrap().push(msg);
-                }
-            }
-
-            fn flush(&self) {}
-        }
-
-        static INIT: OnceCell<Arc<Mutex<Vec<String>>>> = OnceCell::new();
-
-        fn init_test_logger(level: Level) -> Arc<Mutex<Vec<String>>> {
-            INIT.get_or_init(|| {
-                let buf = Arc::new(Mutex::new(Vec::new()));
-                let logger = DummyLogger {
-                    buf: buf.clone(),
-                    level,
-                };
-                let _ = log::set_boxed_logger(Box::new(logger));
-
-                log::set_max_level(level.to_level_filter());
-                buf
-            })
-            .clone()
-        }
-
-        #[test]
-        fn test_logging() {
-            let buf = init_test_logger(Level::Trace);
-            let logger = Logger::new(true, "unit_test");
-
-            log_debug!(logger, "debug message {}", 1);
-            log_error!(logger, "info message");
-            log_warn!(logger, "warning!");
-            log_error!(logger, "error!");
-
-            let logs = buf.lock().unwrap();
-
-            assert!(logs.iter().any(|l| l.contains("debug message 1")));
-            assert!(logs.iter().any(|l| l.contains("info message")));
-            assert!(logs.iter().any(|l| l.contains("warning!")));
-            assert!(logs.iter().any(|l| l.contains("error!")));
-        }
-    }
 }

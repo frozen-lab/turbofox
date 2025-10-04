@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 pub use crate::error::{TurboError, TurboResult};
 use crate::{grantha::Grantha, logger::Logger};
 use std::{
@@ -43,6 +41,16 @@ impl Default for TurboCfg {
     }
 }
 
+impl std::fmt::Display for TurboCfg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TurboCfg(logging={}, rows={}, growable={})",
+            self.logging, self.rows, self.growable
+        )
+    }
+}
+
 impl TurboCfg {
     #[inline(always)]
     pub const fn logging(mut self, logging: bool) -> Self {
@@ -51,8 +59,11 @@ impl TurboCfg {
     }
 
     #[inline(always)]
-    pub const fn rows(mut self, cap: usize) -> Self {
-        self.rows = cap;
+    pub const fn rows(mut self, rows: usize) -> Self {
+        // sanity check
+        assert!(rows > 0, "No of rows must not be zero!");
+
+        self.rows = rows;
         self
     }
 
@@ -92,13 +103,15 @@ pub struct TurboCache {
 
 impl TurboCache {
     pub fn new<P: AsRef<Path>>(dirpath: P, config: TurboCfg) -> TurboResult<Self> {
-        let logger = Logger::new(false, "TurboCache");
+        let logger = Logger::new(config.logging, "TurboCache");
 
         // make sure the dir exists
         fs::create_dir_all(&dirpath).map_err(|e| {
             log_error!(logger, "Unable to create turbo dir: {e}");
             e
         })?;
+
+        log_debug!(logger, "Initialized TurboCache w/ {config}");
 
         Ok(Self {
             logger,
@@ -112,6 +125,8 @@ impl TurboCache {
         if !self.buckets.contains_key(name) {
             let cfg = config.unwrap_or_else(|| self.cfg.clone().into());
             self.buckets.insert(name, InternalBucket::new(cfg));
+
+            log_debug!(self.logger, "Created Bucket ({}) w/ {cfg}", name);
         }
 
         TurboBucket { name, cache: self }
@@ -128,33 +143,27 @@ impl TurboCache {
     pub fn get(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
         // sanity checks
         debug_assert!(key.len() < u16::MAX as usize, "Key is too large");
-
         self.bucket(DEFAULT_BKT_NAME, None).get(key)
     }
 
     pub fn del(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
         // sanity checks
         debug_assert!(key.len() < u16::MAX as usize, "Key is too large");
-
         self.bucket(DEFAULT_BKT_NAME, None).del(key)
     }
 
-    pub fn get_inserted_count(&mut self) -> TurboResult<usize> {
-        self.bucket(DEFAULT_BKT_NAME, None).get_inserted_count()
+    pub fn pair_count(&mut self) -> TurboResult<usize> {
+        self.bucket(DEFAULT_BKT_NAME, None).pair_count()
     }
 
     fn get_or_init_grantha(&mut self, name: &'static str) -> TurboResult<&mut Grantha> {
-        if let Some(entry) = self.buckets.get_mut(name) {
-            if entry.grantha.is_none() {
-                let grantha = Grantha::open(&self.dirpath, name, &entry.cfg)?;
-                entry.grantha = Some(grantha);
-            }
+        let entry = self.buckets.get_mut(name).ok_or(TurboError::Unknown)?;
 
-            return Ok(entry.grantha.as_mut().unwrap());
+        if entry.grantha.is_none() {
+            entry.grantha = Some(Grantha::open(&self.dirpath, name, &entry.cfg)?);
         }
 
-        // HACK: This should never occur!
-        Err(TurboError::Unknown)
+        entry.grantha.as_mut().ok_or(TurboError::Unknown)
     }
 }
 
@@ -165,6 +174,16 @@ impl TurboCache {
 pub struct BucketCfg {
     pub rows: usize,
     pub growable: bool,
+}
+
+impl std::fmt::Display for BucketCfg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "BucketCfg(rows={}, growable={})",
+            self.rows, self.growable
+        )
+    }
 }
 
 impl Default for BucketCfg {
@@ -189,6 +208,9 @@ impl From<TurboCfg> for BucketCfg {
 impl BucketCfg {
     #[inline(always)]
     pub const fn rows(mut self, rows: usize) -> Self {
+        // sanity check
+        assert!(rows > 0, "No of rows must not be zero!");
+
         self.rows = rows;
         self
     }
@@ -212,38 +234,76 @@ pub struct TurboBucket<'a> {
 impl<'a> TurboBucket<'a> {
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> TurboResult<()> {
         let grantha = self.cache.get_or_init_grantha(self.name)?;
+        grantha.upsert((key.to_vec(), value.to_vec()))?;
 
-        Ok(grantha.upsert((key.to_vec(), value.to_vec()))?)
+        log_trace!(
+            self.cache.logger,
+            "Inserted pair w/ key ({key:?}) into Bucket ({})",
+            self.name
+        );
+
+        Ok(())
     }
 
     pub fn get(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
         let grantha = self.cache.get_or_init_grantha(self.name)?;
+        let val = grantha.fetch(key.to_vec())?;
 
-        Ok(grantha.fetch(key.to_vec())?)
+        log_trace!(
+            self.cache.logger,
+            "Fetched pair w/ key ({key:?}) into Bucket ({})",
+            self.name
+        );
+
+        Ok(val)
     }
 
     pub fn del(&mut self, key: &[u8]) -> TurboResult<Option<Vec<u8>>> {
         let grantha = self.cache.get_or_init_grantha(self.name)?;
+        let val = grantha.yank(key.to_vec())?;
 
-        Ok(grantha.yank(key.to_vec())?)
+        log_trace!(
+            self.cache.logger,
+            "Deleted pair w/ key ({key:?}) into Bucket ({})",
+            self.name
+        );
+
+        Ok(val)
     }
 
-    pub fn get_inserted_count(&mut self) -> TurboResult<usize> {
+    pub fn pair_count(&mut self) -> TurboResult<usize> {
         let grantha = self.cache.get_or_init_grantha(self.name)?;
+        let count = grantha.pair_count()?;
 
-        Ok(grantha.pair_count()?)
+        log_trace!(
+            self.cache.logger,
+            "Fetched pair count for Bucket ({})",
+            self.name
+        );
+
+        Ok(count)
     }
 }
 
 #[cfg(test)]
 mod turbo_tests {
     use super::*;
+    use crate::logger::init_test_logger;
     use tempfile::TempDir;
+
+    #[ctor::ctor]
+    fn init() {
+        init_test_logger();
+    }
 
     fn create_cache(rows: usize) -> (TurboCache, TempDir) {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path();
-        let cache = TurboCache::new(path.to_path_buf(), TurboCfg::default().rows(rows)).unwrap();
+        let cache = TurboCache::new(
+            path.to_path_buf(),
+            TurboCfg::default().rows(rows).logging(true),
+        )
+        .unwrap();
 
         (cache, tmp)
     }
@@ -418,12 +478,12 @@ mod turbo_tests {
                 cache.set(&[i], &[i]).unwrap();
             }
 
-            assert_eq!(cache.get_inserted_count().unwrap(), 5);
+            assert_eq!(cache.pair_count().unwrap(), 5);
 
             cache.del(&[0]).unwrap();
             cache.del(&[1]).unwrap();
 
-            assert_eq!(cache.get_inserted_count().unwrap(), 3);
+            assert_eq!(cache.pair_count().unwrap(), 3);
         }
 
         #[test]
@@ -605,10 +665,10 @@ mod turbo_tests {
 
             users.set(b"u1", b"a").unwrap();
             users.set(b"u2", b"b").unwrap();
-            assert_eq!(users.get_inserted_count().unwrap(), 2);
+            assert_eq!(users.pair_count().unwrap(), 2);
 
             users.del(b"u1").unwrap();
-            assert_eq!(users.get_inserted_count().unwrap(), 1);
+            assert_eq!(users.pair_count().unwrap(), 1);
         }
     }
 }
