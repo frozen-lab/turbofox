@@ -24,6 +24,12 @@
               rustfmt
               clippy
               rust-analyzer
+
+              # python
+              python314
+              ruff
+              uv
+              pyright
             ];
 
             shellHook = ''
