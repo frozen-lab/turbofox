@@ -51,6 +51,12 @@ pub(crate) struct Kosh {
 
 impl Kosh {
     pub fn open(config: KoshConfig) -> InternalResult<Self> {
+        // sanity check
+        debug_assert!(
+            config.cap % ROW_SIZE == 0,
+            "Capacity must be multiple of 16"
+        );
+
         let patra = match Patra::open(&config) {
             Ok(f) => f,
 

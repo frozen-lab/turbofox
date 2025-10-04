@@ -30,6 +30,7 @@ impl Grantha {
                 let new_cap = Self::calc_new_cap(cfg.rows);
                 let path = Self::create_file_path(dirpath.as_ref(), name, new_cap);
                 let config = KoshConfig::new(path, name, new_cap);
+
                 let k = Kosh::new(config)?;
 
                 k
