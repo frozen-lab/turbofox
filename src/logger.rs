@@ -35,31 +35,81 @@ impl Logger {
     }
 
     #[inline(always)]
-    pub fn trace(&self, msg: impl std::fmt::Display) {
-        self.log_args(Level::Trace, format_args!("{}", msg))
+    pub fn trace(&self, args: std::fmt::Arguments) {
+        self.log_args(Level::Trace, args);
     }
 
     #[inline(always)]
-    pub fn debug(&self, msg: impl std::fmt::Display) {
-        self.log_args(Level::Debug, format_args!("{}", msg))
+    pub fn debug(&self, args: std::fmt::Arguments) {
+        self.log_args(Level::Debug, args);
     }
 
     #[inline(always)]
-    pub fn info(&self, msg: impl std::fmt::Display) {
-        self.log_args(Level::Info, format_args!("{}", msg))
+    pub fn info(&self, args: std::fmt::Arguments) {
+        self.log_args(Level::Info, args);
     }
 
     #[inline(always)]
-    pub fn warn(&self, msg: impl std::fmt::Display) {
-        self.log_args(Level::Warn, format_args!("{}", msg))
+    pub fn warn(&self, args: std::fmt::Arguments) {
+        self.log_args(Level::Warn, args);
     }
 
     #[inline(always)]
-    pub fn error(&self, msg: impl std::fmt::Display) {
-        self.log_args(Level::Error, format_args!("{}", msg))
+    pub fn error(&self, args: std::fmt::Arguments) {
+        self.log_args(Level::Error, args);
     }
 }
 
+#[macro_export]
+macro_rules! log_trace {
+    ($logger:expr, $($arg:tt)*) => {{
+        if $logger.is_enabled() {
+            $logger.trace(format_args!($($arg)*));
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! log_debug {
+    ($logger:expr, $($arg:tt)*) => {{
+        if $logger.is_enabled() {
+            $logger.debug(format_args!($($arg)*));
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! log_info {
+    ($logger:expr, $($arg:tt)*) => {{
+        if $logger.is_enabled() {
+            $logger.info(format_args!($($arg)*));
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! log_warn {
+    ($logger:expr, $($arg:tt)*) => {{
+        if $logger.is_enabled() {
+            $logger.warn(format_args!($($arg)*));
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! log_error {
+    ($logger:expr, $($arg:tt)*) => {{
+        if $logger.is_enabled() {
+            $logger.error(format_args!($($arg)*));
+        }
+    }};
+}
+
+///
+/// Debug Logger
+///
+
+#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[allow(unused)]
 pub(crate) struct DebugLogger;
 
@@ -78,6 +128,7 @@ impl DebugLogger {
     }
 }
 
+#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_trace {
     ($($arg:tt)*) => {
@@ -86,6 +137,7 @@ macro_rules! debug_trace {
     };
 }
 
+#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_debug {
     ($($arg:tt)*) => {
@@ -94,6 +146,7 @@ macro_rules! debug_debug {
     };
 }
 
+#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_info {
     ($($arg:tt)*) => {
@@ -102,6 +155,7 @@ macro_rules! debug_info {
     };
 }
 
+#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_warn {
     ($($arg:tt)*) => {
@@ -110,6 +164,7 @@ macro_rules! debug_warn {
     };
 }
 
+#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_error {
     ($($arg:tt)*) => {
@@ -177,10 +232,10 @@ mod logger_tests {
             let buf = init_test_logger(Level::Trace);
             let logger = Logger::new(true, "unit_test");
 
-            logger.debug(format_args!("debug message {}", 1));
-            logger.info("info message");
-            logger.warn("warning!");
-            logger.error("error!");
+            log_debug!(logger, "debug message {}", 1);
+            log_error!(logger, "info message");
+            log_warn!(logger, "warning!");
+            log_error!(logger, "error!");
 
             let logs = buf.lock().unwrap();
 

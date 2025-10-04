@@ -92,14 +92,19 @@ pub struct TurboCache {
 
 impl TurboCache {
     pub fn new<P: AsRef<Path>>(dirpath: P, config: TurboCfg) -> TurboResult<Self> {
+        let logger = Logger::new(false, "TurboCache");
+
         // make sure the dir exists
-        fs::create_dir_all(&dirpath)?;
+        fs::create_dir_all(&dirpath).map_err(|e| {
+            log_error!(logger, "Unable to create turbo dir: {e}");
+            e
+        })?;
 
         Ok(Self {
+            logger,
             cfg: config.clone(),
             buckets: HashMap::new(),
             dirpath: dirpath.as_ref().to_path_buf(),
-            logger: Logger::new(false, "TurboCache"),
         })
     }
 
