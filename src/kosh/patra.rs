@@ -44,7 +44,6 @@ use crate::{
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     fs::{File, OpenOptions},
-    path::{Path, PathBuf},
     usize,
 };
 
@@ -137,6 +136,7 @@ impl Patra {
             mmap,
             meta,
             stats,
+
             config: config.clone(),
         })
     }
@@ -630,6 +630,7 @@ impl Patra {
                                 }
                             }
 
+                            #[allow(unused)]
                             Err(e) => {
                                 debug_error!(
                                     "Patra ({}) had IO error while reading data buf for key ({:?}): {:?}",
@@ -691,6 +692,7 @@ impl Patra {
                                 }
                             }
 
+                            #[allow(unused)]
                             Err(e) => {
                                 debug_error!(
                                     "Patra ({}) had IO error while reading data buf for key ({:?}): {:?}",
@@ -804,13 +806,12 @@ mod patra_tests {
 
     mod file_io_pread_syscall {
         use super::*;
-        use std::fs::{File, OpenOptions};
-        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::io::{Seek, SeekFrom};
         use tempfile::tempfile;
 
         #[test]
         fn test_write_and_read_at_basic() {
-            let mut f = tempfile().expect("tmpfile");
+            let f = tempfile().expect("tmpfile");
 
             write_all_at(&f, b"hello", 0).expect("write at 0");
             write_all_at(&f, b"world", 10).expect("write at 10");
@@ -828,7 +829,7 @@ mod patra_tests {
 
         #[test]
         fn test_read_at_non_written_area_returns_eof() {
-            let mut f = tempfile().expect("tmpfile");
+            let f = tempfile().expect("tmpfile");
 
             write_all_at(&f, b"abc", 0).expect("write abc");
             let mut buf = vec![0u8; 5];
@@ -839,7 +840,7 @@ mod patra_tests {
 
         #[test]
         fn test_overwrite_data_at_offset() {
-            let mut f = tempfile().expect("tmpfile");
+            let f = tempfile().expect("tmpfile");
 
             write_all_at(&f, b"abcdef", 0).expect("write abcdef");
             write_all_at(&f, b"xyz", 2).expect("overwrite xyz");
@@ -870,7 +871,7 @@ mod patra_tests {
 
         #[test]
         fn test_zero_len_read_and_write_works() {
-            let mut f = tempfile().expect("tmpfile");
+            let f = tempfile().expect("tmpfile");
 
             write_all_at(&f, b"", 0).expect("write empty");
             let mut buf = vec![];
@@ -883,7 +884,7 @@ mod patra_tests {
     mod patra {
         use super::*;
         use crate::hasher::Hasher;
-        use std::sync::atomic::Ordering;
+        use std::path::PathBuf;
         use tempfile::TempDir;
 
         const TEST_CAP: usize = ROW_SIZE * 2;
@@ -1106,7 +1107,7 @@ mod patra_tests {
 
         #[test]
         fn test_threshold_match_behavior_of_is_full_func() {
-            let mut patra = open_patra();
+            let patra = open_patra();
             assert_eq!(patra.is_full(), false);
 
             for _ in 0..patra.stats.threshold {
@@ -1214,6 +1215,7 @@ mod patra_tests {
             let td = TempDir::new().unwrap();
             let path = td.path().join("patra_tombstone");
             let cfg = create_config(path.clone(), TEST_CAP);
+
             let mut patra = Patra::new(&cfg).unwrap();
 
             //
@@ -1298,17 +1300,17 @@ mod patra_tests {
         #[test]
         fn test_upsert_on_collision_stores_sign_with_probing() {
             let tmp = TempDir::new().unwrap();
+
             let path = tmp.path().join("patra_collision");
             let cfg = create_config(path, ROW_SIZE * 2);
-
             let mut patra = Patra::new(&cfg).unwrap();
 
             // Craft two keys with same row hash
             let key1 = b"a_key".to_vec();
             let key2 = b"b_key".to_vec();
 
-            let mut sign1 = crate::hasher::Hasher::new(&key1);
-            let mut sign2 = crate::hasher::Hasher::new(&key1);
+            let sign1 = crate::hasher::Hasher::new(&key1);
+            let sign2 = crate::hasher::Hasher::new(&key1);
 
             let start_idx1 = patra.get_sign_hash(sign1);
             assert_eq!(start_idx1, patra.get_sign_hash(sign2));
@@ -1367,7 +1369,7 @@ mod patra_tests {
             // re-open
             {
                 let cfg = create_config(path, TEST_CAP);
-                let mut reopened = Patra::open(&cfg).unwrap();
+                let reopened = Patra::open(&cfg).unwrap();
                 assert_eq!(reopened.meta.get_insert_count(), 1);
 
                 let key = b"persist".to_vec();

@@ -18,19 +18,16 @@ pub fn init_test_logger() {
 /// Logger
 ///
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Logger {
     pub enabled: bool,
-    pub target: String,
+    pub target: &'static str,
 }
 
 impl Logger {
     #[inline(always)]
-    pub fn new(enabled: bool, target: impl Into<String>) -> Self {
-        Self {
-            enabled,
-            target: target.into(),
-        }
+    pub fn new(enabled: bool, target: &'static str) -> Self {
+        Self { enabled, target }
     }
 
     #[inline(always)]
@@ -62,11 +59,13 @@ impl Logger {
         self.log_args(Level::Debug, args);
     }
 
+    #[allow(unused)]
     #[inline(always)]
     pub fn info(&self, args: std::fmt::Arguments) {
         self.log_args(Level::Info, args);
     }
 
+    #[allow(unused)]
     #[inline(always)]
     pub fn warn(&self, args: std::fmt::Arguments) {
         self.log_args(Level::Warn, args);
@@ -77,6 +76,10 @@ impl Logger {
         self.log_args(Level::Error, args);
     }
 }
+
+///
+/// Macros for Logger
+///
 
 #[macro_export]
 macro_rules! log_trace {
@@ -127,66 +130,80 @@ macro_rules! log_error {
 /// Debug Logger
 ///
 
-#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
-#[allow(unused)]
-pub(crate) struct DebugLogger;
+#[cfg(test)]
+pub(crate) use debug_logger::DebugLogger;
 
-#[allow(unused)]
-impl DebugLogger {
-    #[inline(always)]
-    pub fn log(level: &str, args: std::fmt::Arguments) {
-        #[cfg(debug_assertions)]
-        {
-            if level == "ERROR" || level == "WARN" {
-                eprintln!("[{}] {}", level, args);
-            } else {
-                println!("[{}] {}", level, args);
-            }
+#[cfg(test)]
+mod debug_logger {
+    use log::{Level, Record};
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn ensure_env_logger() {
+        INIT.call_once(|| {
+            let _ = env_logger::builder().is_test(true).try_init();
+        });
+    }
+
+    pub(crate) struct DebugLogger;
+
+    impl DebugLogger {
+        #[inline(always)]
+        pub fn log(level: Level, args: std::fmt::Arguments) {
+            ensure_env_logger();
+
+            let record = Record::builder()
+                .args(args)
+                .level(level)
+                .target("turbocache::debug")
+                .build();
+
+            log::logger().log(&record);
         }
     }
 }
 
-#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
+///
+/// Macros for Debug Logger
+///
+
 #[macro_export]
 macro_rules! debug_trace {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        $crate::logger::DebugLogger::log("TRACE", format_args!($($arg)*));
-    };
+    ($($arg:tt)*) => {{
+        #[cfg(test)]
+        $crate::logger::DebugLogger::log(log::Level::Trace, format_args!($($arg)*));
+    }};
 }
 
-#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_debug {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        $crate::logger::DebugLogger::log("DEBUG", format_args!($($arg)*));
-    };
+    ($($arg:tt)*) => {{
+        #[cfg(test)]
+        $crate::logger::DebugLogger::log(log::Level::Debug, format_args!($($arg)*));
+    }};
 }
 
-#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_info {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        $crate::logger::DebugLogger::log("INFO", format_args!($($arg)*));
-    };
+    ($($arg:tt)*) => {{
+        #[cfg(test)]
+        $crate::logger::DebugLogger::log(log::Level::Info, format_args!($($arg)*));
+    }};
 }
 
-#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_warn {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        $crate::logger::DebugLogger::log("WARN", format_args!($($arg)*));
-    };
+    ($($arg:tt)*) => {{
+        #[cfg(test)]
+        $crate::logger::DebugLogger::log(log::Level::Warn, format_args!($($arg)*));
+    }};
 }
 
-#[deprecated(since = "0.1.2", note = "Use `Logger` instead")]
 #[macro_export]
 macro_rules! debug_error {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        $crate::logger::DebugLogger::log("ERROR", format_args!($($arg)*));
-    };
+    ($($arg:tt)*) => {{
+        #[cfg(test)]
+        $crate::logger::DebugLogger::log(log::Level::Error, format_args!($($arg)*));
+    }};
 }

@@ -443,7 +443,7 @@ mod meta_tests {
             let prev2 = meta.update_write_offset(16);
             assert_eq!(prev2, 64);
 
-            let wp = unsafe { (&*meta.meta()).write_pointer.load(Ordering::Relaxed) };
+            let wp = (&*meta.meta()).write_pointer.load(Ordering::Relaxed);
             assert_eq!(wp, 80);
         }
 
@@ -498,7 +498,7 @@ mod meta_tests {
             assert_eq!(prev_a, 10);
 
             // check final value by reading meta manually
-            let final_wp_raw = unsafe { (&*meta_a.meta()).write_pointer.load(Ordering::Relaxed) };
+            let final_wp_raw = (&*meta_a.meta()).write_pointer.load(Ordering::Relaxed);
             assert_eq!(final_wp_raw, 15);
 
             // both [A] & [B] should have same updated write pointer

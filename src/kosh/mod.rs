@@ -1,13 +1,13 @@
+mod meta;
+mod patra;
+mod simd;
+
 use crate::{
     error::{InternalError, InternalResult},
     hasher::Hasher,
     kosh::patra::Patra,
 };
-use std::path::{Path, PathBuf};
-
-mod meta;
-mod patra;
-mod simd;
+use std::path::PathBuf;
 
 /// ----------------------------------------
 /// Constants and Types
@@ -123,8 +123,6 @@ impl Kosh {
 
 #[cfg(test)]
 mod kosh_tests {
-    use std::path::PathBuf;
-
     use super::*;
     use tempfile::TempDir;
 
@@ -149,7 +147,7 @@ mod kosh_tests {
     fn open_kosh_with_cap(cap: usize) -> Kosh {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("kosh_test");
-        let config = create_config(path, TEST_CAP);
+        let config = create_config(path, cap);
 
         Kosh::new(config).expect("create kosh")
     }

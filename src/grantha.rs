@@ -4,7 +4,6 @@ use crate::{
     BucketCfg,
 };
 use std::{
-    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
@@ -23,15 +22,17 @@ impl Grantha {
         let kosh = match Self::find_from_dir(dirpath.as_ref(), name)? {
             Some((path, cap)) => {
                 let config = KoshConfig::new(path, name, cap);
-                Kosh::open(config)?
-            }
+                let k = Kosh::open(config)?;
 
+                k
+            }
             None => {
                 let new_cap = Self::calc_new_cap(cfg.rows);
                 let path = Self::create_file_path(dirpath.as_ref(), name, new_cap);
                 let config = KoshConfig::new(path, name, new_cap);
+                let k = Kosh::new(config)?;
 
-                Kosh::new(config)?
+                k
             }
         };
 
@@ -120,8 +121,13 @@ impl Grantha {
 #[cfg(test)]
 mod grantha_tests {
     use super::*;
-    use std::fs;
+    use crate::logger::init_test_logger;
     use tempfile::TempDir;
+
+    #[ctor::ctor]
+    fn init() {
+        init_test_logger();
+    }
 
     const TEST_ROWS: usize = 2;
 

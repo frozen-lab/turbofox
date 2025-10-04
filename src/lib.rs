@@ -1,78 +1,21 @@
-pub use crate::error::{TurboError, TurboResult};
-use crate::{grantha::Grantha, logger::Logger};
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
-
+mod cfg;
 mod error;
 mod grantha;
 mod hasher;
 mod kosh;
 mod logger;
 
-/// ----------------------------------------
-/// Constants and Types
-/// ----------------------------------------
+use crate::{cfg::DEFAULT_BKT_NAME, grantha::Grantha, logger::Logger};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
-const GROWABLE: bool = true;
-const DEFAULT_ROWS: usize = 64; // 1024 slots by default
-const DEFAULT_BKT_NAME: &'static str = "default";
-
-///
-/// Configurations for the [TurboCache]
-///
-#[derive(Debug, Clone)]
-pub struct TurboCfg {
-    pub logging: bool,
-    pub rows: usize,
-    pub growable: bool,
-}
-
-impl Default for TurboCfg {
-    #[inline(always)]
-    fn default() -> Self {
-        Self {
-            logging: false,
-            rows: DEFAULT_ROWS,
-            growable: GROWABLE,
-        }
-    }
-}
-
-impl std::fmt::Display for TurboCfg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "TurboCfg(logging={}, rows={}, growable={})",
-            self.logging, self.rows, self.growable
-        )
-    }
-}
-
-impl TurboCfg {
-    #[inline(always)]
-    pub const fn logging(mut self, logging: bool) -> Self {
-        self.logging = logging;
-        self
-    }
-
-    #[inline(always)]
-    pub const fn rows(mut self, rows: usize) -> Self {
-        // sanity check
-        assert!(rows > 0, "No of rows must not be zero!");
-
-        self.rows = rows;
-        self
-    }
-
-    #[inline(always)]
-    pub const fn growable(mut self, grow: bool) -> Self {
-        self.growable = grow;
-        self
-    }
-}
+pub use crate::{
+    cfg::{BucketCfg, TurboCfg},
+    error::{TurboError, TurboResult},
+};
 
 ///
 /// Internal Bucket
@@ -152,8 +95,14 @@ impl TurboCache {
         self.bucket(DEFAULT_BKT_NAME, None).del(key)
     }
 
+    #[inline(always)]
     pub fn pair_count(&mut self) -> TurboResult<usize> {
         self.bucket(DEFAULT_BKT_NAME, None).pair_count()
+    }
+
+    #[inline(always)]
+    pub fn is_full(&mut self) -> TurboResult<bool> {
+        self.bucket(DEFAULT_BKT_NAME, None).is_full()
     }
 
     fn get_or_init_grantha(&mut self, name: &'static str) -> TurboResult<&mut Grantha> {
@@ -164,61 +113,6 @@ impl TurboCache {
         }
 
         entry.grantha.as_mut().ok_or(TurboError::Unknown)
-    }
-}
-
-///
-/// Configurations for the [TurboBucket]
-///
-#[derive(Debug, Copy, Clone)]
-pub struct BucketCfg {
-    pub rows: usize,
-    pub growable: bool,
-}
-
-impl std::fmt::Display for BucketCfg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "BucketCfg(rows={}, growable={})",
-            self.rows, self.growable
-        )
-    }
-}
-
-impl Default for BucketCfg {
-    #[inline(always)]
-    fn default() -> Self {
-        Self {
-            rows: DEFAULT_ROWS,
-            growable: GROWABLE,
-        }
-    }
-}
-
-impl From<TurboCfg> for BucketCfg {
-    fn from(value: TurboCfg) -> Self {
-        Self {
-            rows: value.rows,
-            growable: value.growable,
-        }
-    }
-}
-
-impl BucketCfg {
-    #[inline(always)]
-    pub const fn rows(mut self, rows: usize) -> Self {
-        // sanity check
-        assert!(rows > 0, "No of rows must not be zero!");
-
-        self.rows = rows;
-        self
-    }
-
-    #[inline(always)]
-    pub const fn growable(mut self, grow: bool) -> Self {
-        self.growable = grow;
-        self
     }
 }
 
@@ -277,11 +171,24 @@ impl<'a> TurboBucket<'a> {
 
         log_trace!(
             self.cache.logger,
-            "Fetched pair count for Bucket ({})",
+            "Fetched pairCount=({count}) for Bucket ({})",
             self.name
         );
 
         Ok(count)
+    }
+
+    pub fn is_full(&mut self) -> TurboResult<bool> {
+        let grantha = self.cache.get_or_init_grantha(self.name)?;
+        let res = grantha.is_full()?;
+
+        log_trace!(
+            self.cache.logger,
+            "Fetched isFull=({res}) for Bucket ({})",
+            self.name
+        );
+
+        Ok(res)
     }
 }
 
@@ -306,57 +213,6 @@ mod turbo_tests {
         .unwrap();
 
         (cache, tmp)
-    }
-
-    mod turbo_cfg {
-        use super::*;
-
-        #[test]
-        fn test_turbo_cfg_default_config_values() {
-            let cfg = TurboCfg::default();
-
-            assert!(!cfg.logging);
-            assert_eq!(cfg.rows, 64);
-            assert!(cfg.growable);
-        }
-
-        #[test]
-        fn test_turbo_cfg_builder_style_methods() {
-            let cfg = TurboCfg::default().logging(true).rows(128).growable(false);
-
-            assert!(cfg.logging);
-            assert_eq!(cfg.rows, 128);
-            assert!(!cfg.growable);
-        }
-
-        #[test]
-        fn test_turbo_cfg_converts_to_bucket_cfg() {
-            let cfg = TurboCfg::default().rows(77).growable(false);
-            let bcfg: BucketCfg = cfg.clone().into();
-
-            assert_eq!(bcfg.rows, 77);
-            assert!(!bcfg.growable);
-        }
-    }
-
-    mod bucket_cfg {
-        use super::*;
-
-        #[test]
-        fn test_bucket_default_values() {
-            let cfg = BucketCfg::default();
-
-            assert_eq!(cfg.rows, 64);
-            assert!(cfg.growable);
-        }
-
-        #[test]
-        fn test_bucket_builder_style_methods() {
-            let cfg = BucketCfg::default().rows(256).growable(false);
-
-            assert_eq!(cfg.rows, 256);
-            assert!(!cfg.growable);
-        }
     }
 
     mod turbo_init {

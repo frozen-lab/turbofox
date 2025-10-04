@@ -14,6 +14,7 @@ pub(crate) enum ISA {
 
 impl ISA {
     #[cfg(target_arch = "x86_64")]
+    #[allow(unused)]
     #[inline(always)]
     pub fn detect_isa() -> ISA {
         if is_x86_feature_detected!("avx2") {
@@ -24,6 +25,7 @@ impl ISA {
     }
 
     #[cfg(target_arch = "aarch64")]
+    #[allow(unused)]
     #[inline(always)]
     pub const fn detect_isa() -> ISA {
         ISA::NEON
