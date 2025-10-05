@@ -6,7 +6,6 @@ use turbocache::{TurboCache, TurboCfg};
 const SEED1: u64 = 0x1234567890ABCDEF;
 const SEED2: u64 = 0xFEDCBA9876543210;
 const SEED3: u64 = 0x0F1E2D3C4B5A6978;
-const SAMPLE: usize = 64;
 const KV_MIN: usize = 8;
 const K_MAX: usize = 128;
 const V_MAX: usize = 256;
@@ -155,11 +154,9 @@ fn bench_del(c: &mut Criterion) {
 fn configured_criterion() -> Criterion {
     Criterion::default()
         .configure_from_args()
-        .sample_size(SAMPLE)
-        .measurement_time(Duration::from_secs(5))
-        .warm_up_time(Duration::from_secs(2))
-        .noise_threshold(0.05)
-        .with_plots()
+        .measurement_time(Duration::from_secs(1))
+        .warm_up_time(Duration::from_secs(1))
+        .noise_threshold(0.01)
 }
 
 criterion_group! {
