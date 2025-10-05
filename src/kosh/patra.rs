@@ -38,6 +38,7 @@ use crate::{
     hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
     kosh::{
         meta::{Meta, Namespace, Pair, PairBytes, EMPTY_PAIR_BYTES},
+        simd::ISA,
         Key, KeyValue, KoshConfig, Sign, Value, ROW_SIZE,
     },
 };
@@ -72,6 +73,9 @@ pub(crate) struct Patra {
     mmap: MmapMut,
     file: File,
     config: KoshConfig,
+
+    #[allow(unused)]
+    isa: ISA,
 }
 
 impl Patra {
@@ -132,7 +136,7 @@ impl Patra {
             mmap,
             meta,
             stats,
-
+            isa: ISA::detect_isa(),
             config: config.clone(),
         })
     }
@@ -240,6 +244,7 @@ impl Patra {
             mmap,
             meta,
             stats,
+            isa: ISA::detect_isa(),
             config: config.clone(),
         })
     }
