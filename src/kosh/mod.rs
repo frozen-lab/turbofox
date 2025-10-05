@@ -103,7 +103,7 @@ impl Kosh {
             return Err(InternalError::BucketFull(Some(self.config.clone())));
         }
 
-        self.patra.upsert_kv(sign, kv)
+        self.patra.insert_kv(sign, kv, true)
     }
 
     pub fn fetch(&self, key: Key) -> InternalResult<Option<Value>> {

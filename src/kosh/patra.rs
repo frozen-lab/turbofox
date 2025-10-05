@@ -89,7 +89,6 @@ impl Patra {
             .truncate(true)
             .open(&config.path)
             .map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!("Unable to create a new Patra: {e}");
                 e
             })?;
@@ -105,14 +104,12 @@ impl Patra {
 
         // zero-init the file
         file.set_len(header_size as u64).map_err(|e| {
-            // TODO: IMP logs, must use of Logger
             debug_error!("Unable to set len for new Patra: {e}");
             e
         })?;
 
         let mut mmap =
             unsafe { MmapOptions::new().len(header_size).map_mut(&file) }.map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!("Unable to create Mmap for new Patra: {e}");
                 e
             })?;
@@ -128,7 +125,6 @@ impl Patra {
             threshold,
         };
 
-        // TODO: Imp log, use Logger!
         debug_trace!("Created a new Patra ({})", config.name);
 
         Ok(Self {
@@ -160,7 +156,6 @@ impl Patra {
             .truncate(false)
             .open(&config.path)
             .map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!("Unable to open existing Patra: {e}");
                 e
             })?;
@@ -177,7 +172,6 @@ impl Patra {
         let file_len = file
             .metadata()
             .map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!("Unable to fetch metadata for existing Patra: {e}");
                 e
             })?
@@ -192,7 +186,6 @@ impl Patra {
 
         let mut mmap =
             unsafe { MmapOptions::new().len(header_size).map_mut(&file) }.map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!("Unable to create a Mmap for existing Patra: {e}");
                 e
             })?;
@@ -203,7 +196,6 @@ impl Patra {
         // we should simply delete the file, as we do not have any earlier
         // versions to support.
         if !meta.is_current_version() {
-            // TODO: IMP logs, must use of Logger
             debug_error!(
                 "Existing Patra ({}) contains invalid version or magic",
                 config.name
@@ -214,7 +206,6 @@ impl Patra {
 
         // safeguard for the write pointer
         if meta.get_write_pointer() > file_len {
-            // TODO: IMP logs, must use of Logger
             debug_error!(
                 "Existing Patra ({}) has write pointer which had overflown beyound limit",
                 config.name
@@ -225,7 +216,6 @@ impl Patra {
 
         // safeguard for the insert count
         if meta.get_insert_count() > config.cap {
-            // TODO: IMP logs, must use of Logger
             debug_error!(
                 "Existing Patra ({}) contains invalid version or magic",
                 config.name
@@ -243,7 +233,6 @@ impl Patra {
             threshold,
         };
 
-        // TODO: Imp log, use Logger!
         debug_trace!("Opened existing Patra ({})", config.name);
 
         Ok(Self {
@@ -285,7 +274,6 @@ impl Patra {
             let ptr = (self.mmap.as_ptr().add(self.stats.pair_offset) as *const PairBytes).add(idx);
             let bytes = std::ptr::read(ptr);
 
-            // TODO: Imp log, use Logger!
             debug_trace!(
                 "Fetched pair bytes at IDX ({idx}) for Patra ({})",
                 self.config.name
@@ -309,7 +297,6 @@ impl Patra {
             std::ptr::write(ptr, bytes);
         }
 
-        // TODO: Imp log, use Logger!
         debug_trace!(
             "Updated pair bytes at IDX ({idx}) for Patra ({})",
             self.config.name
@@ -329,7 +316,6 @@ impl Patra {
             let ptr = base.add(slice_idx * ROW_SIZE * std::mem::size_of::<Sign>());
             let slice = *(ptr as *const [Sign; ROW_SIZE]);
 
-            // TODO: Imp log, use Logger!
             debug_trace!(
                 "Fetched signature row at IDX ({slice_idx}) for Patra ({})",
                 self.config.name
@@ -352,7 +338,6 @@ impl Patra {
             std::ptr::write(ptr, sign);
         }
 
-        // TODO: Imp log, use Logger!
         debug_trace!(
             "Updated sign ({sign}) at IDX ({idx}) for Patra ({})",
             self.config.name
@@ -361,7 +346,6 @@ impl Patra {
 
     fn read_pair_key(&self, bytes: PairBytes) -> InternalResult<Key> {
         let pair = Pair::from_raw(bytes).map_err(|e| {
-            // TODO: IMP logs, must use of Logger
             debug_error!("Patra ({}) contains invalid entry", self.config.name);
             e
         })?;
@@ -374,7 +358,6 @@ impl Patra {
             self.stats.header_size as u64 + pair.offset,
         )
         .map_err(|e| {
-            // TODO: IMP logs, must use of Logger
             debug_error!(
                 "Patra ({}) had IO error while reading data buf",
                 self.config.name
@@ -382,7 +365,6 @@ impl Patra {
             e
         })?;
 
-        // TODO: Imp log, use Logger!
         debug_trace!("Fetched key buffer for Patra ({})", self.config.name);
 
         Ok(buf)
@@ -404,7 +386,6 @@ impl Patra {
             self.stats.header_size as u64 + pair.offset,
         )
         .map_err(|e| {
-            // TODO: IMP logs, must use of Logger
             debug_error!(
                 "Patra ({}) had IO error while reading data buf",
                 self.config.name
@@ -415,7 +396,6 @@ impl Patra {
         let vbuf = buf[klen..(klen + vlen)].to_owned();
         buf.truncate(klen);
 
-        // TODO: Imp log, use Logger!
         debug_trace!("Fetched kv buffer for Patra ({})", self.config.name);
 
         Ok((buf, vbuf))
@@ -440,7 +420,6 @@ impl Patra {
         })?;
 
         write_all_at(&self.file, &buf, self.stats.header_size as u64 + offset).map_err(|e| {
-            // TODO: IMP logs, must use of Logger
             debug_error!(
                 "Patra ({}) had IO error while writing data buf for key ({:?})",
                 self.config.name,
@@ -449,7 +428,6 @@ impl Patra {
             e
         })?;
 
-        // TODO: Imp log, use Logger!
         debug_trace!(
             "Wrote kv buffer w/ key ({:?}) for Patra ({})",
             kv.0,
@@ -469,12 +447,11 @@ impl Patra {
         self.meta.get_insert_count()
     }
 
-    pub fn upsert_kv(&mut self, sign: Sign, kv: KeyValue) -> InternalResult<()> {
+    pub fn insert_kv(&mut self, sign: Sign, kv: KeyValue, upsert: bool) -> InternalResult<()> {
         let start_idx = self.get_sign_hash(sign);
         let (idx, is_new) = self
             .lookup_upsert_slot(start_idx, sign, &kv.0)
             .map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!(
                     "Unable to upsert kv pair for key ({:?}) in Patra ({})",
                     kv.0,
@@ -483,10 +460,18 @@ impl Patra {
                 e
             })?;
 
+        if !is_new && !upsert {
+            debug_trace!(
+                "Skipped update for existing key ({:?}) in Patra ({}) (upsert disabled)",
+                kv.0,
+                self.config.name
+            );
+            return Ok(());
+        }
+
         let pair_bytes = self
             .write_pair_key_value(Namespace::Base, &kv)
             .map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!(
                     "Patra ({}) had IO error while writing data buf for key ({:?})",
                     self.config.name,
@@ -501,28 +486,19 @@ impl Patra {
             // sanity check (only for new insertions)
             debug_assert!(
                 self.meta.get_insert_count() <= self.stats.threshold,
-                "Insertions are not allowed beyound threshold limit"
+                "Insertions are not allowed beyound threshold limit",
             );
 
             self.meta.incr_insert_count();
             self.set_sign(idx, sign);
         }
 
-        if is_new {
-            // TODO: Imp log, use Logger!
-            debug_trace!(
-                "Inserted kv pair w/ key ({:?}) for Patra ({})",
-                kv.0,
-                self.config.name
-            );
-        } else {
-            // TODO: Imp log, use Logger!
-            debug_trace!(
-                "Updated kv pair w/ key ({:?}) for Patra ({})",
-                kv.0,
-                self.config.name
-            );
-        }
+        debug_trace!(
+            "{} kv pair w/ key ({:?}) for Patra ({})",
+            if is_new { "Inserted" } else { "Updated" },
+            kv.0,
+            self.config.name
+        );
 
         Ok(())
     }
@@ -533,7 +509,6 @@ impl Patra {
         if let Some((_, vbuf)) = self
             .lookup_existing_pair(start_idx, sign, &key)
             .map_err(|e| {
-                // TODO: IMP logs, must use of Logger
                 debug_error!(
                     "Unable to fetch value for key ({:?}) in Patra ({})",
                     key,
@@ -542,7 +517,6 @@ impl Patra {
                 e
             })?
         {
-            // TODO: Imp log, use Logger!
             debug_trace!(
                 "Fetched value for key ({:?}) for Patra ({})",
                 key,
@@ -552,7 +526,6 @@ impl Patra {
             return Ok(Some(vbuf));
         }
 
-        // TODO: Imp log, use Logger!
         debug_trace!(
             "Unable to fetch! Key ({:?}) not found in Patra ({})",
             key,
@@ -568,7 +541,6 @@ impl Patra {
         if let Some((idx, vbuf)) =
             self.lookup_existing_pair(start_idx, sign, &key)
                 .map_err(|e| {
-                    // TODO: IMP logs, must use of Logger
                     debug_error!(
                         "Unable to yank kv pair for key ({:?}) in Patra ({})",
                         key,
@@ -581,7 +553,6 @@ impl Patra {
             self.set_pair_bytes(idx, EMPTY_PAIR_BYTES);
             self.set_sign(idx, TOMBSTONE_SIGN);
 
-            // TODO: Imp log, use Logger!
             debug_trace!(
                 "Yanked kv pair w/ key ({:?}) for Patra ({})",
                 key,
@@ -591,7 +562,6 @@ impl Patra {
             return Ok(Some(vbuf));
         }
 
-        // TODO: Imp log, use Logger!
         debug_trace!(
             "Unable to yank! Key ({:?}) not found in Patra ({})",
             key,
@@ -654,7 +624,6 @@ impl Patra {
             idx = (idx + 1) % self.stats.sign_rows;
         }
 
-        // TODO: IMP logs, must use of Logger
         debug_warn!(
             "Pair not found in Patra ({}) after searching the entire space",
             self.config.name,
@@ -716,7 +685,6 @@ impl Patra {
             idx = (idx + 1) % self.stats.sign_rows;
         }
 
-        // TODO: IMP logs, must use of Logger
         debug_error!(
             "Patra ({}) is full. No more inserts are allowed!",
             self.config.name,
@@ -988,7 +956,7 @@ mod patra_tests {
         }
 
         #[test]
-        fn test_upsert_kv_new_and_update() {
+        fn test_insert_kv_new_and_update() {
             let mut patra = open_patra();
 
             let val = b"world".to_vec();
@@ -998,7 +966,9 @@ mod patra_tests {
             let sign1 = Hasher::new(&key);
             let start_idx1 = patra.get_sign_hash(sign1);
 
-            patra.upsert_kv(sign1, (key.clone(), val.clone())).unwrap();
+            patra
+                .insert_kv(sign1, (key.clone(), val.clone()), true)
+                .unwrap();
 
             // verify write
             let slot = patra.lookup_upsert_slot(start_idx1, sign1, &key).unwrap().0;
@@ -1009,7 +979,9 @@ mod patra_tests {
             assert_eq!(v, val);
 
             // update
-            patra.upsert_kv(sign1, (key.clone(), val2.clone())).unwrap();
+            patra
+                .insert_kv(sign1, (key.clone(), val2.clone()), true)
+                .unwrap();
 
             // verify write
             let slot = patra.lookup_upsert_slot(start_idx1, sign1, &key).unwrap().0;
@@ -1037,14 +1009,18 @@ mod patra_tests {
             // dummy keys (all insert into same row)
             for i in 0..ROW_SIZE {
                 let k = format!("key{i}").as_bytes().to_vec();
-                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
+                patra
+                    .insert_kv(sign, (k.clone(), b"x".to_vec()), true)
+                    .unwrap();
             }
 
             // new key (collision case, as no space left in the row)
             let n_k = b"special".to_vec();
             let n_v = b"y".to_vec();
 
-            patra.upsert_kv(sign, (n_k.clone(), n_v.clone())).unwrap();
+            patra
+                .insert_kv(sign, (n_k.clone(), n_v.clone()), true)
+                .unwrap();
 
             // verify write
             let slot = patra.lookup_upsert_slot(row_idx, sign, &n_k).unwrap().0;
@@ -1142,15 +1118,19 @@ mod patra_tests {
             let val2 = b"v2".to_vec();
             let sign = Hasher::new(&key);
 
-            patra.upsert_kv(sign, (key.clone(), val1.clone())).unwrap();
+            patra
+                .insert_kv(sign, (key.clone(), val1.clone()), true)
+                .unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1);
 
-            patra.upsert_kv(sign, (key.clone(), val2.clone())).unwrap();
+            patra
+                .insert_kv(sign, (key.clone(), val2.clone()), true)
+                .unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1); // must stay same
         }
 
         #[test]
-        fn test_upsert_kv_func_with_inserts_and_updates() {
+        fn test_insert_kv_func_with_inserts_and_updates() {
             let mut patra = open_patra();
 
             //
@@ -1162,7 +1142,9 @@ mod patra_tests {
             let sign1 = Hasher::new(&key);
             let start_idx1 = patra.get_sign_hash(sign1);
 
-            patra.upsert_kv(sign1, (key.clone(), val1.clone())).unwrap();
+            patra
+                .insert_kv(sign1, (key.clone(), val1.clone()), true)
+                .unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1);
 
             // verify write
@@ -1173,7 +1155,9 @@ mod patra_tests {
             assert_eq!(k, key);
             assert_eq!(v, val1);
 
-            patra.upsert_kv(sign1, (key.clone(), val2.clone())).unwrap();
+            patra
+                .insert_kv(sign1, (key.clone(), val2.clone()), true)
+                .unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1);
 
             // verify update
@@ -1193,7 +1177,7 @@ mod patra_tests {
             let start_idx2 = patra.get_sign_hash(sign2);
 
             patra
-                .upsert_kv(sign2, (other_key.clone(), other_val.clone()))
+                .insert_kv(sign2, (other_key.clone(), other_val.clone()), true)
                 .unwrap();
 
             // verify update
@@ -1226,7 +1210,7 @@ mod patra_tests {
             let sign1 = Hasher::new(&key1);
             let start_idx1 = patra.get_sign_hash(sign1);
 
-            patra.upsert_kv(sign1, (key1.clone(), val1)).unwrap();
+            patra.insert_kv(sign1, (key1.clone(), val1), true).unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1);
 
             let slot = patra
@@ -1244,7 +1228,7 @@ mod patra_tests {
             let start_idx2 = patra.get_sign_hash(sign2);
 
             patra
-                .upsert_kv(sign2, (key2.clone(), val2.clone()))
+                .insert_kv(sign2, (key2.clone(), val2.clone()), true)
                 .unwrap();
 
             assert_eq!(patra.meta.get_insert_count(), 2);
@@ -1270,7 +1254,7 @@ mod patra_tests {
             let sign1 = crate::hasher::Hasher::new(&key1);
 
             patra
-                .upsert_kv(sign1, (key1.clone(), val1.clone()))
+                .insert_kv(sign1, (key1.clone(), val1.clone()), true)
                 .unwrap();
             let off1 = patra.meta.get_write_pointer();
 
@@ -1279,7 +1263,7 @@ mod patra_tests {
             let sign2 = crate::hasher::Hasher::new(&key2);
 
             patra
-                .upsert_kv(sign2, (key2.clone(), val2.clone()))
+                .insert_kv(sign2, (key2.clone(), val2.clone()), true)
                 .unwrap();
             let off2 = patra.meta.get_write_pointer();
 
@@ -1288,7 +1272,7 @@ mod patra_tests {
             let sign3 = crate::hasher::Hasher::new(&key3);
 
             patra
-                .upsert_kv(sign3, (key3.clone(), val3.clone()))
+                .insert_kv(sign3, (key3.clone(), val3.clone()), true)
                 .unwrap();
             let off3 = patra.meta.get_write_pointer();
 
@@ -1317,12 +1301,12 @@ mod patra_tests {
 
             // insert k1
             patra
-                .upsert_kv(sign1, (key1.clone(), b"v1".to_vec()))
+                .insert_kv(sign1, (key1.clone(), b"v1".to_vec()), true)
                 .unwrap();
 
             // insert k2 w/ collision
             patra
-                .upsert_kv(sign2, (key2.clone(), b"v2".to_vec()))
+                .insert_kv(sign2, (key2.clone(), b"v2".to_vec()), true)
                 .unwrap();
 
             let slot1 = patra
@@ -1362,7 +1346,9 @@ mod patra_tests {
                 let val = b"data".to_vec();
                 let sign = crate::hasher::Hasher::new(&key);
 
-                patra.upsert_kv(sign, (key.clone(), val.clone())).unwrap();
+                patra
+                    .insert_kv(sign, (key.clone(), val.clone()), true)
+                    .unwrap();
                 assert_eq!(patra.meta.get_insert_count(), 1);
             }
 
@@ -1402,7 +1388,9 @@ mod patra_tests {
                 "Should return None for non-existent key"
             );
 
-            patra.upsert_kv(sign, (key.clone(), val.clone())).unwrap();
+            patra
+                .insert_kv(sign, (key.clone(), val.clone()), true)
+                .unwrap();
             let fetched = patra.fetch_value(sign, key.clone()).unwrap();
 
             assert_eq!(
@@ -1420,7 +1408,9 @@ mod patra_tests {
             let val = b"v1".to_vec();
             let sign = Hasher::new(&key);
 
-            patra.upsert_kv(sign, (key.clone(), val.clone())).unwrap();
+            patra
+                .insert_kv(sign, (key.clone(), val.clone()), true)
+                .unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1);
 
             let removed = patra.yank_key(sign, key.clone()).unwrap();
@@ -1455,7 +1445,7 @@ mod patra_tests {
             let sign1 = Hasher::new(&key1);
 
             patra
-                .upsert_kv(sign1, (key1.clone(), val1.clone()))
+                .insert_kv(sign1, (key1.clone(), val1.clone()), true)
                 .unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1);
 
@@ -1468,7 +1458,7 @@ mod patra_tests {
             let sign2 = Hasher::new(&key2);
 
             patra
-                .upsert_kv(sign2, (key2.clone(), val2.clone()))
+                .insert_kv(sign2, (key2.clone(), val2.clone()), true)
                 .unwrap();
             assert_eq!(patra.meta.get_insert_count(), 1);
 
@@ -1477,8 +1467,59 @@ mod patra_tests {
         }
 
         #[test]
+        fn test_insert_kv_does_not_update_when_upsert_false() {
+            let mut patra = open_patra();
+
+            let key = b"hello".to_vec();
+            let val1 = b"world".to_vec();
+            let val2 = b"rust".to_vec();
+            let sign = Hasher::new(&key);
+
+            // first insert
+            patra
+                .insert_kv(sign, (key.clone(), val1.clone()), true)
+                .unwrap();
+            assert_eq!(patra.meta.get_insert_count(), 1);
+
+            // try upsert (w/ upsert = false)
+            patra
+                .insert_kv(sign, (key.clone(), val2.clone()), false)
+                .unwrap();
+
+            // upsert should not've taken place
+            let start_idx = patra.get_sign_hash(sign);
+            let slot = patra.lookup_upsert_slot(start_idx, sign, &key).unwrap().0;
+            let pb = patra.get_pair_bytes(slot);
+            let (k, v) = patra.read_pair_key_value(pb).unwrap();
+
+            assert_eq!(k, key);
+            assert_eq!(v, val1);
+        }
+
+        #[test]
+        fn test_insert_kv_new_insert_with_upsert_false_still_inserts() {
+            let mut patra = open_patra();
+
+            let key = b"foo".to_vec();
+            let val = b"bar".to_vec();
+            let sign = Hasher::new(&key);
+
+            patra
+                .insert_kv(sign, (key.clone(), val.clone()), false)
+                .unwrap();
+
+            let start_idx = patra.get_sign_hash(sign);
+            let slot = patra.lookup_upsert_slot(start_idx, sign, &key).unwrap().0;
+            let pb = patra.get_pair_bytes(slot);
+            let (k, v) = patra.read_pair_key_value(pb).unwrap();
+
+            assert_eq!(k, key);
+            assert_eq!(v, val);
+        }
+
+        #[test]
         #[cfg(not(debug_assertions))]
-        fn test_upsert_kv_till_full_capacity() {
+        fn test_insert_kv_till_full_capacity() {
             let mut patra = open_patra_with_cap(32);
             let mut rng = sphur::Sphur::new_seeded(0x10203040);
 
@@ -1487,7 +1528,10 @@ mod patra_tests {
                 let k = format!("key{i}").into_bytes();
                 let sign = Hasher::new(&k);
 
-                if patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).is_err() {
+                if patra
+                    .insert_kv(sign, (k.clone(), b"x".to_vec()), true)
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1504,7 +1548,9 @@ mod patra_tests {
                 let k = format!("key{i}").into_bytes();
                 let sign = Hasher::new(&k);
 
-                patra.upsert_kv(sign, (k.clone(), b"x".to_vec())).unwrap();
+                patra
+                    .insert_kv(sign, (k.clone(), b"x".to_vec()), true)
+                    .unwrap();
             }
 
             assert!(patra.is_full());
@@ -1514,7 +1560,7 @@ mod patra_tests {
             let sign = Hasher::new(&k);
 
             assert!(
-                patra.upsert_kv(sign, (k, v)).is_err(),
+                patra.insert_kv(sign, (k, v), true).is_err(),
                 "upserting new entry must fail when cap is full"
             );
         }
