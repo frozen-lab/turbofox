@@ -13,7 +13,7 @@ permissions:
   id-token: write
 
 jobs:
-  create-release:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -35,7 +35,7 @@ jobs:
           python -m pip install --upgrade pip
 
       - name: Run Benchmarks
-        run: python3 bench.py
+        run: python3 run_bench.py --sample 64
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -49,7 +49,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
-    needs: create-release
+    needs: release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
