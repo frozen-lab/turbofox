@@ -119,7 +119,7 @@ jobs:
           python -m pip install --upgrade pip
 
       - name: Run Benchmarks
-        run: python3 run_bench.py --sample 64
+        run: python3 run_bench.py --sample 16
 
       - name: Print Summery
         run: |

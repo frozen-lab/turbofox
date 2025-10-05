@@ -1,3 +1,7 @@
+## 0.2.1
+
+- Improved benchmarking
+
 ## 0.2.0
 
 - Revamped internal structure for better scalability
