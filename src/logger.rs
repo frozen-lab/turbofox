@@ -1,20 +1,6 @@
 use log::{Level, Record};
 
 ///
-/// Logging for Test modules
-///
-
-#[cfg(test)]
-static INIT: std::sync::Once = std::sync::Once::new();
-
-#[cfg(test)]
-pub fn init_test_logger() {
-    INIT.call_once(|| {
-        let _ = env_logger::builder().is_test(true).try_init();
-    });
-}
-
-///
 /// Logger
 ///
 

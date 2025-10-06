@@ -122,13 +122,7 @@ impl Grantha {
 #[cfg(test)]
 mod grantha_tests {
     use super::*;
-    use crate::logger::init_test_logger;
     use tempfile::TempDir;
-
-    #[ctor::ctor]
-    fn init() {
-        init_test_logger();
-    }
 
     const TEST_ROWS: usize = 2;
 

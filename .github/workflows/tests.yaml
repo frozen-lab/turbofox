@@ -87,11 +87,21 @@ jobs:
           toolchain: stable
           cache-key: ${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Default Example
+      - name: Default Example (Linux/Mac)
+        if: runner.os != 'Windows'
         run: RUST_LOG=trace cargo run --example basic --release
 
-      - name: Turbo Buckets Example
+      - name: Turbo Buckets Example (Linux/Mac)
+        if: runner.os != 'Windows'
         run: RUST_LOG=trace cargo run --example turbo_buckets --release
+
+      - name: Default Example (Windows)
+        if: runner.os == 'Windows'
+        run: cargo run --example basic --release
+
+      - name: Turbo Buckets Example (Windows)
+        if: runner.os == 'Windows'
+        run: cargo run --example turbo_buckets --release
 
   benchmarks:
     runs-on: ubuntu-latest
@@ -116,7 +126,9 @@ jobs:
 
       - name: Run Benchmarks
         run: |
-          echo "Running w/ pinned to CPU 1..."
           taskset -c 1 python3 run_bench.py --sample 24
+
+      - name: Print Summery
+        run: |
           echo "Adding bench results to job summary..."
-          cat BENCH_RESULTS.md >> $GITHUB_STEP_SMMARY
+          cat BENCH_RESULTS.md >> $GITHUB_STEP_SUMMARY

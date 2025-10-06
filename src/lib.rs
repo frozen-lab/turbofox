@@ -195,13 +195,7 @@ impl<'a> TurboBucket<'a> {
 #[cfg(test)]
 mod turbo_tests {
     use super::*;
-    use crate::logger::init_test_logger;
     use tempfile::TempDir;
-
-    #[ctor::ctor]
-    fn init() {
-        init_test_logger();
-    }
 
     fn create_cache(rows: usize) -> (TurboCache, TempDir) {
         let tmp = TempDir::new().unwrap();
