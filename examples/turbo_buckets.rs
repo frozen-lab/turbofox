@@ -65,5 +65,14 @@ fn main() {
         Err(e) => error!("Error verifying deletion: {e}"),
     }
 
+    // ---
+    // Total pair count across all buckets
+    // ---
+
+    match cache.total_pair_count() {
+        Ok(total) => info!("Total key-value pairs in TurboCache: {}", total),
+        Err(e) => error!("Failed to fetch total pair count: {e}"),
+    }
+
     info!("'users' bucket operations successful.");
 }

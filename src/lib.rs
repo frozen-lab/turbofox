@@ -105,6 +105,16 @@ impl TurboCache {
         self.bucket(DEFAULT_BKT_NAME, None).is_full()
     }
 
+    pub fn total_pair_count(&mut self) -> TurboResult<usize> {
+        let mut total = 0;
+
+        for name in self.buckets.keys().cloned().collect::<Vec<_>>() {
+            total += self.bucket(name, None).pair_count()?;
+        }
+
+        Ok(total)
+    }
+
     fn get_or_init_grantha(&mut self, name: &'static str) -> TurboResult<&mut Grantha> {
         let entry = self.buckets.get_mut(name).ok_or(TurboError::Unknown)?;
 
@@ -408,6 +418,29 @@ mod turbo_tests {
                     assert_eq!(got, Some(format!("v{}", i).into_bytes()));
                 }
             }
+        }
+
+        #[test]
+        fn test_total_pair_count_across_buckets() {
+            let (mut cache, _tmp) = create_cache(10);
+
+            // Default bucket
+            cache.set(b"k1", b"v1").unwrap();
+            cache.set(b"k2", b"v2").unwrap();
+
+            // Custom bucket
+            let mut users = cache.bucket("users", None);
+            users.set(b"u1", b"a").unwrap();
+            users.set(b"u2", b"b").unwrap();
+            users.set(b"u3", b"c").unwrap();
+
+            let total = cache.total_pair_count().unwrap();
+            assert_eq!(total, 5);
+
+            cache.del(b"k1").unwrap();
+            let total_after_del = cache.total_pair_count().unwrap();
+
+            assert_eq!(total_after_del, 4);
         }
     }
 
