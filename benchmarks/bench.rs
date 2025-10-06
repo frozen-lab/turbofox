@@ -52,7 +52,7 @@ fn bench_set(c: &mut Criterion) {
     group.bench_function("variable_kv", |b| {
         b.iter_batched(
             || {
-                let cache = setup_cache("set");
+                let cache = setup_cache("set_variable_kv");
                 let (k, v) = gen_random_kv(&mut sphur);
 
                 (cache, k, v)
@@ -71,38 +71,24 @@ fn bench_set(c: &mut Criterion) {
     group.finish();
 }
 
-///
-/// Bench w/ approx 80% hit and 20% miss
-///
 fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
     let mut sphur = Sphur::new_seeded(SEED2);
 
-    group.bench_function("hit80_miss20", |b| {
+    group.bench_function("rng_hit_miss", |b| {
         b.iter_batched(
             || {
-                let mut cache = setup_cache("get");
-                let mut keys = Vec::new();
+                let mut cache = setup_cache("get_rng_hit_miss");
+                let (k, v) = gen_random_kv(&mut sphur);
 
-                // Add 80% hit keys
-                for _ in 0..80 {
-                    let (k, v) = gen_random_kv(&mut sphur);
-                    cache.set(&k, &v).unwrap();
-                    keys.push(k);
+                if sphur.gen_bool() {
+                    let _ = cache.set(&k, &v);
                 }
 
-                // Add 20% miss
-                for _ in 0..20 {
-                    let (k, _) = gen_random_kv(&mut sphur);
-                    keys.push(k);
-                }
-
-                (cache, keys)
+                (cache, k)
             },
-            |(mut cache, keys)| {
-                keys.iter().for_each(|k| {
-                    let _ = cache.get(k);
-                });
+            |(mut cache, k)| {
+                let _ = cache.get(&k);
             },
             BatchSize::SmallInput,
         );
@@ -111,38 +97,24 @@ fn bench_get(c: &mut Criterion) {
     group.finish();
 }
 
-///
-/// Bench w/ 80% hit and 20% miss
-///
 fn bench_del(c: &mut Criterion) {
     let mut group = c.benchmark_group("del");
     let mut sphur = Sphur::new_seeded(SEED3);
 
-    group.bench_function("hit80_miss20", |b| {
+    group.bench_function("rng_hit_miss", |b| {
         b.iter_batched(
             || {
-                let mut cache = setup_cache("del");
-                let mut keys = Vec::with_capacity(100);
+                let mut cache = setup_cache("del_rng_hit_miss");
+                let (k, v) = gen_random_kv(&mut sphur);
 
-                // Add 80% hit keys
-                for _ in 0..80 {
-                    let (k, v) = gen_random_kv(&mut sphur);
-                    cache.set(&k, &v).unwrap();
-                    keys.push(k);
+                if sphur.gen_bool() {
+                    let _ = cache.set(&k, &v);
                 }
 
-                // 20% misses
-                for _ in 0..20 {
-                    let (k, _) = gen_random_kv(&mut sphur);
-                    keys.push(k);
-                }
-
-                (cache, keys)
+                (cache, k)
             },
-            |(mut cache, keys)| {
-                keys.iter().for_each(|k| {
-                    let _ = cache.del(k);
-                });
+            |(mut cache, k)| {
+                let _ = cache.del(&k);
             },
             BatchSize::SmallInput,
         );

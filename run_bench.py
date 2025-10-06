@@ -1,6 +1,5 @@
 # ruff: noqa
 
-
 """Script to run and analyze benchmarks, and create MD table.
 
 ```bash
@@ -19,7 +18,7 @@ from pathlib import Path
 # Logging setup
 # ---
 
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="[%(levelname)s] %(message)s")
 
 # ---
 # Paths
@@ -29,8 +28,8 @@ bench_md = Path("BENCH_RESULTS.md")
 
 BENCHES = {
     "set": Path("target/criterion/set/variable_kv/new/sample.json"),
-    "get": Path("target/criterion/get/hit80_miss20/new/sample.json"),
-    "del": Path("target/criterion/del/hit80_miss20/new/sample.json"),
+    "get": Path("target/criterion/get/rng_hit_miss/new/sample.json"),
+    "del": Path("target/criterion/del/rng_hit_miss/new/sample.json"),
 }
 
 # ---
@@ -68,6 +67,7 @@ def stddev(data, m=None):
 
 parser = argparse.ArgumentParser(description="Run and process TurboCache benchmarks.")
 parser.add_argument("--sample", type=int, default=64, help="Criterion sample size")
+parser.add_argument("--debug", type=bool, default=False, help="Is debug mode")
 args = parser.parse_args()
 
 # ---
@@ -145,7 +145,8 @@ md = "\n".join(md_lines)
 # Save result
 # ---
 
-bench_md.write_text(md)
-logging.info(f"Markdown table saved to {bench_md}")
+if not args.debug:
+    bench_md.write_text(md)
+    logging.info(f"Markdown table saved to {bench_md}")
 
-print(md)
+logging.debug(md)
