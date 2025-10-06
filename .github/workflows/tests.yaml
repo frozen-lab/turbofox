@@ -75,12 +75,8 @@ jobs:
             arch: aarch64
           - os: windows-latest
             arch: x86_64
-          - os: windows-11-arm
-            arch: aarch64
           - os: macos-13
             arch: x86_64
-          - os: macos-latest
-            arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -119,9 +115,8 @@ jobs:
           python -m pip install --upgrade pip
 
       - name: Run Benchmarks
-        run: python3 run_bench.py --sample 16
-
-      - name: Print Summery
         run: |
-          echo "Printing benchmark summary to job summary..."
-          cat BENCH_RESULTS.md >> $GITHUB_STEP_SUMMARY
+          echo "Running w/ pinned to CPU 1..."
+          taskset -c 1 python3 run_bench.py --sample 24
+          echo "Adding bench results to job summary..."
+          cat BENCH_RESULTS.md >> $GITHUB_STEP_SMMARY
