@@ -1,3 +1,8 @@
+## 0.2.2
+
+- Impl of `total_pair_count` to count total pairs across all buckets.
+- Improved bench script
+
 ## 0.2.1
 
 - Improved benchmarking
