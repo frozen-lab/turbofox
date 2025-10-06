@@ -75,8 +75,8 @@ jobs:
             arch: aarch64
           - os: windows-latest
             arch: x86_64
-          - os: macos-13
-            arch: x86_64
+          - os: macos-latest
+            arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

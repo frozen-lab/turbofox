@@ -35,7 +35,8 @@ jobs:
           python -m pip install --upgrade pip
 
       - name: Run Benchmarks
-        run: python3 run_bench.py --sample 64
+        run: |
+          taskset -c 1 python3 run_bench.py --sample 64
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
