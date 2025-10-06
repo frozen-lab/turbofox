@@ -38,6 +38,17 @@ impl From<InternalError> for TurboError {
 
                 TurboError::BucketOverflow(bkt.to_string())
             }
+            InternalError::BucketFull(config) => {
+                let bkt = {
+                    if let Some(cfg) = config {
+                        cfg.name
+                    } else {
+                        "unknown bucket"
+                    }
+                };
+
+                TurboError::BucketOverflow(bkt.to_string())
+            }
             _ => TurboError::Unknown,
         }
     }
