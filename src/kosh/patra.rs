@@ -249,199 +249,6 @@ impl Patra {
         })
     }
 
-    /// Calculate the size of header based on given capacity for [Bucket]
-    ///
-    /// ### Size Calculation
-    ///
-    /// `sizeof(Meta) + (sizeof(Sign) * CAP) + (sizeof(PairBytes) * CAP)`
-    #[inline(always)]
-    const fn calc_header_size(capacity: usize) -> usize {
-        Meta::size_of() + (size_of::<Sign>() * capacity) + (size_of::<PairBytes>() * capacity)
-    }
-
-    /// Calculate threshold w/ given capacity for [Bucket]
-    ///
-    /// NOTE: It's 80% of given capacity
-    #[inline(always)]
-    const fn calc_threshold(cap: usize) -> usize {
-        cap.saturating_mul(4) / 5
-    }
-
-    #[inline(always)]
-    fn get_pair_bytes(&self, idx: usize) -> PairBytes {
-        // sanity check
-        debug_assert!(
-            idx < self.stats.capacity,
-            "Index must not be bigger then the capacity"
-        );
-
-        unsafe {
-            let ptr = (self.mmap.as_ptr().add(self.stats.pair_offset) as *const PairBytes).add(idx);
-            let bytes = std::ptr::read(ptr);
-
-            debug_trace!(
-                "Fetched pair bytes at IDX ({idx}) for Patra ({})",
-                self.config.name
-            );
-
-            bytes
-        }
-    }
-
-    #[inline(always)]
-    fn set_pair_bytes(&mut self, idx: usize, bytes: PairBytes) {
-        // sanity check
-        debug_assert!(
-            idx < self.stats.capacity,
-            "Index must not be bigger then the capacity"
-        );
-
-        unsafe {
-            let ptr =
-                (self.mmap.as_mut_ptr().add(self.stats.pair_offset) as *mut PairBytes).add(idx);
-            std::ptr::write(ptr, bytes);
-        }
-
-        debug_trace!(
-            "Updated pair bytes at IDX ({idx}) for Patra ({})",
-            self.config.name
-        );
-    }
-
-    #[inline(always)]
-    fn get_sign_slice(&self, slice_idx: usize) -> [Sign; ROW_SIZE] {
-        // sanity check
-        debug_assert!(
-            slice_idx < self.stats.sign_rows,
-            "Slice Index must not be bigger then total slices available"
-        );
-
-        unsafe {
-            let base = self.mmap.as_ptr().add(self.stats.sign_offset);
-            let ptr = base.add(slice_idx * ROW_SIZE * std::mem::size_of::<Sign>());
-            let slice = *(ptr as *const [Sign; ROW_SIZE]);
-
-            debug_trace!(
-                "Fetched signature row at IDX ({slice_idx}) for Patra ({})",
-                self.config.name
-            );
-
-            slice
-        }
-    }
-
-    #[inline(always)]
-    fn set_sign(&mut self, idx: usize, sign: Sign) {
-        // sanity check
-        debug_assert!(
-            idx < self.stats.capacity,
-            "Index must not be bigger then the capacity"
-        );
-
-        unsafe {
-            let ptr = (self.mmap.as_mut_ptr().add(self.stats.sign_offset) as *mut Sign).add(idx);
-            std::ptr::write(ptr, sign);
-        }
-
-        debug_trace!(
-            "Updated sign ({sign}) at IDX ({idx}) for Patra ({})",
-            self.config.name
-        );
-    }
-
-    fn read_pair_key(&self, bytes: PairBytes) -> InternalResult<Key> {
-        let pair = Pair::from_raw(bytes).map_err(|e| {
-            debug_error!("Patra ({}) contains invalid entry", self.config.name);
-            e
-        })?;
-
-        let mut buf = vec![0u8; pair.klen as usize];
-
-        read_exact_at(
-            &self.file,
-            &mut buf,
-            self.stats.header_size as u64 + pair.offset,
-        )
-        .map_err(|e| {
-            debug_error!(
-                "Patra ({}) had IO error while reading data buf",
-                self.config.name
-            );
-            e
-        })?;
-
-        debug_trace!("Fetched key buffer for Patra ({})", self.config.name);
-
-        Ok(buf)
-    }
-
-    fn read_pair_key_value(&self, bytes: PairBytes) -> InternalResult<KeyValue> {
-        let pair = Pair::from_raw(bytes).map_err(|e| {
-            debug_error!("Patra ({}) contains invalid entry", self.config.name);
-            e
-        })?;
-
-        let klen = pair.klen as usize;
-        let vlen = pair.vlen as usize;
-
-        let mut buf = vec![0u8; klen + vlen];
-        read_exact_at(
-            &self.file,
-            &mut buf,
-            self.stats.header_size as u64 + pair.offset,
-        )
-        .map_err(|e| {
-            debug_error!(
-                "Patra ({}) had IO error while reading data buf",
-                self.config.name
-            );
-            e
-        })?;
-
-        let vbuf = buf[klen..(klen + vlen)].to_owned();
-        buf.truncate(klen);
-
-        debug_trace!("Fetched kv buffer for Patra ({})", self.config.name);
-
-        Ok((buf, vbuf))
-    }
-
-    fn write_pair_key_value(&mut self, ns: Namespace, kv: &KeyValue) -> InternalResult<PairBytes> {
-        let klen = kv.0.len();
-        let vlen = kv.1.len();
-        let blen = klen + vlen;
-
-        let mut buf = vec![0u8; blen];
-        buf[..klen].copy_from_slice(&kv.0);
-        buf[klen..].copy_from_slice(&kv.1);
-
-        // this gets us write pointer before updating w/ current buffer length
-        let offset = self.meta.update_write_offset(blen as u64);
-
-        let pair = Pair::new(offset, ns, klen, vlen);
-        let raw = pair.to_raw().map_err(|e| {
-            println!("[ERROR]: pair.to_raw() failed: {e:?}");
-            e
-        })?;
-
-        write_all_at(&self.file, &buf, self.stats.header_size as u64 + offset).map_err(|e| {
-            debug_error!(
-                "Patra ({}) had IO error while writing data buf for key ({:?})",
-                self.config.name,
-                kv.0
-            );
-            e
-        })?;
-
-        debug_trace!(
-            "Wrote kv buffer w/ key ({:?}) for Patra ({})",
-            kv.0,
-            self.config.name
-        );
-
-        Ok(raw)
-    }
-
     #[inline(always)]
     pub fn is_full(&self) -> bool {
         self.meta.get_insert_count() >= self.stats.threshold
@@ -576,6 +383,203 @@ impl Patra {
         Ok(None)
     }
 
+    #[inline(always)]
+    pub fn get_sign_hash(&self, sign: Sign) -> usize {
+        // sanity check
+        debug_assert!(self.stats.sign_rows != 0, "No of rows must not be 0");
+
+        sign as usize % self.stats.sign_rows
+    }
+
+    /// Calculate the size of header based on given capacity for [Bucket]
+    ///
+    /// ### Size Calculation
+    ///
+    /// `sizeof(Meta) + (sizeof(Sign) * CAP) + (sizeof(PairBytes) * CAP)`
+    #[inline(always)]
+    const fn calc_header_size(capacity: usize) -> usize {
+        Meta::size_of() + (size_of::<Sign>() * capacity) + (size_of::<PairBytes>() * capacity)
+    }
+
+    /// Calculate threshold w/ given capacity for [Bucket]
+    ///
+    /// NOTE: It's 80% of given capacity
+    #[inline(always)]
+    const fn calc_threshold(cap: usize) -> usize {
+        cap.saturating_mul(4) / 5
+    }
+
+    fn get_pair_bytes(&self, idx: usize) -> PairBytes {
+        // sanity check
+        debug_assert!(
+            idx < self.stats.capacity,
+            "Index must not be bigger then the capacity"
+        );
+
+        unsafe {
+            let ptr = (self.mmap.as_ptr().add(self.stats.pair_offset) as *const PairBytes).add(idx);
+            let bytes = std::ptr::read(ptr);
+
+            debug_trace!(
+                "Fetched pair bytes at IDX ({idx}) for Patra ({})",
+                self.config.name
+            );
+
+            bytes
+        }
+    }
+
+    fn set_pair_bytes(&mut self, idx: usize, bytes: PairBytes) {
+        // sanity check
+        debug_assert!(
+            idx < self.stats.capacity,
+            "Index must not be bigger then the capacity"
+        );
+
+        unsafe {
+            let ptr =
+                (self.mmap.as_mut_ptr().add(self.stats.pair_offset) as *mut PairBytes).add(idx);
+            std::ptr::write(ptr, bytes);
+        }
+
+        debug_trace!(
+            "Updated pair bytes at IDX ({idx}) for Patra ({})",
+            self.config.name
+        );
+    }
+
+    fn get_sign_slice(&self, slice_idx: usize) -> [Sign; ROW_SIZE] {
+        // sanity check
+        debug_assert!(
+            slice_idx < self.stats.sign_rows,
+            "Slice Index must not be bigger then total slices available"
+        );
+
+        unsafe {
+            let base = self.mmap.as_ptr().add(self.stats.sign_offset);
+            let ptr = base.add(slice_idx * ROW_SIZE * std::mem::size_of::<Sign>());
+            let slice = *(ptr as *const [Sign; ROW_SIZE]);
+
+            debug_trace!(
+                "Fetched signature row at IDX ({slice_idx}) for Patra ({})",
+                self.config.name
+            );
+
+            slice
+        }
+    }
+
+    fn set_sign(&mut self, idx: usize, sign: Sign) {
+        // sanity check
+        debug_assert!(
+            idx < self.stats.capacity,
+            "Index must not be bigger then the capacity"
+        );
+
+        unsafe {
+            let ptr = (self.mmap.as_mut_ptr().add(self.stats.sign_offset) as *mut Sign).add(idx);
+            std::ptr::write(ptr, sign);
+        }
+
+        debug_trace!(
+            "Updated sign ({sign}) at IDX ({idx}) for Patra ({})",
+            self.config.name
+        );
+    }
+
+    fn read_pair_key(&self, bytes: PairBytes) -> InternalResult<Key> {
+        let pair = Pair::from_raw(bytes).map_err(|e| {
+            debug_error!("Patra ({}) contains invalid entry", self.config.name);
+            e
+        })?;
+
+        let mut buf = vec![0u8; pair.klen as usize];
+
+        read_exact_at(
+            &self.file,
+            &mut buf,
+            self.stats.header_size as u64 + pair.offset,
+        )
+        .map_err(|e| {
+            debug_error!(
+                "Patra ({}) had IO error while reading data buf",
+                self.config.name
+            );
+            e
+        })?;
+
+        debug_trace!("Fetched key buffer for Patra ({})", self.config.name);
+
+        Ok(buf)
+    }
+
+    fn read_pair_key_value(&self, bytes: PairBytes) -> InternalResult<KeyValue> {
+        let pair = Pair::from_raw(bytes).map_err(|e| {
+            debug_error!("Patra ({}) contains invalid entry", self.config.name);
+            e
+        })?;
+
+        let klen = pair.klen as usize;
+        let vlen = pair.vlen as usize;
+
+        let mut buf = vec![0u8; klen + vlen];
+        read_exact_at(
+            &self.file,
+            &mut buf,
+            self.stats.header_size as u64 + pair.offset,
+        )
+        .map_err(|e| {
+            debug_error!(
+                "Patra ({}) had IO error while reading data buf",
+                self.config.name
+            );
+            e
+        })?;
+
+        let vbuf = buf[klen..(klen + vlen)].to_owned();
+        buf.truncate(klen);
+
+        debug_trace!("Fetched kv buffer for Patra ({})", self.config.name);
+
+        Ok((buf, vbuf))
+    }
+
+    fn write_pair_key_value(&mut self, ns: Namespace, kv: &KeyValue) -> InternalResult<PairBytes> {
+        let klen = kv.0.len();
+        let vlen = kv.1.len();
+        let blen = klen + vlen;
+
+        let mut buf = vec![0u8; blen];
+        buf[..klen].copy_from_slice(&kv.0);
+        buf[klen..].copy_from_slice(&kv.1);
+
+        // this gets us write pointer before updating w/ current buffer length
+        let offset = self.meta.update_write_offset(blen as u64);
+
+        let pair = Pair::new(offset, ns, klen, vlen);
+        let raw = pair.to_raw().map_err(|e| {
+            println!("[ERROR]: pair.to_raw() failed: {e:?}");
+            e
+        })?;
+
+        write_all_at(&self.file, &buf, self.stats.header_size as u64 + offset).map_err(|e| {
+            debug_error!(
+                "Patra ({}) had IO error while writing data buf for key ({:?})",
+                self.config.name,
+                kv.0
+            );
+            e
+        })?;
+
+        debug_trace!(
+            "Wrote kv buffer w/ key ({:?}) for Patra ({})",
+            kv.0,
+            self.config.name
+        );
+
+        Ok(raw)
+    }
+
     fn lookup_existing_pair(
         &self,
         start_idx: usize,
@@ -643,6 +647,11 @@ impl Patra {
         sign: Sign,
         key: &Key,
     ) -> InternalResult<(usize, bool)> {
+        // Speed up w/ SIMD
+        if self.isa == ISA::AVX2 {
+            return unsafe { self.lookup_upsert_slot_avx2(start_idx, sign, key) };
+        }
+
         let mut idx = start_idx;
 
         for _ in 0..self.stats.sign_rows {
@@ -698,11 +707,182 @@ impl Patra {
         Err(InternalError::BucketFull(Some(self.config.clone())))
     }
 
-    pub fn get_sign_hash(&self, sign: Sign) -> usize {
-        // sanity check
-        debug_assert!(self.stats.sign_rows != 0, "No of rows must not be 0");
+    #[target_feature(enable = "avx2")]
+    fn lookup_upsert_slot_avx2(
+        &self,
+        start_idx: usize,
+        sign: Sign,
+        key: &Key,
+    ) -> InternalResult<(usize, bool)> {
+        use core::arch::x86_64::*;
 
-        sign as usize % self.stats.sign_rows
+        // sanity check
+        debug_assert!(
+            std::mem::size_of::<Sign>() == std::mem::size_of::<u32>(),
+            "Sign must be 4 bytes aligned for AVX2 ISA"
+        );
+
+        //
+        // constants
+        //
+
+        const LANES: usize = 8; // AVX2 can fit 8 u32 signs in a single lane
+        const CHUNKS: usize = ROW_SIZE / LANES;
+
+        // sanity check
+        debug_assert!(
+            ROW_SIZE % LANES == 0,
+            "ROW_SIZE must be a multiple of SIMD (AVX2) LANES",
+        );
+
+        let rows = self.stats.sign_rows;
+        let capacity = self.stats.capacity;
+        let base_ptr = self.get_base_ptr_for_sign_row();
+
+        // sanity check
+        // debug_assert!(
+        //     std::mem::size_of_val(&base_ptr) == 4,
+        //     "Base row pointer must be aligned with Sign type!"
+        // );
+
+        unsafe {
+            //
+            // brodcast values to avx2 lane
+            //
+
+            let v_empty = _mm256_set1_epi32(EMPTY_SIGN as i32);
+            let v_tomb = _mm256_set1_epi32(TOMBSTONE_SIGN as i32);
+            let v_sign = _mm256_set1_epi32(sign as i32);
+
+            let mut idx = start_idx;
+
+            // the first free (either free or tombstore sign) slot found for new
+            // insertion
+            let mut first_free: Option<usize> = None;
+
+            //
+            // lookup loop
+            //
+
+            for _ in 0..rows {
+                let row_ptr = base_ptr.add(idx * ROW_SIZE);
+                let base_item_idx = idx * ROW_SIZE;
+
+                // sanity check
+                // debug_assert!(
+                //     std::mem::size_of_val(&row_ptr) == std::mem::size_of::<Sign>(),
+                //     "Row pointer must be aligned with Sign type!"
+                // );
+
+                //
+                // process an entire row (1 lane, i.e 8 Signs)
+                //
+                // NOTE: This loop will run exactly twice as `CHUNKS = 2`, i.e `16 / 8 = 2`
+                //
+
+                for c in 0..CHUNKS {
+                    let chunk_ptr = row_ptr.add(c * LANES) as *const __m256i;
+                    let v = _mm256_loadu_si256(chunk_ptr);
+
+                    //
+                    // existing sign lookup (upsert)
+                    //
+
+                    let cmp_eq = _mm256_cmpeq_epi32(v, v_sign);
+
+                    // NOTE: `test` or `testz` are faseer then `cmp` cause they perform zero check
+                    // via CPU flags, instead of writing back to registers.
+
+                    if _mm256_testz_si256(cmp_eq, cmp_eq) == 0 {
+                        let mut mask_eq = _mm256_movemask_epi8(cmp_eq) as u32;
+
+                        while mask_eq != 0 {
+                            let mask_tz = mask_eq.trailing_zeros() as usize;
+                            let lane = mask_tz >> 2;
+
+                            // clear lanes in mask for next iteration
+                            mask_eq &= !(0xFu32 << (lane * 4));
+
+                            let mut item_idx = base_item_idx + c * LANES + lane;
+
+                            // fast path for index wraparound
+                            if item_idx >= capacity {
+                                item_idx -= capacity;
+
+                                // rare case ([ROW_SIZE] or [CHUNK] bigger than [CAP])
+                                if item_idx >= capacity {
+                                    item_idx %= capacity;
+                                }
+                            }
+
+                            let pair_bytes = self.get_pair_bytes(item_idx);
+                            let stored_key = self.read_pair_key(pair_bytes)?;
+
+                            // NOTE: Exit w/ Update
+                            if &stored_key == key {
+                                return Ok((item_idx, false));
+                            }
+                        }
+                    }
+
+                    //
+                    // Slot lookup for new insertion
+                    //
+
+                    if first_free.is_none() {
+                        let cmp_empty = _mm256_cmpeq_epi32(v, v_empty);
+                        let cmp_tomb = _mm256_cmpeq_epi32(v, v_tomb);
+                        let cmp_free = _mm256_or_si256(cmp_empty, cmp_tomb);
+
+                        if _mm256_testz_si256(cmp_free, cmp_free) == 0 {
+                            let mask_free = _mm256_movemask_epi8(cmp_free) as u32;
+                            let tz = mask_free.trailing_zeros() as usize;
+                            let lane = tz >> 2;
+
+                            let mut item_idx = base_item_idx + c * LANES + lane;
+
+                            if item_idx >= capacity {
+                                item_idx -= capacity;
+
+                                if item_idx >= capacity {
+                                    item_idx %= capacity;
+                                }
+                            }
+
+                            first_free = Some(item_idx);
+                        }
+                    }
+                }
+
+                //
+                // next row lookup
+                //
+                {
+                    idx += 1;
+
+                    if idx == rows {
+                        idx = 0;
+                    }
+                }
+            }
+
+            // NOTE: Exit w/ new insertion
+            if let Some(item_idx) = first_free {
+                return Ok((item_idx, true));
+            }
+        }
+
+        debug_error!(
+            "Patra ({}) is full. No more inserts are allowed!",
+            self.config.name,
+        );
+
+        Err(InternalError::BucketFull(Some(self.config.clone())))
+    }
+
+    #[inline(always)]
+    fn get_base_ptr_for_sign_row(&self) -> *const i32 {
+        unsafe { self.mmap.as_ptr().add(self.stats.sign_offset) as *const i32 }
     }
 }
 
