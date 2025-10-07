@@ -33,7 +33,7 @@
 //!
 
 use crate::{
-    debug_error, debug_trace, debug_warn,
+    debug_error, debug_trace,
     error::{InternalError, InternalResult},
     hasher::{EMPTY_SIGN, TOMBSTONE_SIGN},
     kosh::{
@@ -41,6 +41,7 @@ use crate::{
         simd::ISA,
         Key, KeyValue, KoshConfig, Sign, Value, ROW_SIZE,
     },
+    logger::MapError,
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::{
@@ -73,8 +74,6 @@ pub(crate) struct Patra {
     mmap: MmapMut,
     file: File,
     config: KoshConfig,
-
-    #[allow(unused)]
     isa: ISA,
 }
 
@@ -92,10 +91,7 @@ impl Patra {
             .write(true)
             .truncate(true)
             .open(&config.path)
-            .map_err(|e| {
-                debug_error!("Unable to create a new Patra: {e}");
-                e
-            })?;
+            .custom_map_err("Unable to create a new patra")?;
 
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
         let sign_rows = config.cap.wrapping_div(ROW_SIZE);
@@ -107,16 +103,11 @@ impl Patra {
         let threshold = Self::calc_threshold(config.cap);
 
         // zero-init the file
-        file.set_len(header_size as u64).map_err(|e| {
-            debug_error!("Unable to set len for new Patra: {e}");
-            e
-        })?;
+        file.set_len(header_size as u64)
+            .custom_map_err("Unable to set len for new Patra")?;
 
-        let mut mmap =
-            unsafe { MmapOptions::new().len(header_size).map_mut(&file) }.map_err(|e| {
-                debug_error!("Unable to create Mmap for new Patra: {e}");
-                e
-            })?;
+        let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }
+            .custom_map_err("Unable to create Mmap for new Patra: {e}")?;
 
         let meta = Meta::new(&mut mmap);
 
@@ -159,10 +150,7 @@ impl Patra {
             .write(true)
             .truncate(false)
             .open(&config.path)
-            .map_err(|e| {
-                debug_error!("Unable to open existing Patra: {e}");
-                e
-            })?;
+            .custom_map_err("Unable to open existing Patra: {e}")?;
 
         // NOTE: We must make sure, cap is always multiple of [ROW_SIZE]
         let sign_rows = config.cap.wrapping_div(ROW_SIZE);
@@ -175,10 +163,7 @@ impl Patra {
 
         let file_len = file
             .metadata()
-            .map_err(|e| {
-                debug_error!("Unable to fetch metadata for existing Patra: {e}");
-                e
-            })?
+            .custom_map_err("Unable to fetch metadata for existing Patra: {e}")?
             .len();
 
         // NOTE: If `file.len()` is smaller then `header_size`, it's a sign of
@@ -188,11 +173,8 @@ impl Patra {
             return Err(InternalError::InvalidFile(Some(config.clone())));
         }
 
-        let mut mmap =
-            unsafe { MmapOptions::new().len(header_size).map_mut(&file) }.map_err(|e| {
-                debug_error!("Unable to create a Mmap for existing Patra: {e}");
-                e
-            })?;
+        let mut mmap = unsafe { MmapOptions::new().len(header_size).map_mut(&file) }
+            .custom_map_err("Unable to create a Mmap for existing Patra: {e}")?;
 
         let meta = Meta::open(&mut mmap);
 
@@ -261,23 +243,9 @@ impl Patra {
 
     pub fn insert_kv(&mut self, sign: Sign, kv: KeyValue, upsert: bool) -> InternalResult<()> {
         let start_idx = self.get_sign_hash(sign);
-        let (idx, is_new) = self
-            .lookup_upsert_slot(start_idx, sign, &kv.0)
-            .map_err(|e| {
-                debug_error!(
-                    "Unable to upsert kv pair for key ({:?}) in Patra ({})",
-                    kv.0,
-                    self.config.name,
-                );
-                e
-            })?;
+        let (idx, is_new) = self.lookup_upsert_slot(start_idx, sign, &kv.0)?;
 
         if !is_new && !upsert {
-            debug_trace!(
-                "Skipped update for existing key ({:?}) in Patra ({}) (upsert disabled)",
-                kv.0,
-                self.config.name
-            );
             return Ok(());
         }
 
@@ -633,7 +601,7 @@ impl Patra {
             idx = (idx + 1) % self.stats.sign_rows;
         }
 
-        debug_warn!(
+        debug_error!(
             "Pair not found in Patra ({}) after searching the entire space",
             self.config.name,
         );

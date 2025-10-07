@@ -163,33 +163,27 @@ macro_rules! debug_trace {
 }
 
 #[macro_export]
-macro_rules! debug_debug {
-    ($($arg:tt)*) => {{
-        #[cfg(test)]
-        $crate::logger::DebugLogger::log(log::Level::Debug, format_args!($($arg)*));
-    }};
-}
-
-#[macro_export]
-macro_rules! debug_info {
-    ($($arg:tt)*) => {{
-        #[cfg(test)]
-        $crate::logger::DebugLogger::log(log::Level::Info, format_args!($($arg)*));
-    }};
-}
-
-#[macro_export]
-macro_rules! debug_warn {
-    ($($arg:tt)*) => {{
-        #[cfg(test)]
-        $crate::logger::DebugLogger::log(log::Level::Warn, format_args!($($arg)*));
-    }};
-}
-
-#[macro_export]
 macro_rules! debug_error {
     ($($arg:tt)*) => {{
         #[cfg(test)]
         $crate::logger::DebugLogger::log(log::Level::Error, format_args!($($arg)*));
     }};
+}
+
+///
+/// Error Mapper
+///
+
+pub(crate) trait MapError<T, E> {
+    fn custom_map_err(self, _msg: &str) -> Result<T, E>;
+}
+
+impl<T, E: std::fmt::Display> MapError<T, E> for Result<T, E> {
+    #[inline(always)]
+    fn custom_map_err(self, _msg: &str) -> Result<T, E> {
+        self.map_err(|e| {
+            debug_error!("{_msg}: {e}");
+            e
+        })
+    }
 }
