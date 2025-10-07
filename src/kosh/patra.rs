@@ -718,8 +718,14 @@ impl Patra {
 
         // sanity check
         debug_assert!(
-            std::mem::size_of::<Sign>() == std::mem::size_of::<u32>(),
-            "Sign must be 4 bytes aligned for AVX2 ISA"
+            std::mem::size_of::<Sign>() == 4,
+            "Sign type must be exactly 4 bytes for AVX2 operations"
+        );
+
+        // sanity check
+        debug_assert!(
+            std::mem::align_of::<Sign>() == 4,
+            "Sign type must be 4-byte aligned for AVX2 operations"
         );
 
         //
@@ -740,10 +746,11 @@ impl Patra {
         let base_ptr = self.get_base_ptr_for_sign_row();
 
         // sanity check
-        // debug_assert!(
-        //     std::mem::size_of_val(&base_ptr) == 4,
-        //     "Base row pointer must be aligned with Sign type!"
-        // );
+        debug_assert!(
+            (base_ptr as usize) % std::mem::align_of::<Sign>() == 0,
+            "Base sign pointer must be aligned to Sign ({}-byte) boundary",
+            std::mem::align_of::<Sign>()
+        );
 
         unsafe {
             //
@@ -769,10 +776,12 @@ impl Patra {
                 let base_item_idx = idx * ROW_SIZE;
 
                 // sanity check
-                // debug_assert!(
-                //     std::mem::size_of_val(&row_ptr) == std::mem::size_of::<Sign>(),
-                //     "Row pointer must be aligned with Sign type!"
-                // );
+                debug_assert!(
+                    (row_ptr as usize) % std::mem::align_of::<Sign>() == 0,
+                    "row_ptr ({:p}) is not aligned to Sign ({} bytes)",
+                    row_ptr,
+                    std::mem::align_of::<Sign>(),
+                );
 
                 //
                 // process an entire row (1 lane, i.e 8 Signs)
