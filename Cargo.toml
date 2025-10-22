@@ -1,17 +1,8 @@
 [package]
-name = "turbocache"
-version = "0.3.0"
+name = "turbofox"
+version = "0.0.1"
 edition = "2024"
 description = "A persistant and embedded KV Database built for on-device caching."
 license = "Apache-2.0"
-repository = "https://github.com/frozen-lab/turbocache"
+repository = "https://github.com/frozen-lab/turbofox"
 keywords = ["key-value", "database", "persistent", "store", "simd"]
-exclude = ["flake.nix", "flake.lock"]
-
-[dependencies]
-memmap2 = "0.9.7"
-libc = "0.2.177"
-
-[dev-dependencies]
-sphur = "0.2.0"
-tempfile = "3.20.0"
