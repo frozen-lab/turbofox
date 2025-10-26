@@ -31,6 +31,13 @@ const IOURING_UNREGISTER_BUFFERS: u32 = 1;
 const IOURING_REGISTER_FILES: u32 = 2;
 const IOURING_UNREGISTER_FILES: u32 = 3;
 
+const IOURING_ENTER_SQ_WAKEUP: u32 = 1 << 3;
+const IOURING_OP_WRITEV: u8 = 2;
+const IOURING_OP_FSYNC: u8 = 3;
+
+const IOSQE_IO_LINK: u8 = 1 << 2;
+const IOSQE_FIXED_FILE: u8 = 1 << 0;
+
 #[allow(unused)]
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
@@ -117,6 +124,7 @@ pub(super) struct IOUring {
     params: IOUringParams,
     buf_page_size: usize,
     active_buf_idx: usize,
+    iovecs: Vec<libc::iovec>,
 }
 
 impl std::fmt::Debug for IOUring {
@@ -140,11 +148,15 @@ impl IOUring {
 
         let mut params: IOUringParams = std::mem::zeroed();
 
-        params.flags = IOURING_SETUP_SQPOLL;
+        // params.flags = IOURING_SETUP_SQPOLL | IOURING_SETUP_SQ_AFF;
+        params.flags = 0;
         params.sq_thread_idle = IOURING_POLL_THREAD_IDLE;
+        params.sq_thread_cpu = 0x00;
 
         let ring_fd = syscall(SYS_io_uring_setup, QUEUE_DEPTH, &mut params as *mut IOUringParams) as c_int;
         let file_fd = file.as_raw_fd();
+
+        eprintln!("FD's file={file_fd} ring={ring_fd}");
 
         if ring_fd < 0 || file_fd < 0 {
             eprintln!("Either ring or file fd's are invalid!");
@@ -191,7 +203,30 @@ impl IOUring {
             buf_base,
             active_buf_idx,
             buf_page_size,
+            iovecs,
         })
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    pub(super) unsafe fn write(&mut self, data: &[u8], offset: u64) {
+        debug_assert!(!data.is_empty(), "Input buffer must not be empty");
+
+        let buf_idx = self.active_buf_idx;
+        let buf_ptr = self.buf_base.add(buf_idx * self.buf_page_size);
+        let copy_len = std::cmp::min(data.len(), self.buf_page_size);
+
+        // copy data into registered buf
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, copy_len);
+
+        self.submit_write_and_fsync(buf_idx, offset);
+        self.active_buf_idx = (buf_idx + 1) % PAGE_BUF_SIZE;
+
+        let res = libc::fsync(self.file_fd);
+
+        if res < 0 {
+            let err = std::io::Error::last_os_error();
+            eprintln!("WRITE RES => {res}, err => {err}");
+        }
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -342,6 +377,138 @@ impl IOUring {
 
         Ok(())
     }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn submit_write_and_fsync(&self, buf_idx: usize, file_offset: u64) {
+        // sanity check
+        debug_assert!(buf_idx <= PAGE_BUF_SIZE, "buf idx is out of bounds");
+
+        let (tail, idx) = self.next_sqe_index();
+        let sqe_size = std::mem::size_of::<IoUringSqe>();
+        let sqe_ptr = (self.rings.sqes_ptr as *mut IoUringSqe).add(idx as usize);
+
+        let iov_ptr = self.iovecs.as_ptr().add(buf_idx) as *const libc::iovec;
+
+        //
+        // zero the sqe then populate
+        //
+        core::ptr::write_bytes(sqe_ptr as *mut u8, 0, sqe_size);
+
+        //
+        // prep for WRITEV syscall
+        //
+
+        // prep for WRITEV syscall
+        (*sqe_ptr).opcode = IOURING_OP_WRITEV;
+        // only link; don't mix registered-file / fixed flags here for now
+        (*sqe_ptr).flags = IOSQE_IO_LINK;
+        (*sqe_ptr).fd = self.file_fd; // use actual FD when not relying on IOSQE_FIXED_FILE
+        (*sqe_ptr).off = OffUnion { off: file_offset };
+        (*sqe_ptr).addr = AddrUnion { addr: iov_ptr as u64 };
+        (*sqe_ptr).len = 0x01; // single iovec
+        (*sqe_ptr).user_data = 0x00; // TODO: Tag the write w/ id so we can track for completion
+
+        // prep for FSYNC syscall
+        let tail2 = tail + 1;
+        let idx2 = tail2 & self.sq_mask();
+        let sqe2_ptr = (self.rings.sqes_ptr as *mut IoUringSqe).add(idx2 as usize);
+
+        core::ptr::write_bytes(sqe2_ptr as *mut u8, 0, sqe_size);
+
+        (*sqe2_ptr).opcode = IOURING_OP_FSYNC;
+        (*sqe2_ptr).flags = 0x00; // fsync doesn't need fixed-file flag here
+        (*sqe2_ptr).fd = self.file_fd; // use the real FD
+        (*sqe2_ptr).user_data = 0x00; // TODO: Tag the fsync for completion tracking
+
+        //
+        // prep the submission w/ op order
+        //
+
+        let arr = self.sq_array_ptr();
+        let pos = (tail & self.sq_mask()) as usize;
+        let pos2 = (tail2 & self.sq_mask()) as usize;
+
+        core::ptr::write_volatile(arr.add(pos), idx);
+        core::ptr::write_volatile(arr.add(pos2), idx2);
+
+        //
+        // publish new tail (tail + 2)
+        //
+
+        let new_tail = tail.wrapping_add(2);
+
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+        core::ptr::write_volatile(self.sq_tail_ptr(), new_tail);
+
+        // immediate submit (blocking submission; kernel will process SQEs now)
+        let res = libc::syscall(
+            libc::SYS_io_uring_enter,
+            self.ring_fd as libc::c_int,
+            2u32, // to_submit
+            0u32, // min_complete
+            0u32, // flags
+            std::ptr::null::<libc::sigset_t>(),
+        ) as libc::c_int;
+
+        if res < 0 {
+            eprintln!("io_uring_enter submit failed: {:?}", std::io::Error::last_os_error());
+        }
+
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
+        let cq_head = (self.rings.cq_ptr as *mut u8).add(self.params.cq_off.head as usize) as *mut u32;
+        let cq_tail = (self.rings.cq_ptr as *mut u8).add(self.params.cq_off.tail as usize) as *mut u32;
+        let cq_mask = *((self.rings.cq_ptr as *mut u8).add(self.params.cq_off.ring_mask as usize) as *const u32);
+
+        let mut head = core::ptr::read_volatile(cq_head);
+        let tail = core::ptr::read_volatile(cq_tail);
+
+        eprintln!("HEAD/TAIL => {head}:{tail}");
+
+        while head != tail {
+            let idx = head & cq_mask;
+
+            eprintln!("CQE completed @ idx {idx}");
+            head = head.wrapping_add(1);
+
+            core::ptr::write_volatile(cq_head, head);
+        }
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn next_sqe_index(&self) -> (u32, u32) {
+        let tail_ptr = self.sq_tail_ptr();
+        let tail = core::ptr::read_volatile(tail_ptr);
+        let mask = self.sq_mask();
+        let idx = tail & mask;
+
+        (tail, idx)
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn sq_head_ptr(&self) -> *mut u32 {
+        (self.rings.sq_ptr as *mut u8).add(self.params.sq_off.head as usize) as *mut u32
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn sq_tail_ptr(&self) -> *mut u32 {
+        (self.rings.sq_ptr as *mut u8).add(self.params.sq_off.tail as usize) as *mut u32
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn sq_mask(&self) -> u32 {
+        *((self.rings.sq_ptr as *mut u8).add(self.params.sq_off.ring_mask as usize) as *const u32)
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn sq_array_ptr(&self) -> *mut u32 {
+        (self.rings.sq_ptr as *mut u8).add(self.params.sq_off.array as usize) as *mut u32
+    }
 }
 
 impl Drop for IOUring {
@@ -404,27 +571,27 @@ impl Drop for IOUring {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::OpenOptions, io::Read};
+    use std::{fs::OpenOptions, io::Read, path::PathBuf};
     use tempfile::TempDir;
 
-    fn create_iouring() -> (IOUring, TempDir) {
+    fn create_iouring() -> (IOUring, PathBuf, File, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("temp_io_uring");
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(path)
+            .open(&path)
             .expect("file");
 
         let io_ring = unsafe { IOUring::new(&file).expect("Failed to create io_uring") };
 
-        (io_ring, tmp)
+        (io_ring, path, file, tmp)
     }
 
     #[test]
     fn test_iouring_init() {
-        let (io_ring, _) = create_iouring();
+        let (io_ring, _path, _file, _tmp) = create_iouring();
 
         assert!(io_ring.ring_fd >= 0, "Ring fd must be non-negative");
         assert!(io_ring.file_fd >= 0, "File fd must be non-negative");
@@ -479,5 +646,26 @@ mod tests {
             let res = IOUring::register_buffers(-1, null_mut(), 1);
             assert!(res.is_err());
         }
+    }
+
+    #[test]
+    fn test_write_and_fsync() {
+        let path = PathBuf::new().join("tmp_test_file");
+        let (mut io_ring, _path, _file, _tmp) = create_iouring();
+        let dummy_data = "Dummy Data to write w/ fsync".as_bytes();
+        let offset: u64 = 0;
+
+        unsafe {
+            io_ring.write(&dummy_data, offset);
+        }
+
+        // manual sleep, so kernal could finish the process
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let mut file = OpenOptions::new().read(true).open(_path).expect("file");
+        let mut dummy_buf = vec![0u8; dummy_data.len()];
+        file.read_exact(&mut dummy_buf).expect("read from file");
+
+        assert_eq!(dummy_data, &dummy_buf);
     }
 }
