@@ -5,6 +5,12 @@ use std::{
     mem::zeroed,
     os::{fd::AsRawFd, raw::c_int},
     ptr::null_mut,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{sync_channel, Receiver, SyncSender},
+        Arc,
+    },
+    thread::JoinHandle,
 };
 
 /// No. of page bufs we can store into mem for write syscalls
@@ -116,6 +122,18 @@ struct IOUringRings {
     sqes_ptr: *mut c_void,
 }
 
+#[derive(Debug, Copy, Clone)]
+struct Completion {
+    user_data: u64,
+    res: i32,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct SendPtr(*mut c_void);
+
+unsafe impl Send for SendPtr {}
+unsafe impl Sync for SendPtr {}
+
 pub(super) struct IOUring {
     ring_fd: i32,
     file_fd: i32,
@@ -125,6 +143,10 @@ pub(super) struct IOUring {
     buf_page_size: usize,
     active_buf_idx: usize,
     iovecs: Vec<libc::iovec>,
+    stop_flag: Arc<AtomicBool>,
+    completion_tx: SyncSender<Completion>,
+    completion_rx: Receiver<Completion>,
+    poll_thread: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for IOUring {
@@ -149,7 +171,8 @@ impl IOUring {
         let mut params: IOUringParams = std::mem::zeroed();
 
         // params.flags = IOURING_SETUP_SQPOLL | IOURING_SETUP_SQ_AFF;
-        params.flags = 0;
+        // params.flags = 0;
+        params.flags = IOURING_SETUP_SQPOLL;
         params.sq_thread_idle = IOURING_POLL_THREAD_IDLE;
         params.sq_thread_cpu = 0x00;
 
@@ -176,10 +199,10 @@ impl IOUring {
         // Register file descriptor
         //
 
-        if let Err(e) = Self::register_files(ring_fd, file_fd) {
-            libc::close(ring_fd);
-            return Err(e);
-        }
+        // if let Err(e) = Self::register_files(ring_fd, file_fd) {
+        //     libc::close(ring_fd);
+        //     return Err(e);
+        // }
 
         //
         // allocate (page align) and register buffer to be used for write syscalls
@@ -190,10 +213,84 @@ impl IOUring {
             e
         })?;
 
-        if let Err(e) = Self::register_buffers(ring_fd, iovecs.as_ptr(), iovecs.len()) {
-            libc::close(ring_fd);
-            return Err(e);
-        }
+        // if let Err(e) = Self::register_buffers(ring_fd, iovecs.as_ptr(), iovecs.len()) {
+        //     libc::close(ring_fd);
+        //     return Err(e);
+        // }
+
+        let (tx, rx) = sync_channel::<Completion>(1024);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let poll_params = params;
+        let poll_stop = stop_flag.clone();
+        let poll_tx = tx.clone();
+        let send_cq_ptr = SendPtr(rings.cq_ptr);
+
+        let poll_handle = std::thread::Builder::new()
+            .name("iouring-cq-poller".into())
+            .spawn(move || {
+                while !poll_stop.load(Ordering::Acquire) {
+                    let local_cq_ptr = send_cq_ptr;
+
+                    let cq_head_ptr = (local_cq_ptr.0 as *mut u8).add(poll_params.cq_off.head as usize) as *mut u32;
+                    let cq_tail_ptr = (local_cq_ptr.0 as *mut u8).add(poll_params.cq_off.tail as usize) as *mut u32;
+                    let cq_mask =
+                        *((local_cq_ptr.0 as *mut u8).add(poll_params.cq_off.ring_mask as usize) as *const u32);
+
+                    let mut head = unsafe { core::ptr::read_volatile(cq_head_ptr) };
+                    let tail = unsafe { core::ptr::read_volatile(cq_tail_ptr) };
+
+                    // eprintln!("THREAD HEAD={head}; TAIL={tail}");
+
+                    // correct CQE layout and safe volatile reads
+                    #[repr(C)]
+                    struct IoUringCqe {
+                        user_data: u64,
+                        res: i32,
+                        flags: u32,
+                    }
+
+                    let cqe_stride = std::mem::size_of::<IoUringCqe>();
+
+                    while head != tail {
+                        let idx = head & cq_mask;
+                        let base = (local_cq_ptr.0 as *mut u8).add(poll_params.cq_off.cqes as usize);
+                        let cqe_ptr = unsafe { base.add((idx as usize) * cqe_stride) } as *const IoUringCqe;
+
+                        // volatile reads to avoid compiler reordering
+                        let user_data = unsafe { core::ptr::read_volatile(&(*cqe_ptr).user_data) };
+                        let res = unsafe { core::ptr::read_volatile(&(*cqe_ptr).res) };
+
+                        if res < 0 {
+                            let errno = -res;
+                            eprintln!(
+                                "CQE idx={} user_data={} -> ERROR res={} (errno={})",
+                                idx, user_data, res, errno
+                            );
+                        } else {
+                            eprintln!("CQE idx={} user_data={} -> OK res={}", idx, user_data, res);
+                        }
+
+                        let _ = poll_tx.send(Completion { user_data, res });
+
+                        head = head.wrapping_add(1);
+                    }
+
+                    // publish head back to kernel
+                    unsafe { core::ptr::write_volatile(cq_head_ptr, head) };
+
+                    // if nothing to do, sleep a little — tune this as needed (or use futex/wakeup)
+                    if head == tail {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+            })
+            .ok();
+
+        eprintln!(
+            "params: sq_entries={}, cq_entries={}, features=0x{:x}, sq_off.array={}, cq_off.cqes={}",
+            params.sq_entries, params.cq_entries, params.features, params.sq_off.array, params.cq_off.cqes
+        );
 
         Ok(Self {
             ring_fd,
@@ -204,6 +301,10 @@ impl IOUring {
             active_buf_idx,
             buf_page_size,
             iovecs,
+            stop_flag,
+            completion_tx: tx,
+            completion_rx: rx,
+            poll_thread: poll_handle,
         })
     }
 
@@ -221,12 +322,12 @@ impl IOUring {
         self.submit_write_and_fsync(buf_idx, offset);
         self.active_buf_idx = (buf_idx + 1) % PAGE_BUF_SIZE;
 
-        let res = libc::fsync(self.file_fd);
+        // let res = libc::fsync(self.file_fd);
 
-        if res < 0 {
-            let err = std::io::Error::last_os_error();
-            eprintln!("WRITE RES => {res}, err => {err}");
-        }
+        // if res < 0 {
+        //     let err = std::io::Error::last_os_error();
+        //     eprintln!("WRITE RES => {res}, err => {err}");
+        // }
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -389,26 +490,27 @@ impl IOUring {
 
         let iov_ptr = self.iovecs.as_ptr().add(buf_idx) as *const libc::iovec;
 
-        //
         // zero the sqe then populate
-        //
         core::ptr::write_bytes(sqe_ptr as *mut u8, 0, sqe_size);
 
         //
         // prep for WRITEV syscall
         //
 
-        // prep for WRITEV syscall
         (*sqe_ptr).opcode = IOURING_OP_WRITEV;
-        // only link; don't mix registered-file / fixed flags here for now
-        (*sqe_ptr).flags = IOSQE_IO_LINK;
-        (*sqe_ptr).fd = self.file_fd; // use actual FD when not relying on IOSQE_FIXED_FILE
+        // (*sqe_ptr).flags = IOSQE_IO_LINK;
+        (*sqe_ptr).fd = 0;
+        (*sqe_ptr).flags = IOSQE_IO_LINK | IOSQE_FIXED_FILE;
         (*sqe_ptr).off = OffUnion { off: file_offset };
         (*sqe_ptr).addr = AddrUnion { addr: iov_ptr as u64 };
         (*sqe_ptr).len = 0x01; // single iovec
-        (*sqe_ptr).user_data = 0x00; // TODO: Tag the write w/ id so we can track for completion
+        (*sqe_ptr).user_data = buf_idx as u64;
+        // (*sqe_ptr).user_data = 0x00; // TODO: Tag the write w/ id so we can track for completion
 
+        //
         // prep for FSYNC syscall
+        //
+
         let tail2 = tail + 1;
         let idx2 = tail2 & self.sq_mask();
         let sqe2_ptr = (self.rings.sqes_ptr as *mut IoUringSqe).add(idx2 as usize);
@@ -416,9 +518,11 @@ impl IOUring {
         core::ptr::write_bytes(sqe2_ptr as *mut u8, 0, sqe_size);
 
         (*sqe2_ptr).opcode = IOURING_OP_FSYNC;
-        (*sqe2_ptr).flags = 0x00; // fsync doesn't need fixed-file flag here
-        (*sqe2_ptr).fd = self.file_fd; // use the real FD
-        (*sqe2_ptr).user_data = 0x00; // TODO: Tag the fsync for completion tracking
+        // (*sqe2_ptr).flags = 0x00;
+        (*sqe2_ptr).flags = IOSQE_FIXED_FILE;
+        (*sqe2_ptr).fd = 0; // use the real FD
+        (*sqe2_ptr).user_data = (buf_idx as u64) | (1u64 << 63);
+        // (*sqe2_ptr).user_data = 0x00; // TODO: Tag the fsync for completion tracking
 
         //
         // prep the submission w/ op order
@@ -437,41 +541,46 @@ impl IOUring {
 
         let new_tail = tail.wrapping_add(2);
 
+        //
+        // print head & tail before update
+        //
+
+        let cur_tail = core::ptr::read_volatile(self.sq_tail_ptr());
+        let cur_head = core::ptr::read_volatile(self.sq_head_ptr());
+        eprintln!(
+            "BEFORE PUBLISH: sq_head={}, sq_tail={} -> publishing new_tail={}",
+            cur_head, cur_tail, new_tail
+        );
+
         std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
         core::ptr::write_volatile(self.sq_tail_ptr(), new_tail);
+        // std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
-        // immediate submit (blocking submission; kernel will process SQEs now)
+        // With SQPOLL we normally don't call io_uring_enter for each submit.
+        // But the kernel poller can be asleep — wake it (cheap) the first time (or when idle).
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
+        //
+        // print head & tail before update
+        //
+
+        let after_tail = core::ptr::read_volatile(self.sq_tail_ptr());
+        eprintln!("AFTER PUBLISH: sq_tail now={}", after_tail);
+
+        // Force kernel to accept & process the 2 SQEs immediately (test only)
         let res = libc::syscall(
             libc::SYS_io_uring_enter,
             self.ring_fd as libc::c_int,
-            2u32, // to_submit
+            2u32, // to_submit = 2 SQEs we just published
             0u32, // min_complete
             0u32, // flags
             std::ptr::null::<libc::sigset_t>(),
         ) as libc::c_int;
 
         if res < 0 {
-            eprintln!("io_uring_enter submit failed: {:?}", std::io::Error::last_os_error());
-        }
-
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-
-        let cq_head = (self.rings.cq_ptr as *mut u8).add(self.params.cq_off.head as usize) as *mut u32;
-        let cq_tail = (self.rings.cq_ptr as *mut u8).add(self.params.cq_off.tail as usize) as *mut u32;
-        let cq_mask = *((self.rings.cq_ptr as *mut u8).add(self.params.cq_off.ring_mask as usize) as *const u32);
-
-        let mut head = core::ptr::read_volatile(cq_head);
-        let tail = core::ptr::read_volatile(cq_tail);
-
-        eprintln!("HEAD/TAIL => {head}:{tail}");
-
-        while head != tail {
-            let idx = head & cq_mask;
-
-            eprintln!("CQE completed @ idx {idx}");
-            head = head.wrapping_add(1);
-
-            core::ptr::write_volatile(cq_head, head);
+            eprintln!("TEST enter() failed: {:?}", std::io::Error::last_os_error());
+        } else {
+            eprintln!("TEST enter() succeeded => res = {}", res);
         }
     }
 
@@ -660,7 +769,7 @@ mod tests {
         }
 
         // manual sleep, so kernal could finish the process
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
 
         let mut file = OpenOptions::new().read(true).open(_path).expect("file");
         let mut dummy_buf = vec![0u8; dummy_data.len()];
