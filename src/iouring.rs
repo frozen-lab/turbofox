@@ -269,7 +269,7 @@ impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn submit_read_and_wait(&self, buf_idx: usize, read_offset: u64) -> InternalResult<Vec<u8>> {
         // sanity check
-        debug_assert!(buf_idx <= NUM_BUFFER_PAGES, "buf_idx is out of bounds");
+        debug_assert!(buf_idx < NUM_BUFFER_PAGES, "buf_idx is out of bounds");
 
         let (tail, sqe_idx) = self.next_sqe_index();
         let iov_base = self.iovecs[buf_idx].iov_base;
@@ -278,8 +278,9 @@ impl IOUring {
         core::ptr::write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
 
         (*sqe_ptr).opcode = IOUringOP::READFIXED as u8;
-        (*sqe_ptr).flags = 0x00;
-        (*sqe_ptr).fd = self.file_fd;
+        (*sqe_ptr).flags = IOUringSQEFlags::FIXEDFILE as u8;
+        (*sqe_ptr).fd = IOURING_FIXED_FILE_IDX;
+        (*sqe_ptr).union2[0] = buf_idx as u64;
         (*sqe_ptr).off = SQEOffUnion { off: read_offset };
         (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
         (*sqe_ptr).len = self.buf_page_size as u32;
@@ -305,43 +306,42 @@ impl IOUring {
 
         if res < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("submit_read() failed on io_uring_enter syscall: {err:?}");
+            eprintln!("submit_read_and_wait() failed on io_uring_enter syscall: {err:?}");
 
             return Err(err.into());
         }
 
-        loop {
-            let cq_head = self.cq_head_ptr();
-            let cq_tail = self.cq_tail_ptr();
-            let head = core::ptr::read_volatile(cq_head);
-            let tail = core::ptr::read_volatile(cq_tail);
+        let cq_head = self.cq_head_ptr();
+        let cq_tail = self.cq_tail_ptr();
+        let head = core::ptr::read_volatile(cq_head);
+        let tail = core::ptr::read_volatile(cq_tail);
 
-            if head != tail {
-                let idx = head & self.cq_mask();
-                let cqe = core::ptr::read_volatile(self.cqes_ptr().add(idx as usize));
-                core::ptr::write_volatile(cq_head, head.wrapping_add(1));
+        let idx = head & self.cq_mask();
+        let cqe = core::ptr::read_volatile(self.cqes_ptr().add(idx as usize));
+        core::ptr::write_volatile(cq_head, head.wrapping_add(1));
 
-                eprintln!("INFO: Completed read: {:?}", cqe);
+        let res = cqe.res;
 
-                let res = cqe.res;
-                if res < 0 {
-                    return Err(std::io::Error::from_raw_os_error(-res).into());
-                }
+        if res < 0 {
+            let err = std::io::Error::from_raw_os_error(-res);
+            eprintln!("submit_read_and_wait() failed on CQE: {err:?}");
 
-                let read_len = res as usize;
-                let src_ptr = self.iovecs[buf_idx].iov_base as *const u8;
-                let mut data = vec![0u8; read_len];
-                std::ptr::copy_nonoverlapping(src_ptr, data.as_mut_ptr(), read_len);
-
-                return Ok(data);
-            }
+            return Err(err.into());
         }
+
+        let read_len = res as usize;
+        let src_ptr = self.iovecs[buf_idx].iov_base as *const u8;
+
+        let mut data = vec![0u8; read_len];
+        std::ptr::copy_nonoverlapping(src_ptr, data.as_mut_ptr(), read_len);
+
+        return Ok(data);
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn submit_write_and_fsync(&self, buf_idx: usize, write_offset: u64) -> InternalResult<()> {
         // sanity check
-        debug_assert!(buf_idx <= NUM_BUFFER_PAGES, "buf_idx is out of bounds");
+        debug_assert!(buf_idx < NUM_BUFFER_PAGES, "buf_idx is out of bounds");
 
         let (tail, sqe_idx) = self.next_sqe_index();
 
@@ -817,6 +817,10 @@ mod tests {
 
         unsafe {
             io_ring.write(dummy_data, offset).expect("write failed");
+
+            // manual sleep, so kernal could finish the process
+            std::thread::sleep(std::time::Duration::from_millis(1));
+
             let read_back = io_ring.read(offset).expect("read failed");
 
             // only compare actual written length
