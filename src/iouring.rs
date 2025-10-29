@@ -29,6 +29,7 @@ const IOURING_FYSNC_USER_DATA: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 /// For reference, <https://github.com/torvalds/linux/blob/master/include/uapi/linux/io_uring.h#L234>
 enum IOUringOP {
     FSYNC = 3,
+    READFIXED = 4,
     WRITEFIXED = 5,
 }
 
@@ -66,6 +67,14 @@ struct CQringOffset {
     flags: u32,
     resv1: u32,
     user_addr: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct IOUringCQE {
+    user_data: u64,
+    res: i32,
+    flags: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -242,10 +251,91 @@ impl IOUring {
         // copy data into registered buf
         std::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, buf.len());
 
-        self.submit_write_and_fsync(buf_idx, write_offset)?;
         self.active_buf_idx = (buf_idx + 1) % NUM_BUFFER_PAGES;
+        self.submit_write_and_fsync(buf_idx, write_offset)?;
 
         Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    pub(super) unsafe fn read(&mut self, read_offset: u64) -> InternalResult<Vec<u8>> {
+        let buf_idx = self.active_buf_idx;
+        self.active_buf_idx = (buf_idx + 1) % NUM_BUFFER_PAGES;
+
+        self.submit_read_and_wait(buf_idx, read_offset)
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn submit_read_and_wait(&self, buf_idx: usize, read_offset: u64) -> InternalResult<Vec<u8>> {
+        // sanity check
+        debug_assert!(buf_idx <= NUM_BUFFER_PAGES, "buf_idx is out of bounds");
+
+        let (tail, sqe_idx) = self.next_sqe_index();
+        let iov_base = self.iovecs[buf_idx].iov_base;
+        let sqe_ptr = (self.rings.sqes_ptr as *mut IOUringSQE).add(sqe_idx as usize);
+
+        core::ptr::write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
+
+        (*sqe_ptr).opcode = IOUringOP::READFIXED as u8;
+        (*sqe_ptr).flags = 0x00;
+        (*sqe_ptr).fd = self.file_fd;
+        (*sqe_ptr).off = SQEOffUnion { off: read_offset };
+        (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
+        (*sqe_ptr).len = self.buf_page_size as u32;
+        (*sqe_ptr).user_data = buf_idx as u64;
+
+        let arr = self.sq_array_ptr();
+        core::ptr::write_volatile(arr.add((tail & self.sq_mask()) as usize), sqe_idx);
+
+        // NOTE: This fence ensures SQE and array writes are visible to kernel before updating the tail.
+        // It's imp cause, it prevents reordering of SQE entries.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+
+        core::ptr::write_volatile(self.sq_tail_ptr(), tail.wrapping_add(1)); // new tail
+
+        let res = libc::syscall(
+            libc::SYS_io_uring_enter,
+            self.ring_fd,
+            1u32,
+            0u32,
+            0u32,
+            std::ptr::null::<libc::sigset_t>(),
+        ) as libc::c_int;
+
+        if res < 0 {
+            let err = std::io::Error::last_os_error();
+            eprintln!("submit_read() failed on io_uring_enter syscall: {err:?}");
+
+            return Err(err.into());
+        }
+
+        loop {
+            let cq_head = self.cq_head_ptr();
+            let cq_tail = self.cq_tail_ptr();
+            let head = core::ptr::read_volatile(cq_head);
+            let tail = core::ptr::read_volatile(cq_tail);
+
+            if head != tail {
+                let idx = head & self.cq_mask();
+                let cqe = core::ptr::read_volatile(self.cqes_ptr().add(idx as usize));
+                core::ptr::write_volatile(cq_head, head.wrapping_add(1));
+
+                eprintln!("INFO: Completed read: {:?}", cqe);
+
+                let res = cqe.res;
+                if res < 0 {
+                    return Err(std::io::Error::from_raw_os_error(-res).into());
+                }
+
+                let read_len = res as usize;
+                let src_ptr = self.iovecs[buf_idx].iov_base as *const u8;
+                let mut data = vec![0u8; read_len];
+                std::ptr::copy_nonoverlapping(src_ptr, data.as_mut_ptr(), read_len);
+
+                return Ok(data);
+            }
+        }
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -255,8 +345,9 @@ impl IOUring {
 
         let (tail, sqe_idx) = self.next_sqe_index();
 
-        // STEP_1: SQE prep for WRITE_FIXED
+        // S_1: SQE prep for WRITE_FIXED
 
+        let iov_base = self.iovecs[buf_idx].iov_base;
         let sqe_ptr = (self.rings.sqes_ptr as *mut IOUringSQE).add(sqe_idx as usize);
         core::ptr::write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
 
@@ -266,11 +357,9 @@ impl IOUring {
         (*sqe_ptr).len = self.iovecs[buf_idx].iov_len as u32;
         (*sqe_ptr).user_data = buf_idx as u64;
         (*sqe_ptr).off = SQEOffUnion { off: write_offset };
-        (*sqe_ptr).addr = SQEAddrUnion {
-            addr: self.iovecs[buf_idx].iov_base as u64,
-        };
+        (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
 
-        // STEP_2: SQE prep for (Linked) FSYNC
+        // S_2: SQE prep for (Linked) FSYNC
 
         let tail2 = tail + 1;
         let sqe_idx2 = tail2 & self.sq_mask();
@@ -281,7 +370,7 @@ impl IOUring {
         (*sqe2_ptr).fd = IOURING_FIXED_FILE_IDX;
         (*sqe2_ptr).user_data = IOURING_FYSNC_USER_DATA;
 
-        // STEP_3: Submit SQE's to SQ
+        // S_3: Submit SQE's to SQ
 
         let sq_array = self.sq_array_ptr();
         let mask = self.sq_mask();
@@ -294,12 +383,13 @@ impl IOUring {
 
         let new_tail = tail.wrapping_add(2);
 
-        // this fence ensures all (SQE + array) writes are visible to kernel before it updates the tail.
-        // NOTE: this is imp to prevent CPU from reordering, which prevents uninited SQE's from kernel!
+        // NOTE: This fence ensures SQE and array writes are visible to kernel before updating the tail.
+        // It's imp cause, it prevents reordering of SQE entries.
         std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+
         core::ptr::write_volatile(self.sq_tail_ptr(), new_tail); // new tail
 
-        // STEP_4: Submit SQE (both) w/ `io_uring_enter` syscall
+        // S_4: Submit SQE (both) w/ `io_uring_enter` syscall
         let ret = libc::syscall(
             libc::SYS_io_uring_enter,
             self.ring_fd,
@@ -504,6 +594,30 @@ impl IOUring {
     unsafe fn sq_array_ptr(&self) -> *mut u32 {
         (self.rings.sq_ptr as *mut u8).add(self.params.sq_off.array as usize) as *mut u32
     }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn cq_head_ptr(&self) -> *mut u32 {
+        (self.rings.cq_ptr as *mut u8).add(self.params.cq_off.head as usize) as *mut u32
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn cq_tail_ptr(&self) -> *mut u32 {
+        (self.rings.cq_ptr as *mut u8).add(self.params.cq_off.tail as usize) as *mut u32
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn cq_mask(&self) -> u32 {
+        *((self.rings.cq_ptr as *mut u8).add(self.params.cq_off.ring_mask as usize) as *const u32)
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn cqes_ptr(&self) -> *mut IOUringCQE {
+        (self.rings.cq_ptr as *mut u8).add(self.params.cq_off.cqes as usize) as *mut IOUringCQE
+    }
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -692,5 +806,21 @@ mod tests {
         file.read_exact(&mut dummy_buf).expect("read from file");
 
         assert_eq!(dummy_data, &dummy_buf);
+    }
+
+    #[test]
+    fn test_write_and_read() {
+        let offset: u64 = 0;
+        let dummy_data = b"Dummy Data to write and read";
+
+        let (mut io_ring, _file, _tmp) = create_iouring();
+
+        unsafe {
+            io_ring.write(dummy_data, offset).expect("write failed");
+            let read_back = io_ring.read(offset).expect("read failed");
+
+            // only compare actual written length
+            assert_eq!(&read_back[..dummy_data.len()], dummy_data);
+        }
     }
 }
