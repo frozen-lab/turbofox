@@ -1,6 +1,14 @@
 #![allow(unused)]
 
 use crate::errors::InternalResult;
+use core::ptr::write_volatile;
+use std::{
+    ptr::{copy_nonoverlapping, read_volatile, write_bytes},
+    sync::{
+        atomic::{fence, AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 // TODO: We shold take `num_buf_page` as config from user, if they insert rapidly,
 // queue will overflow then we must block new writes (thread sleep, etc.)
@@ -150,10 +158,10 @@ pub(super) struct IOUring {
     ring_fd: i32,
     file_fd: i32,
     rings: RingPtrs,
-    active_buf_idx: usize,
     params: IOUringParams,
     iovecs: Vec<libc::iovec>,
     buf_base_ptr: *mut libc::c_void,
+    buf_pool: Arc<BufPool>,
 }
 
 impl IOUring {
@@ -214,22 +222,28 @@ impl IOUring {
             ring_fd,
             file_fd,
             buf_base_ptr,
-            active_buf_idx: 0,
+            buf_pool: Arc::new(BufPool::new()),
         })
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    pub(super) unsafe fn write(&mut self, buf: &[u8], write_offset: u64) -> InternalResult<()> {
+    pub(super) unsafe fn write(&self, buf: &[u8], write_offset: u64) -> InternalResult<()> {
         // sanity checks
         debug_assert!(!buf.is_empty(), "Input buffer must not be empty");
         debug_assert!(buf.len() <= SIZE_BUFFER_PAGE, "Buffer is too large");
 
-        let buf_idx = self.active_buf_idx;
-        let buf_ptr = self.buf_base_ptr.add(buf_idx * SIZE_BUFFER_PAGE);
+        let buf_idx = loop {
+            if let Some(idx) = self.buf_pool.pop() {
+                break idx;
+            }
 
-        std::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, buf.len());
-        self.active_buf_idx = (buf_idx + 1) % NUM_BUFFER_PAGE;
+            // NOTE: As no buf is available, we suspend the current thread for 2 µs
+            std::thread::park_timeout(std::time::Duration::from_micros(2));
+        };
+
+        let buf_ptr = self.buf_base_ptr.add(buf_idx * SIZE_BUFFER_PAGE);
+        copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, buf.len());
         self.submit_write_and_fsync(buf_idx, write_offset)?;
 
         Ok(())
@@ -238,8 +252,15 @@ impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(super) unsafe fn read(&mut self, read_offset: u64) -> InternalResult<Vec<u8>> {
-        let buf_idx = self.active_buf_idx;
-        self.active_buf_idx = (buf_idx + 1) % NUM_BUFFER_PAGE;
+        let buf_idx = loop {
+            if let Some(idx) = self.buf_pool.pop() {
+                break idx;
+            }
+
+            // NOTE: As no buf is available, we suspend the current thread for 2 µs
+            std::thread::park_timeout(std::time::Duration::from_micros(2));
+        };
+
         self.submit_read_and_wait(buf_idx, read_offset)
     }
 
@@ -251,7 +272,7 @@ impl IOUring {
         let (tail, sqe_idx) = self.next_sqe_index();
         let iov_base = self.iovecs[buf_idx].iov_base;
         let sqe_ptr = (self.rings.sqes_ptr as *mut IOUringSQE).add(sqe_idx as usize);
-        core::ptr::write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
+        write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
 
         (*sqe_ptr).opcode = IOUringOP::READFIXED as u8;
         (*sqe_ptr).flags = IOUringSQEFlags::FIXEDFILE as u8;
@@ -263,12 +284,12 @@ impl IOUring {
         (*sqe_ptr).user_data = buf_idx as u64;
 
         let arr = self.sq_array_ptr();
-        core::ptr::write_volatile(arr.add((tail & self.sq_mask()) as usize), sqe_idx);
+        write_volatile(arr.add((tail & self.sq_mask()) as usize), sqe_idx);
 
         // NOTE: This fence ensures SQE and array writes are visible to kernel before updating the tail.
         // It's imp cause, it prevents reordering of SQE entries.
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-        core::ptr::write_volatile(self.sq_tail_ptr(), tail.wrapping_add(1)); // new tail
+        fence(Ordering::Release);
+        write_volatile(self.sq_tail_ptr(), tail.wrapping_add(1)); // new tail
 
         let res = libc::syscall(
             libc::SYS_io_uring_enter,
@@ -291,8 +312,8 @@ impl IOUring {
         let tail = core::ptr::read_volatile(cq_tail);
 
         let idx = head & self.cq_mask();
-        let cqe = core::ptr::read_volatile(self.cqes_ptr().add(idx as usize));
-        core::ptr::write_volatile(cq_head, head.wrapping_add(1));
+        let cqe = read_volatile(self.cqes_ptr().add(idx as usize));
+        write_volatile(cq_head, head.wrapping_add(1));
 
         let res = cqe.res;
 
@@ -304,7 +325,7 @@ impl IOUring {
 
         let mut data = vec![0u8; res as usize];
         let src_ptr = self.iovecs[buf_idx].iov_base as *const u8;
-        std::ptr::copy_nonoverlapping(src_ptr, data.as_mut_ptr(), res as usize);
+        copy_nonoverlapping(src_ptr, data.as_mut_ptr(), res as usize);
 
         return Ok(data);
     }
@@ -319,7 +340,7 @@ impl IOUring {
         let (tail, sqe_idx) = self.next_sqe_index();
         let iov_base = self.iovecs[buf_idx].iov_base;
         let sqe_ptr = (self.rings.sqes_ptr as *mut IOUringSQE).add(sqe_idx as usize);
-        core::ptr::write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
+        write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
 
         (*sqe_ptr).opcode = IOUringOP::WRITEFIXED as u8;
         (*sqe_ptr).flags = IOUringSQEFlags::IOLINK as u8 | IOUringSQEFlags::FIXEDFILE as u8;
@@ -347,13 +368,13 @@ impl IOUring {
         let pos1 = (tail & mask) as usize;
         let pos2 = (tail2 & mask) as usize;
 
-        core::ptr::write_volatile(sq_array.add(pos1), sqe_idx);
-        core::ptr::write_volatile(sq_array.add(pos2), sqe_idx2);
+        write_volatile(sq_array.add(pos1), sqe_idx);
+        write_volatile(sq_array.add(pos2), sqe_idx2);
 
         // NOTE: This fence ensures SQE and array writes are visible to kernel before updating the tail.
         // It's imp cause, it prevents reordering of SQE entries.
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-        core::ptr::write_volatile(self.sq_tail_ptr(), tail.wrapping_add(2)); // new tail
+        fence(Ordering::Release);
+        write_volatile(self.sq_tail_ptr(), tail.wrapping_add(2)); // new tail
 
         // Submit SQE (both) w/ `io_uring_enter` syscall
 
@@ -581,6 +602,92 @@ impl IOUring {
     }
 }
 
+#[derive(Debug)]
+struct BufPool {
+    head: AtomicU64,
+    next: [AtomicU32; NUM_BUFFER_PAGE],
+}
+
+impl BufPool {
+    const LAST_IDX: u32 = u32::MAX;
+
+    fn new() -> Self {
+        let head = AtomicU64::new(Self::pack(0, 0));
+        let next = std::array::from_fn(|i| {
+            AtomicU32::new(if i + 1 == NUM_BUFFER_PAGE {
+                Self::LAST_IDX
+            } else {
+                (i + 1) as u32
+            })
+        });
+
+        Self { head, next }
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        let (idx, _) = Self::unpack(self.head.load(Ordering::Acquire));
+        idx == Self::LAST_IDX
+    }
+
+    fn pop(&self) -> Option<usize> {
+        loop {
+            let observed = self.head.load(Ordering::Acquire);
+            let (head_idx, head_tag) = Self::unpack(observed);
+
+            // NOTE: no empty spot left in the pool, caller must wait!
+            if head_idx == Self::LAST_IDX {
+                return None;
+            }
+
+            let successor = self.next[head_idx as usize].load(Ordering::Relaxed);
+            let new_tag = head_tag.wrapping_add(1);
+            let new_packed = Self::pack(successor, new_tag);
+
+            match self
+                .head
+                .compare_exchange_weak(observed, new_packed, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Some(head_idx as usize),
+                Err(_) => std::hint::spin_loop(),
+            }
+        }
+    }
+
+    fn push(&self, idx: usize) {
+        // sanity check
+        debug_assert!(idx < NUM_BUFFER_PAGE, "idx is out of bounds");
+
+        loop {
+            let observed = self.head.load(Ordering::Acquire);
+            let (head_idx, head_tag) = Self::unpack(observed);
+
+            self.next[idx].store(head_idx, Ordering::Relaxed);
+
+            let new_tag = head_tag.wrapping_add(1);
+            let new_packed = Self::pack(idx as u32, new_tag);
+
+            match self
+                .head
+                .compare_exchange_weak(observed, new_packed, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return,
+                Err(_) => std::hint::spin_loop(),
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn pack(idx: u32, tag: u32) -> u64 {
+        (tag as u64) << 32 | idx as u64
+    }
+
+    #[inline(always)]
+    fn unpack(v: u64) -> (u32, u32) {
+        ((v & 0xFFFF_FFFF) as u32, (v >> 32) as u32)
+    }
+}
+
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn clear_ring_mmaps_on_err(rings: &RingPtrs, params: &IOUringParams) {
     // Unmap the SQE's array map
@@ -683,87 +790,192 @@ impl Drop for IOUring {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs::{File, OpenOptions},
-        io::Read,
-        os::fd::AsRawFd,
-        path::PathBuf,
-    };
-    use tempfile::TempDir;
 
-    fn create_iouring() -> (IOUring, File, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
-        let path = tmp.path().join("temp_io_uring");
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .expect("file");
+    mod io_uring {
+        use super::*;
+        use std::{
+            fs::{File, OpenOptions},
+            io::Read,
+            os::fd::AsRawFd,
+            path::PathBuf,
+        };
+        use tempfile::TempDir;
 
-        let file_fd = file.as_raw_fd();
-        let io_ring = unsafe { IOUring::new(file_fd).expect("Failed to create io_uring") };
+        fn create_iouring() -> (IOUring, File, TempDir) {
+            let tmp = TempDir::new().expect("tempdir");
+            let path = tmp.path().join("temp_io_uring");
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("file");
 
-        (io_ring, file, tmp)
-    }
+            let file_fd = file.as_raw_fd();
+            let io_ring = unsafe { IOUring::new(file_fd).expect("Failed to create io_uring") };
 
-    #[test]
-    fn test_iouring_init() {
-        let (io_ring, _file, _tmp) = create_iouring();
+            (io_ring, file, tmp)
+        }
 
-        assert!(io_ring.ring_fd >= 0, "Ring fd must be non-negative");
-        assert!(io_ring.file_fd >= 0, "File fd must be non-negative");
+        #[test]
+        fn test_iouring_init() {
+            let (io_ring, _file, _tmp) = create_iouring();
 
-        assert!(io_ring.params.sq_off.array != 0, "SQE's offset must be set by kernel");
-        assert!(io_ring.params.cq_off.cqes != 0, "CQE's offset must be set by kernel");
+            assert!(io_ring.ring_fd >= 0, "Ring fd must be non-negative");
+            assert!(io_ring.file_fd >= 0, "File fd must be non-negative");
 
-        assert!(!io_ring.rings.sq_ptr.is_null(), "SQ pointer must be valid");
-        assert!(!io_ring.rings.cq_ptr.is_null(), "CQ pointer must be valid");
-        assert!(!io_ring.rings.sqes_ptr.is_null(), "SQEs pointer must be valid");
+            assert!(io_ring.params.sq_off.array != 0, "SQE's offset must be set by kernel");
+            assert!(io_ring.params.cq_off.cqes != 0, "CQE's offset must be set by kernel");
 
-        assert_eq!(io_ring.active_buf_idx, 0, "Active buf idx must start from 0");
-        assert!(!io_ring.buf_base_ptr.is_null(), "Base buf ptr must not be null");
+            assert!(!io_ring.rings.sq_ptr.is_null(), "SQ pointer must be valid");
+            assert!(!io_ring.rings.cq_ptr.is_null(), "CQ pointer must be valid");
+            assert!(!io_ring.rings.sqes_ptr.is_null(), "SQEs pointer must be valid");
 
-        assert_eq!(
-            io_ring.iovecs.len(),
-            NUM_BUFFER_PAGE,
-            "IOVEC lane must match with constant"
-        );
-        assert!(
-            io_ring.buf_base_ptr != std::ptr::null_mut(),
-            "Base buf ptr must not be 0"
-        );
+            assert!(!io_ring.buf_base_ptr.is_null(), "Base buf ptr must not be null");
+            assert!(!io_ring.buf_pool.is_empty(), "BufPool should not be empty");
 
-        drop(io_ring);
-    }
+            assert_eq!(
+                io_ring.iovecs.len(),
+                NUM_BUFFER_PAGE,
+                "IOVEC lane must match with constant"
+            );
+            assert!(
+                io_ring.buf_base_ptr != std::ptr::null_mut(),
+                "Base buf ptr must not be 0"
+            );
 
-    #[test]
-    fn test_write_and_fsync() {
-        let offset: u64 = 0;
-        let dummy_data = "Dummy Data to write w/ fsync".as_bytes();
+            drop(io_ring);
+        }
 
-        let mut dummy_buf = vec![0u8; dummy_data.len()];
-        let (mut io_ring, mut file, _tmp) = create_iouring();
+        #[test]
+        fn test_write_and_fsync() {
+            let offset: u64 = 0;
+            let dummy_data = "Dummy Data to write w/ fsync".as_bytes();
 
-        unsafe { io_ring.write(&dummy_data, offset) };
-        std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
-        file.read_exact(&mut dummy_buf).expect("read from file");
+            let mut dummy_buf = vec![0u8; dummy_data.len()];
+            let (mut io_ring, mut file, _tmp) = create_iouring();
 
-        assert_eq!(dummy_data, &dummy_buf);
-    }
-
-    #[test]
-    fn test_write_and_read() {
-        let offset: u64 = 0;
-        let dummy_data = b"Dummy Data to write and read";
-        let (mut io_ring, _file, _tmp) = create_iouring();
-
-        unsafe {
-            io_ring.write(dummy_data, offset).expect("write failed");
+            unsafe { io_ring.write(&dummy_data, offset) };
             std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
-            let read_back = io_ring.read(offset).expect("read failed");
+            file.read_exact(&mut dummy_buf).expect("read from file");
 
-            assert_eq!(&read_back[..dummy_data.len()], dummy_data);
+            assert_eq!(dummy_data, &dummy_buf);
+        }
+
+        #[test]
+        fn test_write_and_read() {
+            let offset: u64 = 0;
+            let dummy_data = b"Dummy Data to write and read";
+            let (mut io_ring, _file, _tmp) = create_iouring();
+
+            unsafe {
+                io_ring.write(dummy_data, offset).expect("write failed");
+                std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
+                let read_back = io_ring.read(offset).expect("read failed");
+
+                assert_eq!(&read_back[..dummy_data.len()], dummy_data);
+            }
+        }
+    }
+
+    mod buf_pool {
+        use super::*;
+        use std::sync::Arc;
+        use std::thread;
+
+        #[test]
+        fn test_basic_push_pop() {
+            let pool = BufPool::new();
+
+            let idx = pool.pop().expect("should pop");
+            assert!(idx < NUM_BUFFER_PAGE);
+
+            pool.push(idx);
+            assert!(!pool.is_empty());
+        }
+
+        #[test]
+        fn test_popping_till_empty() {
+            let pool = BufPool::new();
+
+            // exhausts the head ptr
+            for _ in 0..NUM_BUFFER_PAGE {
+                assert!(pool.pop().is_some());
+            }
+
+            assert!(pool.pop().is_none());
+            assert!(pool.is_empty());
+        }
+
+        #[test]
+        fn test_push_pop_with_multiple_threades() {
+            let pool = Arc::new(BufPool::new());
+
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let pool = pool.clone();
+
+                    thread::spawn(move || {
+                        for _ in 0..1000 {
+                            if let Some(idx) = pool.pop() {
+                                pool.push(idx);
+                            } else {
+                                std::thread::yield_now();
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for t in threads {
+                t.join().unwrap();
+            }
+
+            //
+            // sanity check
+            //
+
+            let mut count = 0;
+
+            while pool.pop().is_some() {
+                count += 1;
+            }
+
+            assert_eq!(count, NUM_BUFFER_PAGE);
+        }
+
+        #[test]
+        fn reuse_after_empty() {
+            let pool = BufPool::new();
+
+            let mut popped = Vec::new();
+            let mut count = 0;
+
+            while let Some(idx) = pool.pop() {
+                popped.push(idx);
+            }
+
+            assert!(pool.is_empty());
+
+            for idx in popped {
+                pool.push(idx);
+            }
+
+            while pool.pop().is_some() {
+                count += 1;
+            }
+
+            assert_eq!(count, NUM_BUFFER_PAGE);
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic(expected = "idx is out of bounds")]
+        fn push_invalid_index_panics() {
+            let pool = BufPool::new();
+
+            // should panic as the idx is out of bounds
+            pool.push(NUM_BUFFER_PAGE);
         }
     }
 }
