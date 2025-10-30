@@ -5,9 +5,10 @@ use core::ptr::write_volatile;
 use std::{
     ptr::{copy_nonoverlapping, read_volatile, write_bytes},
     sync::{
-        atomic::{fence, AtomicU32, AtomicU64, Ordering},
+        atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
+    thread::JoinHandle,
 };
 
 // TODO: We shold take `num_buf_page` as config from user, if they insert rapidly,
@@ -162,22 +163,29 @@ pub(super) struct IOUring {
     iovecs: Vec<libc::iovec>,
     buf_base_ptr: *mut libc::c_void,
     buf_pool: Arc<BufPool>,
+    cq_poll_tx: Option<JoinHandle<()>>,
+    cq_poll_shutdown_flag: Arc<AtomicBool>,
+    num_buf_page: usize,
+    size_buf_page: usize,
 }
+
+unsafe impl Send for IOUring {}
+unsafe impl Sync for IOUring {}
 
 impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn new(file_fd: i32) -> InternalResult<Self> {
-        // TODO: Add sanity check to ensure min size in file
-        // debug_assert!(file.metadata().expect("Metadata").len() >= ?, "File must atleast be of size X");
-
+    pub(super) unsafe fn new(file_fd: i32, num_buf_page: usize, size_buf_page: usize) -> InternalResult<Self> {
         let mut params: IOUringParams = std::mem::zeroed();
 
         params.flags = 0x00;
         params.sq_thread_idle = 0x00;
         params.sq_thread_cpu = 0x00;
 
-        let ring_fd =
-            libc::syscall(libc::SYS_io_uring_setup, QUEUE_DEPTH, &mut params as *mut IOUringParams) as libc::c_int;
+        let ring_fd = libc::syscall(
+            libc::SYS_io_uring_setup,
+            QUEUE_DEPTH,
+            &mut params as *mut IOUringParams,
+        ) as libc::c_int;
 
         if ring_fd < 0 {
             let errno = *libc::__errno_location();
@@ -209,21 +217,79 @@ impl IOUring {
             return Err(e);
         }
 
-        let (iovecs, buf_base_ptr) = Self::register_buffers(ring_fd, SIZE_BUFFER_PAGE).map_err(|e| {
-            libc::close(ring_fd);
-            clear_ring_mmaps_on_err(&rings, &params);
-            e
-        })?;
+        let (iovecs, buf_base_ptr) =
+            Self::register_buffers(ring_fd, num_buf_page, size_buf_page).map_err(|e| {
+                libc::close(ring_fd);
+                clear_ring_mmaps_on_err(&rings, &params);
+                e
+            })?;
+
+        let buf_pool = Arc::new(BufPool::new(num_buf_page));
+
+        let cq_head_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.head as usize) as usize;
+        let cq_tail_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.tail as usize) as usize;
+        let cq_mask_ptr = *((rings.cq_ptr as *mut u8).add(params.cq_off.ring_mask as usize) as *const u32);
+        let cqes_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.cqes as usize) as usize;
+
+        let (cq_poll_tx, cq_poll_shutdown_flag) =
+            Self::spawn_cq_poll_tx(buf_pool.clone(), cq_head_ptr, cq_tail_ptr, cq_mask_ptr, cqes_ptr);
 
         Ok(Self {
             rings,
-            iovecs,
             params,
+            iovecs,
             ring_fd,
             file_fd,
+            buf_pool,
             buf_base_ptr,
-            buf_pool: Arc::new(BufPool::new()),
+            num_buf_page,
+            size_buf_page,
+            cq_poll_shutdown_flag,
+            cq_poll_tx: Some(cq_poll_tx),
         })
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn spawn_cq_poll_tx(
+        pool: Arc<BufPool>,
+        cq_head_ptr: usize,
+        cq_tail_ptr: usize,
+        cq_mask_ptr: u32,
+        cqes_ptr: usize,
+    ) -> (JoinHandle<()>, Arc<AtomicBool>) {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let shutdown_flag_clone = shutdown_flag.clone();
+
+        let tx = std::thread::spawn(move || loop {
+            let cq_head = cq_head_ptr as *mut u32;
+            let cq_tail = cq_tail_ptr as *mut u32;
+            let cqes = cqes_ptr as *mut IOUringCQE;
+
+            let head = read_volatile(cq_head);
+            let tail = read_volatile(cq_tail);
+
+            if head == tail {
+                // thread shutdown signal
+                if shutdown_flag_clone.load(Ordering::Acquire) {
+                    break;
+                }
+
+                std::thread::park_timeout(std::time::Duration::from_micros(10));
+                continue;
+            }
+
+            let idx = head & cq_mask_ptr;
+            let cqe = core::ptr::read_volatile(cqes.add(idx as usize));
+
+            if cqe.user_data != IOURING_FYSNC_USER_DATA {
+                eprintln!("CQE => {}", cqe.user_data);
+                pool.push(cqe.user_data as usize);
+            }
+
+            core::ptr::write_volatile(cq_head, head.wrapping_add(1));
+        });
+
+        (tx, shutdown_flag)
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -231,7 +297,7 @@ impl IOUring {
     pub(super) unsafe fn write(&self, buf: &[u8], write_offset: u64) -> InternalResult<()> {
         // sanity checks
         debug_assert!(!buf.is_empty(), "Input buffer must not be empty");
-        debug_assert!(buf.len() <= SIZE_BUFFER_PAGE, "Buffer is too large");
+        debug_assert!(buf.len() <= self.size_buf_page, "Buffer is too large");
 
         let buf_idx = loop {
             if let Some(idx) = self.buf_pool.pop() {
@@ -242,7 +308,7 @@ impl IOUring {
             std::thread::park_timeout(std::time::Duration::from_micros(2));
         };
 
-        let buf_ptr = self.buf_base_ptr.add(buf_idx * SIZE_BUFFER_PAGE);
+        let buf_ptr = self.buf_base_ptr.add(buf_idx * self.size_buf_page);
         copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, buf.len());
         self.submit_write_and_fsync(buf_idx, write_offset)?;
 
@@ -267,7 +333,7 @@ impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn submit_read_and_wait(&self, buf_idx: usize, read_offset: u64) -> InternalResult<Vec<u8>> {
         // sanity check
-        debug_assert!(buf_idx < NUM_BUFFER_PAGE, "buf_idx is out of bounds");
+        debug_assert!(buf_idx < self.num_buf_page, "buf_idx is out of bounds");
 
         let (tail, sqe_idx) = self.next_sqe_index();
         let iov_base = self.iovecs[buf_idx].iov_base;
@@ -279,8 +345,10 @@ impl IOUring {
         (*sqe_ptr).fd = IOURING_FIXED_FILE_IDX;
         (*sqe_ptr).union2[0] = buf_idx as u64;
         (*sqe_ptr).off = SQEOffUnion { off: read_offset };
-        (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
-        (*sqe_ptr).len = SIZE_BUFFER_PAGE as u32;
+        (*sqe_ptr).addr = SQEAddrUnion {
+            addr: iov_base as u64,
+        };
+        (*sqe_ptr).len = self.size_buf_page as u32;
         (*sqe_ptr).user_data = buf_idx as u64;
 
         let arr = self.sq_array_ptr();
@@ -333,7 +401,7 @@ impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn submit_write_and_fsync(&self, buf_idx: usize, write_offset: u64) -> InternalResult<()> {
         // sanity check
-        debug_assert!(buf_idx < NUM_BUFFER_PAGE, "buf_idx is out of bounds");
+        debug_assert!(buf_idx < self.num_buf_page, "buf_idx is out of bounds");
 
         // SQE prep for WRITE_FIXED
 
@@ -348,7 +416,9 @@ impl IOUring {
         (*sqe_ptr).len = self.iovecs[buf_idx].iov_len as u32;
         (*sqe_ptr).user_data = buf_idx as u64;
         (*sqe_ptr).off = SQEOffUnion { off: write_offset };
-        (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
+        (*sqe_ptr).addr = SQEAddrUnion {
+            addr: iov_base as u64,
+        };
 
         // SQE prep for (Linked) FSYNC
 
@@ -426,7 +496,10 @@ impl IOUring {
         // helper for cleanup on failure (unmap mapped objects)
         let cleanup = |sq: *mut libc::c_void, cq: *mut libc::c_void, sqes: *mut libc::c_void| {
             if !sqes.is_null() && sqes != libc::MAP_FAILED {
-                libc::munmap(sqes, params.sq_entries as usize * std::mem::size_of::<IOUringSQE>());
+                libc::munmap(
+                    sqes,
+                    params.sq_entries as usize * std::mem::size_of::<IOUringSQE>(),
+                );
             }
 
             if !cq.is_null() && cq != libc::MAP_FAILED && cq != sq {
@@ -440,7 +513,10 @@ impl IOUring {
 
         // SQ ring map
 
-        let sq_ptr = do_mmap(if single_mmap { ring_sz } else { sq_ring_sz }, IOURING_OFF_SQ_RING)?;
+        let sq_ptr = do_mmap(
+            if single_mmap { ring_sz } else { sq_ring_sz },
+            IOURING_OFF_SQ_RING,
+        )?;
 
         // CQ ring map
 
@@ -498,9 +574,10 @@ impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn register_buffers(
         ring_fd: i32,
+        num_page: usize,
         page_size: usize,
     ) -> InternalResult<(Vec<libc::iovec>, *mut libc::c_void)> {
-        let total_size = NUM_BUFFER_PAGE * page_size;
+        let total_size = num_page * page_size;
         let base_ptr = libc::mmap(
             std::ptr::null_mut(),
             total_size,
@@ -516,9 +593,9 @@ impl IOUring {
             return Err(err.into());
         }
 
-        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(NUM_BUFFER_PAGE);
+        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(num_page);
 
-        for i in 0..NUM_BUFFER_PAGE {
+        for i in 0..num_page {
             iovecs.push(libc::iovec {
                 iov_base: (base_ptr as *mut u8).add(i * page_size) as *mut libc::c_void,
                 iov_len: page_size,
@@ -604,26 +681,30 @@ impl IOUring {
 
 #[derive(Debug)]
 struct BufPool {
+    size: usize,
     head: AtomicU64,
-    next: [AtomicU32; NUM_BUFFER_PAGE],
+    next: Vec<AtomicU32>,
 }
 
 impl BufPool {
     const LAST_IDX: u32 = u32::MAX;
 
-    fn new() -> Self {
+    fn new(size: usize) -> Self {
         let head = AtomicU64::new(Self::pack(0, 0));
-        let next = std::array::from_fn(|i| {
-            AtomicU32::new(if i + 1 == NUM_BUFFER_PAGE {
+        let mut next = Vec::with_capacity(size);
+
+        for i in 0..size {
+            next.push(AtomicU32::new(if i + 1 == size {
                 Self::LAST_IDX
             } else {
                 (i + 1) as u32
-            })
-        });
+            }));
+        }
 
-        Self { head, next }
+        Self { size, head, next }
     }
 
+    #[cfg(test)]
     #[inline(always)]
     fn is_empty(&self) -> bool {
         let (idx, _) = Self::unpack(self.head.load(Ordering::Acquire));
@@ -649,14 +730,14 @@ impl BufPool {
                 .compare_exchange_weak(observed, new_packed, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => return Some(head_idx as usize),
-                Err(_) => std::hint::spin_loop(),
+                Err(_) => std::thread::yield_now(),
             }
         }
     }
 
     fn push(&self, idx: usize) {
         // sanity check
-        debug_assert!(idx < NUM_BUFFER_PAGE, "idx is out of bounds");
+        debug_assert!(idx < self.size, "idx is out of bounds");
 
         loop {
             let observed = self.head.load(Ordering::Acquire);
@@ -672,7 +753,7 @@ impl BufPool {
                 .compare_exchange_weak(observed, new_packed, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => return,
-                Err(_) => std::hint::spin_loop(),
+                Err(_) => std::thread::yield_now(),
             }
         }
     }
@@ -740,12 +821,22 @@ unsafe fn clear_ring_mmaps_on_err(rings: &RingPtrs, params: &IOUringParams) {
 impl Drop for IOUring {
     fn drop(&mut self) {
         unsafe {
+            // close the cq_poller
+            if let Some(tx) = self.cq_poll_tx.take() {
+                self.cq_poll_shutdown_flag.store(true, Ordering::Release);
+
+                // wakes the thread, we avoid waiting for thread to wait up
+                tx.thread().unpark();
+
+                let _ = tx.join();
+            }
+
             // unmap rings (SQ, CQ & SQE)
             clear_ring_mmaps_on_err(&self.rings, &self.params);
 
             // unmap the buffer alocated space
             if !self.buf_base_ptr.is_null() {
-                let total_size = NUM_BUFFER_PAGE * SIZE_BUFFER_PAGE;
+                let total_size = self.num_buf_page * self.size_buf_page;
                 let res = libc::munmap(self.buf_base_ptr, total_size);
 
                 if res < 0 {
@@ -801,7 +892,7 @@ mod tests {
         };
         use tempfile::TempDir;
 
-        fn create_iouring() -> (IOUring, File, TempDir) {
+        fn create_iouring(num_buf: usize, size_buf: usize) -> (IOUring, File, TempDir) {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("temp_io_uring");
             let file = OpenOptions::new()
@@ -812,20 +903,27 @@ mod tests {
                 .expect("file");
 
             let file_fd = file.as_raw_fd();
-            let io_ring = unsafe { IOUring::new(file_fd).expect("Failed to create io_uring") };
+            let io_ring =
+                unsafe { IOUring::new(file_fd, num_buf, size_buf).expect("Failed to create io_uring") };
 
             (io_ring, file, tmp)
         }
 
         #[test]
         fn test_iouring_init() {
-            let (io_ring, _file, _tmp) = create_iouring();
+            let (io_ring, _file, _tmp) = create_iouring(NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE);
 
             assert!(io_ring.ring_fd >= 0, "Ring fd must be non-negative");
             assert!(io_ring.file_fd >= 0, "File fd must be non-negative");
 
-            assert!(io_ring.params.sq_off.array != 0, "SQE's offset must be set by kernel");
-            assert!(io_ring.params.cq_off.cqes != 0, "CQE's offset must be set by kernel");
+            assert!(
+                io_ring.params.sq_off.array != 0,
+                "SQE's offset must be set by kernel"
+            );
+            assert!(
+                io_ring.params.cq_off.cqes != 0,
+                "CQE's offset must be set by kernel"
+            );
 
             assert!(!io_ring.rings.sq_ptr.is_null(), "SQ pointer must be valid");
             assert!(!io_ring.rings.cq_ptr.is_null(), "CQ pointer must be valid");
@@ -853,20 +951,22 @@ mod tests {
             let dummy_data = "Dummy Data to write w/ fsync".as_bytes();
 
             let mut dummy_buf = vec![0u8; dummy_data.len()];
-            let (mut io_ring, mut file, _tmp) = create_iouring();
+            let (mut io_ring, mut file, _tmp) = create_iouring(NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE);
 
             unsafe { io_ring.write(&dummy_data, offset) };
             std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
             file.read_exact(&mut dummy_buf).expect("read from file");
 
             assert_eq!(dummy_data, &dummy_buf);
+
+            drop(io_ring);
         }
 
         #[test]
         fn test_write_and_read() {
             let offset: u64 = 0;
             let dummy_data = b"Dummy Data to write and read";
-            let (mut io_ring, _file, _tmp) = create_iouring();
+            let (mut io_ring, _file, _tmp) = create_iouring(NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE);
 
             unsafe {
                 io_ring.write(dummy_data, offset).expect("write failed");
@@ -875,6 +975,27 @@ mod tests {
 
                 assert_eq!(&read_back[..dummy_data.len()], dummy_data);
             }
+
+            drop(io_ring);
+        }
+
+        #[test]
+        fn test_manual_queue_exhaustion() {
+            let offset: u64 = 0;
+            let dummy_data = b"Dummy Data to write and read";
+            let (mut io_ring, _file, _tmp) = create_iouring(4, SIZE_BUFFER_PAGE);
+
+            for i in 0..6 {
+                unsafe { io_ring.write(dummy_data, offset * i) };
+            }
+
+            // manual sleep so write could be finished
+            std::thread::sleep(std::time::Duration::from_millis(20));
+
+            let len = _file.metadata().expect("metadata").len();
+            assert_eq!(len as usize, SIZE_BUFFER_PAGE * 6);
+
+            drop(io_ring);
         }
     }
 
@@ -885,7 +1006,7 @@ mod tests {
 
         #[test]
         fn test_basic_push_pop() {
-            let pool = BufPool::new();
+            let pool = BufPool::new(NUM_BUFFER_PAGE);
 
             let idx = pool.pop().expect("should pop");
             assert!(idx < NUM_BUFFER_PAGE);
@@ -896,7 +1017,7 @@ mod tests {
 
         #[test]
         fn test_popping_till_empty() {
-            let pool = BufPool::new();
+            let pool = BufPool::new(NUM_BUFFER_PAGE);
 
             // exhausts the head ptr
             for _ in 0..NUM_BUFFER_PAGE {
@@ -909,7 +1030,7 @@ mod tests {
 
         #[test]
         fn test_push_pop_with_multiple_threades() {
-            let pool = Arc::new(BufPool::new());
+            let pool = Arc::new(BufPool::new(NUM_BUFFER_PAGE));
 
             let threads: Vec<_> = (0..8)
                 .map(|_| {
@@ -946,7 +1067,7 @@ mod tests {
 
         #[test]
         fn reuse_after_empty() {
-            let pool = BufPool::new();
+            let pool = BufPool::new(NUM_BUFFER_PAGE);
 
             let mut popped = Vec::new();
             let mut count = 0;
@@ -972,7 +1093,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "idx is out of bounds")]
         fn push_invalid_index_panics() {
-            let pool = BufPool::new();
+            let pool = BufPool::new(NUM_BUFFER_PAGE);
 
             // should panic as the idx is out of bounds
             pool.push(NUM_BUFFER_PAGE);
