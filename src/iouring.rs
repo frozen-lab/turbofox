@@ -981,19 +981,21 @@ mod tests {
 
         #[test]
         fn test_manual_queue_exhaustion() {
-            let offset: u64 = 0;
             let dummy_data = b"Dummy Data to write and read";
-            let (mut io_ring, _file, _tmp) = create_iouring(4, SIZE_BUFFER_PAGE);
+            let (mut io_ring, mut file, _tmp) = create_iouring(2, SIZE_BUFFER_PAGE);
 
-            for i in 0..6 {
-                unsafe { io_ring.write(dummy_data, offset * i) };
-            }
+            file.set_len(SIZE_BUFFER_PAGE as u64 * 4).expect("Set len");
+
+            unsafe { io_ring.write(dummy_data, 0) };
+            unsafe { io_ring.write(dummy_data, SIZE_BUFFER_PAGE as u64) };
+            unsafe { io_ring.write(dummy_data, SIZE_BUFFER_PAGE as u64 * 2) };
+            unsafe { io_ring.write(dummy_data, SIZE_BUFFER_PAGE as u64 * 3) };
 
             // manual sleep so write could be finished
             std::thread::sleep(std::time::Duration::from_millis(20));
 
-            let len = _file.metadata().expect("metadata").len();
-            assert_eq!(len as usize, SIZE_BUFFER_PAGE * 6);
+            let meta = file.metadata().expect("Meta");
+            assert_eq!(meta.len(), SIZE_BUFFER_PAGE as u64 * 4);
 
             drop(io_ring);
         }
