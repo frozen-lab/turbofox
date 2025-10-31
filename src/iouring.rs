@@ -1,4 +1,4 @@
-use crate::errors::InternalResult;
+use crate::{errors::InternalResult, logger::Logger};
 use core::ptr::write_volatile;
 use std::{
     ptr::{copy_nonoverlapping, read_volatile, write_bytes},
@@ -157,6 +157,7 @@ pub(super) struct IOUring {
     ring_fd: i32,
     file_fd: i32,
     rings: RingPtrs,
+    logger: Logger,
     params: IOUringParams,
     iovecs: Vec<libc::iovec>,
     buf_base_ptr: *mut libc::c_void,
@@ -172,29 +173,32 @@ unsafe impl Sync for IOUring {}
 
 impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn new(file_fd: i32, num_buf_page: usize, size_buf_page: usize) -> InternalResult<Self> {
+    pub(super) unsafe fn new(
+        log: bool,
+        file_fd: i32,
+        num_buf_page: usize,
+        size_buf_page: usize,
+    ) -> InternalResult<Self> {
         let mut params: IOUringParams = std::mem::zeroed();
+        let logger = Logger::new(log, "TurboFox (IOUring)");
 
         params.flags = 0x00;
         params.sq_thread_idle = 0x00;
         params.sq_thread_cpu = 0x00;
 
-        let ring_fd = libc::syscall(
-            libc::SYS_io_uring_setup,
-            QUEUE_DEPTH,
-            &mut params as *mut IOUringParams,
-        ) as libc::c_int;
+        let ring_fd =
+            libc::syscall(libc::SYS_io_uring_setup, QUEUE_DEPTH, &mut params as *mut IOUringParams) as libc::c_int;
 
         if ring_fd < 0 {
             let errno = *libc::__errno_location();
 
             // TODO: When io_uring is not available, we need fallback system
             if errno == libc::ENOSYS {
-                eprintln!("io_uring is not supported (requires Linux 5.1+)");
+                logger.error("io_uring is not supported (requires Linux 5.1+)");
             }
 
             let err = std::io::Error::last_os_error();
-            eprintln!("Invalid ring_fd={ring_fd}! ERR => {err}");
+            logger.error(format!("Invalid ring_fd={ring_fd}! ERR => {err}"));
             return Err(err.into());
         }
 
@@ -204,33 +208,41 @@ impl IOUring {
             "Kernel did not fill SQ/CQ offsets"
         );
 
-        let rings = Self::mmap_rings(ring_fd, &params).map_err(|e| {
+        let rings = Self::mmap_rings(ring_fd, &params, &logger).map_err(|e| {
             libc::close(ring_fd);
             e
         })?;
 
-        if let Err(e) = Self::register_files(ring_fd, file_fd) {
-            clear_ring_mmaps_on_err(&rings, &params);
+        if let Err(e) = Self::register_files(ring_fd, file_fd, &logger) {
+            clear_ring_mmaps_on_err(&rings, &params, &logger);
             libc::close(ring_fd);
             return Err(e);
         }
 
         let (iovecs, buf_base_ptr) =
-            Self::register_buffers(ring_fd, num_buf_page, size_buf_page).map_err(|e| {
+            Self::register_buffers(ring_fd, num_buf_page, size_buf_page, &logger).map_err(|e| {
                 libc::close(ring_fd);
-                clear_ring_mmaps_on_err(&rings, &params);
+                clear_ring_mmaps_on_err(&rings, &params, &logger);
                 e
             })?;
 
         let buf_pool = Arc::new(BufPool::new(num_buf_page));
 
-        let cq_head_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.head as usize) as usize;
-        let cq_tail_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.tail as usize) as usize;
-        let cq_mask_ptr = *((rings.cq_ptr as *mut u8).add(params.cq_off.ring_mask as usize) as *const u32);
         let cqes_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.cqes as usize) as usize;
+        let cq_tail_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.tail as usize) as usize;
+        let cq_head_ptr = (rings.cq_ptr as *mut u8).add(params.cq_off.head as usize) as usize;
+        let cq_mask_ptr = *((rings.cq_ptr as *mut u8).add(params.cq_off.ring_mask as usize) as *const u32);
 
-        let (cq_poll_tx, cq_poll_shutdown_flag) =
-            Self::spawn_cq_poll_tx(buf_pool.clone(), cq_head_ptr, cq_tail_ptr, cq_mask_ptr, cqes_ptr);
+        let (cq_poll_tx, cq_poll_shutdown_flag) = Self::spawn_cq_poll_tx(
+            buf_pool.clone(),
+            cq_head_ptr,
+            cq_tail_ptr,
+            cq_mask_ptr,
+            cqes_ptr,
+            &logger,
+        );
+
+        logger.debug(format!("IOUring init w/ ring_fd={ring_fd} file_fd={file_fd}"));
 
         Ok(Self {
             rings,
@@ -239,6 +251,7 @@ impl IOUring {
             ring_fd,
             file_fd,
             buf_pool,
+            logger,
             buf_base_ptr,
             num_buf_page,
             size_buf_page,
@@ -254,37 +267,42 @@ impl IOUring {
         cq_tail_ptr: usize,
         cq_mask_ptr: u32,
         cqes_ptr: usize,
+        logger: &Logger,
     ) -> (JoinHandle<()>, Arc<AtomicBool>) {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let shutdown_flag_clone = shutdown_flag.clone();
+        let tx_logger = logger.clone();
 
-        let tx = std::thread::spawn(move || loop {
-            let cq_head = cq_head_ptr as *mut u32;
-            let cq_tail = cq_tail_ptr as *mut u32;
-            let cqes = cqes_ptr as *mut IOUringCQE;
+        let tx = std::thread::spawn(move || {
+            loop {
+                let cq_head = cq_head_ptr as *mut u32;
+                let cq_tail = cq_tail_ptr as *mut u32;
+                let cqes = cqes_ptr as *mut IOUringCQE;
 
-            let head = read_volatile(cq_head);
-            let tail = read_volatile(cq_tail);
+                let head = read_volatile(cq_head);
+                let tail = read_volatile(cq_tail);
 
-            if head == tail {
-                // thread shutdown signal
-                if shutdown_flag_clone.load(Ordering::Acquire) {
-                    break;
+                if head == tail {
+                    // thread shutdown signal
+                    if shutdown_flag_clone.load(Ordering::Acquire) {
+                        tx_logger.info("[CQ_POLL_TX] received shutdown signal");
+                        break;
+                    }
+
+                    std::thread::park_timeout(std::time::Duration::from_micros(10));
+                    continue;
                 }
 
-                std::thread::park_timeout(std::time::Duration::from_micros(10));
-                continue;
+                let idx = head & cq_mask_ptr;
+                let cqe = core::ptr::read_volatile(cqes.add(idx as usize));
+
+                if cqe.user_data != IOURING_FYSNC_USER_DATA {
+                    pool.push(cqe.user_data as usize);
+                    tx_logger.debug(format!("[CQ_POLL_TX] freed the idx={}", cqe.user_data));
+                }
+
+                core::ptr::write_volatile(cq_head, head.wrapping_add(1));
             }
-
-            let idx = head & cq_mask_ptr;
-            let cqe = core::ptr::read_volatile(cqes.add(idx as usize));
-
-            if cqe.user_data != IOURING_FYSNC_USER_DATA {
-                eprintln!("CQE => {}", cqe.user_data);
-                pool.push(cqe.user_data as usize);
-            }
-
-            core::ptr::write_volatile(cq_head, head.wrapping_add(1));
         });
 
         (tx, shutdown_flag)
@@ -308,6 +326,8 @@ impl IOUring {
 
         let buf_ptr = self.buf_base_ptr.add(buf_idx * self.size_buf_page);
         copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, buf.len());
+        self.logger
+            .trace(format!("[WRITE] Copied data into buf at idx={buf_idx}"));
         self.submit_write_and_fsync(buf_idx, write_offset)?;
 
         Ok(())
@@ -325,6 +345,8 @@ impl IOUring {
             std::thread::park_timeout(std::time::Duration::from_micros(2));
         };
 
+        self.logger
+            .trace(format!("[READ] Buf for data to be read at idx={buf_idx}"));
         self.submit_read_and_wait(buf_idx, read_offset)
     }
 
@@ -343,9 +365,7 @@ impl IOUring {
         (*sqe_ptr).fd = IOURING_FIXED_FILE_IDX;
         (*sqe_ptr).union2[0] = buf_idx as u64;
         (*sqe_ptr).off = SQEOffUnion { off: read_offset };
-        (*sqe_ptr).addr = SQEAddrUnion {
-            addr: iov_base as u64,
-        };
+        (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
         (*sqe_ptr).len = self.size_buf_page as u32;
         (*sqe_ptr).user_data = buf_idx as u64;
 
@@ -368,7 +388,9 @@ impl IOUring {
 
         if res < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("submit_read_and_wait() failed on io_uring_enter syscall: {err:?}");
+            self.logger.error(format!(
+                "submit_read_and_wait() failed on io_uring_enter syscall: {err:?}"
+            ));
             return Err(err.into());
         }
 
@@ -385,7 +407,8 @@ impl IOUring {
 
         if res < 0 {
             let err = std::io::Error::from_raw_os_error(-res);
-            eprintln!("submit_read_and_wait() failed on CQE: {err:?}");
+            self.logger
+                .error(format!("submit_read_and_wait() failed on CQE: {err:?}"));
             return Err(err.into());
         }
 
@@ -414,9 +437,7 @@ impl IOUring {
         (*sqe_ptr).len = self.iovecs[buf_idx].iov_len as u32;
         (*sqe_ptr).user_data = buf_idx as u64;
         (*sqe_ptr).off = SQEOffUnion { off: write_offset };
-        (*sqe_ptr).addr = SQEAddrUnion {
-            addr: iov_base as u64,
-        };
+        (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
 
         // SQE prep for (Linked) FSYNC
 
@@ -457,7 +478,10 @@ impl IOUring {
 
         if ret < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("submit_write_and_fsync() failed on io_uring_enter syscall: {err:?}");
+            self.logger.error(format!(
+                "submit_write_and_fsync() failed on io_uring_enter syscall: {err:?}"
+            ));
+
             return Err(err.into());
         }
 
@@ -465,7 +489,7 @@ impl IOUring {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    unsafe fn mmap_rings(ring_fd: i32, params: &IOUringParams) -> InternalResult<RingPtrs> {
+    unsafe fn mmap_rings(ring_fd: i32, params: &IOUringParams, logger: &Logger) -> InternalResult<RingPtrs> {
         let sq_ring_sz = params.sq_off.array as usize + params.sq_entries as usize * std::mem::size_of::<u32>();
         let cq_ring_sz = params.cq_off.cqes as usize + params.cq_entries as usize * std::mem::size_of::<u64>();
         let single_mmap = params.features & IOURING_FEAT_SINGLE_MMAP != 0;
@@ -484,7 +508,7 @@ impl IOUring {
 
             if ptr == libc::MAP_FAILED {
                 let err = std::io::Error::last_os_error();
-                eprintln!("Unable to create mmap => {:?}", err);
+                logger.error(format!("Unable to create mmap => {:?}", err));
                 return Err(err.into());
             }
 
@@ -494,27 +518,36 @@ impl IOUring {
         // helper for cleanup on failure (unmap mapped objects)
         let cleanup = |sq: *mut libc::c_void, cq: *mut libc::c_void, sqes: *mut libc::c_void| {
             if !sqes.is_null() && sqes != libc::MAP_FAILED {
-                libc::munmap(
-                    sqes,
-                    params.sq_entries as usize * std::mem::size_of::<IOUringSQE>(),
-                );
+                let res = libc::munmap(sqes, params.sq_entries as usize * std::mem::size_of::<IOUringSQE>());
+
+                if res < 0 {
+                    let err = std::io::Error::last_os_error();
+                    logger.error(format!("Unable to unmap SQE array => {:?}", err));
+                }
             }
 
             if !cq.is_null() && cq != libc::MAP_FAILED && cq != sq {
-                libc::munmap(cq, cq_ring_sz);
+                let res = libc::munmap(cq, cq_ring_sz);
+
+                if res < 0 {
+                    let err = std::io::Error::last_os_error();
+                    logger.error(format!("Unable to unmap CQ => {:?}", err));
+                }
             }
 
             if !sq.is_null() && sq != libc::MAP_FAILED {
-                libc::munmap(sq, if single_mmap { ring_sz } else { sq_ring_sz });
+                let res = libc::munmap(sq, if single_mmap { ring_sz } else { sq_ring_sz });
+
+                if res < 0 {
+                    let err = std::io::Error::last_os_error();
+                    logger.error(format!("Unable to unmap SQ => {:?}", err));
+                }
             }
         };
 
         // SQ ring map
 
-        let sq_ptr = do_mmap(
-            if single_mmap { ring_sz } else { sq_ring_sz },
-            IOURING_OFF_SQ_RING,
-        )?;
+        let sq_ptr = do_mmap(if single_mmap { ring_sz } else { sq_ring_sz }, IOURING_OFF_SQ_RING)?;
 
         // CQ ring map
 
@@ -550,7 +583,7 @@ impl IOUring {
 
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    unsafe fn register_files(ring_fd: i32, file_fd: i32) -> InternalResult<()> {
+    unsafe fn register_files(ring_fd: i32, file_fd: i32, logger: &Logger) -> InternalResult<()> {
         let fds = [file_fd];
         let ret = libc::syscall(
             libc::SYS_io_uring_register,
@@ -562,7 +595,7 @@ impl IOUring {
 
         if ret < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("Unable to register file! ERROR => {err}");
+            logger.error(format!("Unable to register file! ERROR => {err}"));
             return Err(err.into());
         }
 
@@ -574,6 +607,7 @@ impl IOUring {
         ring_fd: i32,
         num_page: usize,
         page_size: usize,
+        logger: &Logger,
     ) -> InternalResult<(Vec<libc::iovec>, *mut libc::c_void)> {
         let total_size = num_page * page_size;
         let base_ptr = libc::mmap(
@@ -587,7 +621,7 @@ impl IOUring {
 
         if base_ptr == libc::MAP_FAILED {
             let err = std::io::Error::last_os_error();
-            eprintln!("register_buffers() failed cause base_ptr mmap failed: {err}");
+            logger.error(format!("register_buffers() failed cause base_ptr mmap failed: {err}"));
             return Err(err.into());
         }
 
@@ -610,7 +644,9 @@ impl IOUring {
 
         if ret < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("register_buffers() failed on registration syscall w/ res({ret}): {err}");
+            logger.error(format!(
+                "register_buffers() failed on registration syscall w/ res({ret}): {err}"
+            ));
             return Err(err.into());
         }
 
@@ -768,7 +804,7 @@ impl BufPool {
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn clear_ring_mmaps_on_err(rings: &RingPtrs, params: &IOUringParams) {
+unsafe fn clear_ring_mmaps_on_err(rings: &RingPtrs, params: &IOUringParams, logger: &Logger) {
     // Unmap the SQE's array map
 
     if !rings.sqes_ptr.is_null() {
@@ -779,7 +815,7 @@ unsafe fn clear_ring_mmaps_on_err(rings: &RingPtrs, params: &IOUringParams) {
 
         if res < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("Unable to unmap SQE array: {err}");
+            logger.warn(format!("Unable to unmap SQE array: {err}"));
         }
     }
 
@@ -791,7 +827,7 @@ unsafe fn clear_ring_mmaps_on_err(rings: &RingPtrs, params: &IOUringParams) {
 
         if res < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("Unable to unmap CQ: {err}");
+            logger.warn(format!("Unable to unmap CQ: {err}"));
         }
     }
 
@@ -811,7 +847,7 @@ unsafe fn clear_ring_mmaps_on_err(rings: &RingPtrs, params: &IOUringParams) {
 
         if res < 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("Unable to unmap SQ: {err}");
+            logger.warn(format!("Unable to unmap SQ: {err}"));
         }
     }
 }
@@ -827,10 +863,11 @@ impl Drop for IOUring {
                 tx.thread().unpark();
 
                 let _ = tx.join();
+                self.logger.trace("[drop] CQ poller thread closed.");
             }
 
             // unmap rings (SQ, CQ & SQE)
-            clear_ring_mmaps_on_err(&self.rings, &self.params);
+            clear_ring_mmaps_on_err(&self.rings, &self.params, &self.logger);
 
             // unmap the buffer alocated space
             if !self.buf_base_ptr.is_null() {
@@ -839,7 +876,9 @@ impl Drop for IOUring {
 
                 if res < 0 {
                     let err = std::io::Error::last_os_error();
-                    eprintln!("Unable to unmap SQE array: {err}");
+                    self.logger.warn(format!("Unable to unmap SQE array: {err}"));
+                } else {
+                    self.logger.trace("[drop] Unmapped SQE array.");
                 }
             }
 
@@ -854,7 +893,9 @@ impl Drop for IOUring {
 
             if res < 0 {
                 let err = std::io::Error::last_os_error();
-                eprintln!("Unable to unregister file: {err}");
+                self.logger.warn(format!("Unable to unregister file: {err}"));
+            } else {
+                self.logger.trace("[drop] Unregistered file.");
             }
 
             // unregister registered buffers
@@ -868,10 +909,22 @@ impl Drop for IOUring {
 
             if res < 0 {
                 let err = std::io::Error::last_os_error();
-                eprintln!("Unable to unregister buffers: {err}");
+                self.logger.warn(format!("Unable to unregister buffers: {err}"));
+            } else {
+                self.logger.trace("[drop] Unregistered buffers.");
             }
 
-            libc::close(self.ring_fd);
+            // close ring_fd
+            let res = libc::close(self.ring_fd);
+
+            if res < 0 {
+                let err = std::io::Error::last_os_error();
+                self.logger.warn(format!("Unable to close ring_fd: {err}"));
+            } else {
+                self.logger.trace("[drop] Closed rign_fd.");
+            }
+
+            self.logger.info("Dropped IOUring");
         }
     }
 }
@@ -882,6 +935,7 @@ mod tests {
 
     mod io_uring {
         use super::*;
+        use crate::logger::init_test_logger;
         use std::{
             fs::{File, OpenOptions},
             io::Read,
@@ -900,9 +954,9 @@ mod tests {
                 .open(&path)
                 .expect("file");
 
+            let _ = init_test_logger("IOUring");
             let file_fd = file.as_raw_fd();
-            let io_ring =
-                unsafe { IOUring::new(file_fd, num_buf, size_buf).expect("Failed to create io_uring") };
+            let io_ring = unsafe { IOUring::new(true, file_fd, num_buf, size_buf).expect("Failed to create io_uring") };
 
             (io_ring, file, tmp)
         }
@@ -914,14 +968,8 @@ mod tests {
             assert!(io_ring.ring_fd >= 0, "Ring fd must be non-negative");
             assert!(io_ring.file_fd >= 0, "File fd must be non-negative");
 
-            assert!(
-                io_ring.params.sq_off.array != 0,
-                "SQE's offset must be set by kernel"
-            );
-            assert!(
-                io_ring.params.cq_off.cqes != 0,
-                "CQE's offset must be set by kernel"
-            );
+            assert!(io_ring.params.sq_off.array != 0, "SQE's offset must be set by kernel");
+            assert!(io_ring.params.cq_off.cqes != 0, "CQE's offset must be set by kernel");
 
             assert!(!io_ring.rings.sq_ptr.is_null(), "SQ pointer must be valid");
             assert!(!io_ring.rings.cq_ptr.is_null(), "CQ pointer must be valid");
@@ -1066,7 +1114,7 @@ mod tests {
         }
 
         #[test]
-        fn reuse_after_empty() {
+        fn test_reuse_after_empty() {
             let pool = BufPool::new(NUM_BUFFER_PAGE);
 
             let mut popped = Vec::new();
@@ -1089,10 +1137,10 @@ mod tests {
             assert_eq!(count, NUM_BUFFER_PAGE);
         }
 
-        #[cfg(debug_assertions)]
         #[test]
+        #[cfg(debug_assertions)]
         #[should_panic(expected = "idx is out of bounds")]
-        fn push_invalid_index_panics() {
+        fn test_push_invalid_index_panics() {
             let pool = BufPool::new(NUM_BUFFER_PAGE);
 
             // should panic as the idx is out of bounds

@@ -1,5 +1,11 @@
 use log::{Level, Record};
 
+#[cfg(test)]
+pub(crate) fn init_test_logger(target: &'static str) -> Logger {
+    let _ = env_logger::builder().is_test(true).try_init();
+    Logger::new(true, target)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Logger {
     pub enabled: bool,
@@ -22,11 +28,7 @@ impl Logger {
             return;
         }
 
-        let record = Record::builder()
-            .args(args)
-            .level(level)
-            .target(&self.target)
-            .build();
+        let record = Record::builder().args(args).level(level).target(&self.target).build();
 
         log::logger().log(&record);
     }
@@ -52,7 +54,7 @@ impl Logger {
     }
 
     #[inline(always)]
-    fn error(&self, args: impl std::fmt::Display) {
+    pub fn error(&self, args: impl std::fmt::Display) {
         self.log_args(Level::Error, format_args!("{args}"));
     }
 }
