@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use crate::errors::InternalResult;
 use core::ptr::write_volatile;
 use std::{
