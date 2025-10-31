@@ -49,7 +49,6 @@ const IOURING_FYSNC_USER_DATA: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 /// For reference, <https://github.com/torvalds/linux/blob/master/include/uapi/linux/io_uring.h#L234>
 enum IOUringOP {
     FSYNC = 3,
-    READFIXED = 4,
     WRITEFIXED = 5,
 }
 
@@ -296,9 +295,17 @@ impl IOUring {
                 let idx = head & cq_mask_ptr;
                 let cqe = core::ptr::read_volatile(cqes.add(idx as usize));
 
+                // NOTE: Even if the write/fsync op has failed we still free up the buffer as its
+                // free to be used for next op's!
+                if cqe.res < 0 {
+                    let err = std::io::Error::last_os_error();
+                    tx_logger.error(format!("[CQ_POLL_TX] Write failed w/ err: {err}"));
+                }
+
+                // NOTE: We only assign buf for write, so we must skip the fsync calls!
                 if cqe.user_data != IOURING_FYSNC_USER_DATA {
                     pool.push(cqe.user_data as usize);
-                    tx_logger.debug(format!("[CQ_POLL_TX] freed the idx={}", cqe.user_data));
+                    tx_logger.debug(format!("[CQ_POLL_TX] freed the idx({})", cqe.user_data));
                 }
 
                 core::ptr::write_volatile(cq_head, head.wrapping_add(1));
@@ -334,92 +341,6 @@ impl IOUring {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(super) unsafe fn read(&mut self, read_offset: u64) -> InternalResult<Vec<u8>> {
-        let buf_idx = loop {
-            if let Some(idx) = self.buf_pool.pop() {
-                break idx;
-            }
-
-            // NOTE: As no buf is available, we suspend the current thread for 2 µs
-            std::thread::park_timeout(std::time::Duration::from_micros(2));
-        };
-
-        self.logger
-            .trace(format!("[READ] Buf for data to be read at idx={buf_idx}"));
-        self.submit_read_and_wait(buf_idx, read_offset)
-    }
-
-    #[allow(unsafe_op_in_unsafe_fn)]
-    unsafe fn submit_read_and_wait(&self, buf_idx: usize, read_offset: u64) -> InternalResult<Vec<u8>> {
-        // sanity check
-        debug_assert!(buf_idx < self.num_buf_page, "buf_idx is out of bounds");
-
-        let (tail, sqe_idx) = self.next_sqe_index();
-        let iov_base = self.iovecs[buf_idx].iov_base;
-        let sqe_ptr = (self.rings.sqes_ptr as *mut IOUringSQE).add(sqe_idx as usize);
-        write_bytes(sqe_ptr as *mut u8, 0, IOURING_SQE_SIZE); // zero init
-
-        (*sqe_ptr).opcode = IOUringOP::READFIXED as u8;
-        (*sqe_ptr).flags = IOUringSQEFlags::FIXEDFILE as u8;
-        (*sqe_ptr).fd = IOURING_FIXED_FILE_IDX;
-        (*sqe_ptr).union2[0] = buf_idx as u64;
-        (*sqe_ptr).off = SQEOffUnion { off: read_offset };
-        (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
-        (*sqe_ptr).len = self.size_buf_page as u32;
-        (*sqe_ptr).user_data = buf_idx as u64;
-
-        let arr = self.sq_array_ptr();
-        write_volatile(arr.add((tail & self.sq_mask()) as usize), sqe_idx);
-
-        // NOTE: This fence ensures SQE and array writes are visible to kernel before updating the tail.
-        // It's imp cause, it prevents reordering of SQE entries.
-        fence(Ordering::Release);
-        write_volatile(self.sq_tail_ptr(), tail.wrapping_add(1)); // new tail
-
-        let res = libc::syscall(
-            libc::SYS_io_uring_enter,
-            self.ring_fd,
-            1u32,
-            0u32,
-            0u32,
-            std::ptr::null::<libc::sigset_t>(),
-        ) as libc::c_int;
-
-        if res < 0 {
-            let err = std::io::Error::last_os_error();
-            self.logger.error(format!(
-                "submit_read_and_wait() failed on io_uring_enter syscall: {err:?}"
-            ));
-            return Err(err.into());
-        }
-
-        let cq_head = self.cq_head_ptr();
-        let cq_tail = self.cq_tail_ptr();
-        let head = core::ptr::read_volatile(cq_head);
-        let tail = core::ptr::read_volatile(cq_tail);
-
-        let idx = head & self.cq_mask();
-        let cqe = read_volatile(self.cqes_ptr().add(idx as usize));
-        write_volatile(cq_head, head.wrapping_add(1));
-
-        let res = cqe.res;
-
-        if res < 0 {
-            let err = std::io::Error::from_raw_os_error(-res);
-            self.logger
-                .error(format!("submit_read_and_wait() failed on CQE: {err:?}"));
-            return Err(err.into());
-        }
-
-        let mut data = vec![0u8; res as usize];
-        let src_ptr = self.iovecs[buf_idx].iov_base as *const u8;
-        copy_nonoverlapping(src_ptr, data.as_mut_ptr(), res as usize);
-
-        return Ok(data);
-    }
-
-    #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn submit_write_and_fsync(&self, buf_idx: usize, write_offset: u64) -> InternalResult<()> {
         // sanity check
         debug_assert!(buf_idx < self.num_buf_page, "buf_idx is out of bounds");
@@ -438,6 +359,7 @@ impl IOUring {
         (*sqe_ptr).user_data = buf_idx as u64;
         (*sqe_ptr).off = SQEOffUnion { off: write_offset };
         (*sqe_ptr).addr = SQEAddrUnion { addr: iov_base as u64 };
+        (*sqe_ptr).union2[0] = buf_idx as u64;
 
         // SQE prep for (Linked) FSYNC
 
@@ -938,7 +860,7 @@ mod tests {
         use crate::logger::init_test_logger;
         use std::{
             fs::{File, OpenOptions},
-            io::Read,
+            io::{Read, Seek},
             os::fd::AsRawFd,
             path::PathBuf,
         };
@@ -1009,39 +931,34 @@ mod tests {
         }
 
         #[test]
-        fn test_write_and_read() {
-            let offset: u64 = 0;
-            let dummy_data = b"Dummy Data to write and read";
-            let (mut io_ring, _file, _tmp) = create_iouring(NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE);
+        fn test_manual_queue_exhaustion() {
+            let n = 100;
+            let file_len = n * NUM_BUFFER_PAGE;
+            let (mut io_ring, mut file, _tmp) = create_iouring(20, SIZE_BUFFER_PAGE);
 
-            unsafe {
-                io_ring.write(dummy_data, offset).expect("write failed");
-                std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
-                let read_back = io_ring.read(offset).expect("read failed");
+            // NOTE: This is required, as we append new data to file, and a io_uring queue
+            // does not have order, so we could be writing at an offset that does not exists
+            // yet, resulting in undefined behaviour!
+            file.set_len(SIZE_BUFFER_PAGE as u64 * n as u64).expect("Set len");
 
-                assert_eq!(&read_back[..dummy_data.len()], dummy_data);
+            for i in 0..n {
+                let dummy_data = vec![i as u8; SIZE_BUFFER_PAGE];
+                unsafe { io_ring.write(&dummy_data, (SIZE_BUFFER_PAGE * i) as u64) };
             }
 
-            drop(io_ring);
-        }
+            // manual sleep so writes could be finished
+            std::thread::sleep(std::time::Duration::from_millis(10));
 
-        #[test]
-        fn test_manual_queue_exhaustion() {
-            let dummy_data = b"Dummy Data to write and read";
-            let (mut io_ring, mut file, _tmp) = create_iouring(2, SIZE_BUFFER_PAGE);
+            // validate written data
+            for i in 0..n {
+                let expected_buf = vec![i as u8; SIZE_BUFFER_PAGE];
+                let mut buf = vec![0u8; SIZE_BUFFER_PAGE];
 
-            file.set_len(SIZE_BUFFER_PAGE as u64 * 4).expect("Set len");
+                file.seek(std::io::SeekFrom::Start((i * SIZE_BUFFER_PAGE) as u64));
+                file.read_exact(&mut buf).expect("read from file");
 
-            unsafe { io_ring.write(dummy_data, 0) };
-            unsafe { io_ring.write(dummy_data, SIZE_BUFFER_PAGE as u64) };
-            unsafe { io_ring.write(dummy_data, SIZE_BUFFER_PAGE as u64 * 2) };
-            unsafe { io_ring.write(dummy_data, SIZE_BUFFER_PAGE as u64 * 3) };
-
-            // manual sleep so write could be finished
-            std::thread::sleep(std::time::Duration::from_millis(20));
-
-            let meta = file.metadata().expect("Meta");
-            assert_eq!(meta.len(), SIZE_BUFFER_PAGE as u64 * 4);
+                assert_eq!(expected_buf, buf);
+            }
 
             drop(io_ring);
         }
