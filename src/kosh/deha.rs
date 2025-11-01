@@ -1,8 +1,8 @@
 use super::iouring::IOUring;
-use crate::errors::InternalResult;
+use crate::{errors::InternalResult, logger::Logger};
 use std::{
     fs::{File, OpenOptions},
-    os::fd::AsRawFd,
+    os::fd::{AsFd, AsRawFd},
     path::PathBuf,
 };
 
@@ -31,31 +31,46 @@ const PATH: &'static str = "deha";
 
 pub(super) struct Deha {
     file: File,
-    iouring: Option<IOUring>,
+    logger: Logger,
+    io_uring: Option<IOUring>,
 }
 
 impl Deha {
-    pub(super) fn new(log: bool, dir: &PathBuf) -> InternalResult<Self> {
-        todo!()
-    }
-
-    pub(super) fn open(log: bool, dir: &PathBuf) -> InternalResult<Self> {
+    pub(super) fn new(logging_enabled: bool, is_new: bool, dir: &PathBuf) -> InternalResult<Self> {
+        let logger = Logger::new(logging_enabled, "Deha");
         let path = dir.join(PATH);
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(path)?;
+        let mut file = Self::open_or_create_file(&path, &logger, is_new)?;
+
+        // validate existing file to be page aligned
+        if !is_new {
+            let len = file
+                .metadata()
+                .map_err(|e| {
+                    logger.error("Unable to read metadata of Deha file");
+                    e
+                })?
+                .len() as usize;
+
+            if len % SIZE_BUFFER_PAGE != 0 {
+                logger.error("Deha file is corrupted or tampered with!");
+
+                std::fs::remove_file(&path).map_err(|e| {
+                    logger.error("Unable to delete corrupted Deha file");
+                    e
+                })?;
+
+                logger.warn("Deleted corrupted Deha file!");
+
+                // create a new Deha file
+                file = Self::open_or_create_file(&path, &logger, true)?;
+                logger.warn("Created new Deha file!");
+            }
+        }
 
         let file_fd = file.as_raw_fd();
-        let iouring = unsafe { IOUring::new(log, file_fd, NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE) }?;
+        let io_uring = unsafe { IOUring::new(logging_enabled, file_fd, NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE) }?;
 
-        // TODO: If file is not paged correctly, we should either
-        // - delete and create a new one
-        // - throw error to user stating `TurboCache` is corrupted
-
-        Ok(Self { file, iouring })
+        Ok(Self { file, logger, io_uring })
     }
 
     pub(super) fn write(&self, offset: u64, buffer: &[u8]) -> InternalResult<()> {
@@ -65,10 +80,9 @@ impl Deha {
             "Buffer and Offset must be paged correctly"
         );
 
-        if let Some(io_uring) = &self.iouring {
+        // TODO: Impl of sequential I/O for when io_uring is not available
+        if let Some(io_uring) = &self.io_uring {
             unsafe { io_uring.write(buffer, offset) }?;
-        } else {
-            Self::pwrite(&self.file, buffer, offset)?;
         }
 
         Ok(())
@@ -85,6 +99,36 @@ impl Deha {
         Ok(())
     }
 
+    fn open_or_create_file(path: &PathBuf, logger: &Logger, is_new: bool) -> InternalResult<File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(is_new)
+            .open(&path)
+            .map_err(|e| {
+                logger.error("Unable to create Deha file");
+                e
+            })?;
+
+        if is_new {
+            let size = Self::calc_file_size(0);
+            file.set_len(size).map_err(|e| {
+                logger.error("Unable to set default size for new Deha file");
+                e
+            })?
+        }
+
+        logger.debug("Created Deha file");
+
+        Ok(file)
+    }
+
+    #[inline(always)]
+    fn calc_file_size(current_size: u64) -> u64 {
+        (SIZE_BUFFER_PAGE * NUM_BUFFER_PAGE) as u64 + current_size
+    }
+
     #[cfg(unix)]
     fn pwrite(f: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
         std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
@@ -96,81 +140,126 @@ impl Deha {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::logger::init_test_logger;
-//     use tempfile::TempDir;
+impl Drop for Deha {
+    fn drop(&mut self) {
+        if let Some(io_uring) = self.io_uring.take() {
+            drop(io_uring);
+        }
+    }
+}
 
-//     fn create_deha() -> (Deha, TempDir) {
-//         let _ = init_test_logger("IOUring");
-//         let tmp = TempDir::new().expect("tempdir");
-//         let deha = Deha::open(true, &tmp.path().to_path_buf()).expect("Deha init");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logger::init_test_logger;
+    use tempfile::TempDir;
 
-//         (deha, tmp)
-//     }
+    fn create_deha(is_new: bool) -> (Deha, TempDir) {
+        let _ = init_test_logger("IOUring");
+        let tmp = TempDir::new().expect("tempdir");
+        let deha = Deha::new(true, is_new, &tmp.path().to_path_buf()).expect("Create Deha");
 
-//     #[test]
-//     fn test_open_creates_file_and_persists() {
-//         let (deha, tmp) = create_deha();
+        (deha, tmp)
+    }
 
-//         let path = tmp.path().join("deha");
-//         assert!(path.exists());
-//         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    mod deha {
+        use super::*;
 
-//         // Write and reopen to verify persistence
-//         let data = vec![0xAA; SIZE_BUFFER_PAGE];
-//         deha.write(0, &data).unwrap();
+        #[test]
+        fn test_deha_init_with_new() {
+            let (d1, _t1) = create_deha(true);
+            let len_new = Deha::calc_file_size(0);
 
-//         drop(deha);
-//         let reopened = Deha::open(true, &tmp.path().to_path_buf()).unwrap();
+            assert_eq!(
+                d1.file.metadata().expect("Meta").len(),
+                len_new,
+                "New Deha file is initilized w/ pre-defnined file size"
+            );
+        }
 
-//         let mut buf = vec![0; SIZE_BUFFER_PAGE];
-//         reopened.read(0, &mut buf).unwrap();
-//         assert_eq!(buf, data);
-//     }
+        #[test]
+        fn test_deha_init_for_corrupted_file_with_new() {
+            let (mut d1, t1) = create_deha(true);
+            let len_new = Deha::calc_file_size(0);
 
-//     #[test]
-//     #[cfg(debug_assertions)]
-//     #[should_panic]
-//     fn test_misaligned_buffer_panics() {
-//         let dir = tempdir().unwrap();
+            // manually corrupt file len
+            let corrupted_len: u64 = 10;
+            d1.file.set_len(corrupted_len).expect("Len Update");
 
-//         let deha = Deha::open(true, &dir.path().to_path_buf()).unwrap();
-//         let data = vec![0; SIZE_BUFFER_PAGE + 1];
+            let d2 = Deha::new(true, false, &t1.path().to_path_buf()).expect("Open Deha");
+            let d2_len = d2.file.metadata().expect("Meta").len();
+            let new_len = Deha::calc_file_size(0);
 
-//         deha.write(0, &data).unwrap();
-//     }
+            assert_ne!(d2_len, corrupted_len, "Corrupted file must be re-inited when opened");
+            assert!(
+                d2_len == new_len,
+                "Corrupted file must be re-inited w/ page aligned file size"
+            );
+        }
 
-//     #[test]
-//     #[cfg(debug_assertions)]
-//     #[should_panic]
-//     fn test_misaligned_offset_panics() {
-//         let dir = tempdir().unwrap();
+        #[test]
+        fn test_file_size_calculations() {
+            assert!(
+                Deha::calc_file_size(0) as usize % SIZE_BUFFER_PAGE == 0,
+                "File size must be aligned w/ page size"
+            );
 
-//         let deha = Deha::open(true, &dir.path().to_path_buf()).unwrap();
-//         let data = vec![0; SIZE_BUFFER_PAGE];
+            for i in 1..10 {
+                let old_size = SIZE_BUFFER_PAGE * NUM_BUFFER_PAGE * i;
 
-//         deha.write(1, &data).unwrap();
-//     }
+                assert!(
+                    Deha::calc_file_size(old_size as u64) as usize % SIZE_BUFFER_PAGE == 0,
+                    "New File size must be aligned w/ page size"
+                );
+            }
+        }
 
-//     #[test]
-//     fn test_multi_page_read_write() {
-//         let dir = tempdir().unwrap();
-//         let deha = Deha::open(true, &dir.path().to_path_buf()).unwrap();
+        #[test]
+        #[cfg(unix)]
+        fn test_ops_on_open_or_create_file() {
+            let dummy_logger = Logger::new(true, "Deha [File Ops]");
+            let tmp = TempDir::new().expect("tempdir");
+            let path = tmp.path().join("test_file");
 
-//         let page1 = vec![1; SIZE_BUFFER_PAGE];
-//         let page2 = vec![2; SIZE_BUFFER_PAGE];
-//         let page3 = vec![3; SIZE_BUFFER_PAGE];
+            let file = Deha::open_or_create_file(&path, &dummy_logger, true).expect("Create File");
+            assert!(
+                file.metadata().expect("Meta").len() as usize % SIZE_BUFFER_PAGE == 0,
+                "File size must be page aligned"
+            );
 
-//         deha.write(0, &[page1.clone(), page2.clone(), page3.clone()].concat())
-//             .unwrap();
+            let file1 = Deha::open_or_create_file(&path, &dummy_logger, false).expect("Open File");
+            assert_eq!(
+                file.metadata().expect("Meta").len(),
+                file1.metadata().expect("Meta").len(),
+                "File size must not change on re-open for existing file"
+            );
 
-//         let mut buf = vec![0; SIZE_BUFFER_PAGE * 3];
-//         deha.read(0, &mut buf).unwrap();
+            let new_len: u64 = 10;
+            file1.set_len(new_len).expect("Update len");
 
-//         assert_eq!(&buf[..SIZE_BUFFER_PAGE], page1);
-//         assert_eq!(&buf[SIZE_BUFFER_PAGE..2 * SIZE_BUFFER_PAGE], page2);
-//         assert_eq!(&buf[2 * SIZE_BUFFER_PAGE..], page3);
-//     }
-// }
+            let file2 = Deha::open_or_create_file(&path, &dummy_logger, false).expect("Open File");
+            assert_eq!(
+                file2.metadata().expect("Meta").len(),
+                new_len,
+                "Opening old file again does not modify len"
+            );
+        }
+    }
+
+    mod p_read_write {
+        use super::*;
+
+        #[test]
+        #[cfg(unix)]
+        fn test_pwrite_pread_cycle() {
+            let (deha, _tmp) = create_deha(true);
+            let dummy_data = b"Dummy data to write".to_vec();
+            let mut buf = vec![0u8; dummy_data.len()];
+
+            Deha::pwrite(&deha.file, &dummy_data, 0).expect("Write");
+            Deha::pread(&deha.file, &mut buf, 0).expect("Read");
+
+            assert_eq!(dummy_data, buf, "Read data must match the written data");
+        }
+    }
+}

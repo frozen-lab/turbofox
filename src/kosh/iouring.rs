@@ -153,13 +153,13 @@ unsafe impl Sync for IOUring {}
 impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
     pub(super) unsafe fn new(
-        log: bool,
+        logging_enabled: bool,
         file_fd: i32,
         num_buf_page: usize,
         size_buf_page: usize,
     ) -> InternalResult<Option<Self>> {
         let mut params: IOUringParams = std::mem::zeroed();
-        let logger = Logger::new(log, "TurboFox (IOUring)");
+        let logger = Logger::new(logging_enabled, "TurboFox (IOUring)");
 
         params.flags = 0x00;
         params.sq_thread_idle = 0x00;
