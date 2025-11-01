@@ -1,3 +1,4 @@
+use super::deha::{NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE};
 use crate::{errors::InternalResult, logger::Logger};
 use core::ptr::write_volatile;
 use std::{
@@ -8,27 +9,6 @@ use std::{
     },
     thread::JoinHandle,
 };
-
-// TODO: We shold take `num_buf_page` as config from user, if they insert rapidly,
-// queue will overflow then we must block new writes (thread sleep, etc.)
-// if no bufs are available to write into
-
-/// No. of page bufs pages registered w/ kernel for `io_uring`
-pub(super) const NUM_BUFFER_PAGE: usize = 128;
-const _: () = assert!(
-    NUM_BUFFER_PAGE > 0 && (NUM_BUFFER_PAGE & (NUM_BUFFER_PAGE - 1)) == 0,
-    "NUM_BUFFER_PAGE must be power of 2"
-);
-
-// TODO: We shold take `size_buf_page` as config from user, so the dev's could
-// optimize for there ideal buf size, so we could avoid resource waste!
-
-/// Size of each page buf registered w/ kernel for `io_uring`
-pub(super) const SIZE_BUFFER_PAGE: usize = 128;
-const _: () = assert!(
-    SIZE_BUFFER_PAGE > 0 && (SIZE_BUFFER_PAGE & (SIZE_BUFFER_PAGE - 1)) == 0,
-    "SIZE_BUFFER_PAGE must be power of 2"
-);
 
 const QUEUE_DEPTH: u32 = NUM_BUFFER_PAGE as u32 / 2; // 64 SQE entries, which is ~5 KiB of memory
 const IOURING_FEAT_SINGLE_MMAP: u32 = 1;
@@ -177,7 +157,7 @@ impl IOUring {
         file_fd: i32,
         num_buf_page: usize,
         size_buf_page: usize,
-    ) -> InternalResult<Self> {
+    ) -> InternalResult<Option<Self>> {
         let mut params: IOUringParams = std::mem::zeroed();
         let logger = Logger::new(log, "TurboFox (IOUring)");
 
@@ -191,9 +171,10 @@ impl IOUring {
         if ring_fd < 0 {
             let errno = *libc::__errno_location();
 
-            // TODO: When io_uring is not available, we need fallback system
+            // NOTE: When io_uring is not available, we fallback to sequential I/O
             if errno == libc::ENOSYS {
-                logger.error("io_uring is not supported (requires Linux 5.1+)");
+                logger.warn("io_uring is not supported (requires Linux 5.1+)");
+                return Ok(None);
             }
 
             let err = std::io::Error::last_os_error();
@@ -243,7 +224,7 @@ impl IOUring {
 
         logger.debug(format!("IOUring init w/ ring_fd={ring_fd} file_fd={file_fd}"));
 
-        Ok(Self {
+        Ok(Some(Self {
             rings,
             params,
             iovecs,
@@ -256,7 +237,7 @@ impl IOUring {
             size_buf_page,
             cq_poll_shutdown_flag,
             cq_poll_tx: Some(cq_poll_tx),
-        })
+        }))
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -878,7 +859,8 @@ mod tests {
 
             let _ = init_test_logger("IOUring");
             let file_fd = file.as_raw_fd();
-            let io_ring = unsafe { IOUring::new(true, file_fd, num_buf, size_buf).expect("Failed to create io_uring") };
+            let io_ring = unsafe { IOUring::new(true, file_fd, num_buf, size_buf).expect("Failed to create io_uring") }
+                .expect("IOUring");
 
             (io_ring, file, tmp)
         }
