@@ -873,7 +873,7 @@ mod tests {
                 .open(&path)
                 .expect("file");
 
-            let _ = init_test_logger("IOUring");
+            let _ = init_test_logger(None);
             let file_fd = file.as_raw_fd();
             let io_ring = unsafe { IOUring::new(true, file_fd, num_buf, size_buf).expect("Failed to create io_uring") }
                 .expect("IOUring");

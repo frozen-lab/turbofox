@@ -134,7 +134,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_deha(is_new: bool) -> (Deha, TempDir) {
-        let _ = init_test_logger("IOUring");
+        let _ = init_test_logger(None);
         let tmp = TempDir::new().expect("tempdir");
         let deha = Deha::new(true, is_new, &tmp.path().to_path_buf()).expect("Create Deha");
 

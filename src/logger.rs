@@ -1,9 +1,14 @@
 use log::{Level, Record};
 
 #[cfg(test)]
-pub(crate) fn init_test_logger(target: &'static str) -> Logger {
+pub(crate) fn init_test_logger(target: Option<&'static str>) -> Option<Logger> {
     let _ = env_logger::builder().is_test(true).try_init();
-    Logger::new(true, target)
+
+    if target.is_none() {
+        return None;
+    }
+
+    Some(Logger::new(true, target.unwrap()))
 }
 
 #[derive(Debug, Clone, Copy)]
