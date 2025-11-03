@@ -1,31 +1,10 @@
-use super::iouring::IOUring;
+use crate::linux::iouring::{IOUring, NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE};
 use crate::{errors::InternalResult, logger::Logger};
 use std::{
     fs::{File, OpenOptions},
     os::fd::{AsFd, AsRawFd},
     path::PathBuf,
 };
-
-// TODO: We shold take `num_buf_page` as config from user, if they insert rapidly,
-// queue will overflow then we must block new writes (thread sleep, etc.)
-// if no bufs are available to write into
-
-/// No. of page bufs pages registered w/ kernel for `io_uring`
-pub(super) const NUM_BUFFER_PAGE: usize = 128;
-const _: () = assert!(
-    NUM_BUFFER_PAGE > 0 && (NUM_BUFFER_PAGE & (NUM_BUFFER_PAGE - 1)) == 0,
-    "NUM_BUFFER_PAGE must be power of 2"
-);
-
-// TODO: We shold take `size_buf_page` as config from user, so the dev's could
-// optimize for there ideal buf size, so we could avoid resource waste!
-
-/// Size of each page buf registered w/ kernel for `io_uring`
-pub(super) const SIZE_BUFFER_PAGE: usize = 128;
-const _: () = assert!(
-    SIZE_BUFFER_PAGE > 0 && (SIZE_BUFFER_PAGE & (SIZE_BUFFER_PAGE - 1)) == 0,
-    "SIZE_BUFFER_PAGE must be power of 2"
-);
 
 const PATH: &'static str = "deha";
 

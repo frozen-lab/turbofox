@@ -1,4 +1,3 @@
-use super::deha::{NUM_BUFFER_PAGE, SIZE_BUFFER_PAGE};
 use crate::{errors::InternalResult, logger::Logger};
 use core::ptr::write_volatile;
 use std::{
@@ -9,6 +8,23 @@ use std::{
     },
     thread::JoinHandle,
 };
+
+/// No. of page bufs pages registered w/ kernel for `io_uring`
+pub(crate) const NUM_BUFFER_PAGE: usize = 128;
+const _: () = assert!(
+    NUM_BUFFER_PAGE > 0 && (NUM_BUFFER_PAGE & (NUM_BUFFER_PAGE - 1)) == 0,
+    "NUM_BUFFER_PAGE must be power of 2"
+);
+
+// TODO: We shold take `size_buf_page` as config from user, so the dev's could
+// optimize for there ideal buf size, so we could avoid resource waste!
+
+/// Size of each page buf registered w/ kernel for `io_uring`
+pub(crate) const SIZE_BUFFER_PAGE: usize = 128;
+const _: () = assert!(
+    SIZE_BUFFER_PAGE > 0 && (SIZE_BUFFER_PAGE & (SIZE_BUFFER_PAGE - 1)) == 0,
+    "SIZE_BUFFER_PAGE must be power of 2"
+);
 
 const QUEUE_DEPTH: u32 = NUM_BUFFER_PAGE as u32 / 2; // 64 SQE entries, which is ~5 KiB of memory
 const IOURING_FEAT_SINGLE_MMAP: u32 = 1;
@@ -132,7 +148,7 @@ struct RingPtrs {
     sqes_ptr: *mut libc::c_void,
 }
 
-pub(super) struct IOUring {
+pub(crate) struct IOUring {
     ring_fd: i32,
     file_fd: i32,
     rings: RingPtrs,
@@ -152,7 +168,7 @@ unsafe impl Sync for IOUring {}
 
 impl IOUring {
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn new(
+    pub(crate) unsafe fn new(
         logging_enabled: bool,
         file_fd: i32,
         num_buf_page: usize,
@@ -241,6 +257,31 @@ impl IOUring {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    pub(crate) unsafe fn write(&self, buf: &[u8], write_offset: u64) -> InternalResult<()> {
+        // sanity checks
+        debug_assert!(!buf.is_empty(), "Input buffer must not be empty");
+        debug_assert!(buf.len() <= self.size_buf_page, "Buffer is too large");
+
+        let buf_idx = loop {
+            if let Some(idx) = self.buf_pool.pop() {
+                break idx;
+            }
+
+            // NOTE: As no buf is available, we suspend the current thread for 2 µs
+            std::thread::park_timeout(std::time::Duration::from_micros(2));
+        };
+
+        let buf_ptr = self.buf_base_ptr.add(buf_idx * self.size_buf_page);
+        copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, buf.len());
+        self.logger
+            .trace(format!("[WRITE] Copied data into buf at idx={buf_idx}"));
+        self.submit_write_and_fsync(buf_idx, write_offset)?;
+
+        Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn spawn_cq_poll_tx(
         pool: Arc<BufPool>,
         cq_head_ptr: usize,
@@ -294,31 +335,6 @@ impl IOUring {
         });
 
         (tx, shutdown_flag)
-    }
-
-    #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(super) unsafe fn write(&self, buf: &[u8], write_offset: u64) -> InternalResult<()> {
-        // sanity checks
-        debug_assert!(!buf.is_empty(), "Input buffer must not be empty");
-        debug_assert!(buf.len() <= self.size_buf_page, "Buffer is too large");
-
-        let buf_idx = loop {
-            if let Some(idx) = self.buf_pool.pop() {
-                break idx;
-            }
-
-            // NOTE: As no buf is available, we suspend the current thread for 2 µs
-            std::thread::park_timeout(std::time::Duration::from_micros(2));
-        };
-
-        let buf_ptr = self.buf_base_ptr.add(buf_idx * self.size_buf_page);
-        copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, buf.len());
-        self.logger
-            .trace(format!("[WRITE] Copied data into buf at idx={buf_idx}"));
-        self.submit_write_and_fsync(buf_idx, write_offset)?;
-
-        Ok(())
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
