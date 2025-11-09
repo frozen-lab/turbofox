@@ -1,10 +1,16 @@
-use crate::errors::{InternalError, InternalResult};
+use crate::{
+    errors::{InternalError, InternalResult},
+    InternalCfg,
+};
 use libc::{
-    c_void, fstat, mmap, stat, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SYNC_FILE_RANGE_WAIT_AFTER,
+    c_void, fstat, mmap, munmap, stat, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SYNC_FILE_RANGE_WAIT_AFTER,
     SYNC_FILE_RANGE_WAIT_BEFORE,
 };
 
-pub(crate) struct MMap(*mut c_void);
+pub(crate) struct MMap {
+    ptr: *mut c_void,
+    len: usize,
+}
 
 impl MMap {
     /// Create a new mmap (read & write) instance
@@ -15,26 +21,13 @@ impl MMap {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(crate) unsafe fn new(fd: i32, len: usize) -> InternalResult<Self> {
-        let res = mmap(std::ptr::null_mut(), len, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0i64);
+        let ptr = mmap(std::ptr::null_mut(), len, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0i64);
 
-        if res == MAP_FAILED {
+        if ptr == MAP_FAILED {
             return Err(Self::_last_os_error());
         }
 
-        Ok(Self(res))
-    }
-
-    #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(crate) unsafe fn fstat_len(fd: i32) -> InternalResult<usize> {
-        let mut stat = std::mem::zeroed::<stat>();
-        let res = fstat(fd, &mut stat);
-
-        if res != 0 {
-            return Err(Self::_last_os_error());
-        }
-
-        Ok(stat.st_size as usize)
+        Ok(Self { ptr, len })
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -50,14 +43,32 @@ impl MMap {
         Ok(())
     }
 
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline]
+    pub(crate) unsafe fn unmap(&self) -> InternalResult<()> {
+        let res = munmap(self.ptr, self.len);
+
+        if res != 0 {
+            return Err(Self::_last_os_error());
+        }
+
+        Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline]
+    pub(crate) unsafe fn fsync(&self, fd: i32) -> InternalResult<()> {
+        let res = munmap(self.ptr, self.len);
+
+        if res != 0 {
+            return Err(Self::_last_os_error());
+        }
+
+        Ok(())
+    }
+
     fn _last_os_error() -> InternalError {
         let err = std::io::Error::last_os_error();
         err.into()
-    }
-}
-
-impl Drop for MMap {
-    fn drop(&mut self) {
-        
     }
 }
