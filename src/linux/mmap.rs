@@ -1,11 +1,5 @@
-use crate::{
-    errors::{InternalError, InternalResult},
-    InternalCfg,
-};
-use libc::{
-    c_void, fstat, mmap, munmap, stat, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SYNC_FILE_RANGE_WAIT_AFTER,
-    SYNC_FILE_RANGE_WAIT_BEFORE,
-};
+use crate::errors::{InternalError, InternalResult};
+use libc::{c_void, mmap, msync, munmap, stat, MAP_FAILED, MAP_SHARED, MS_ASYNC, MS_SYNC, PROT_READ, PROT_WRITE};
 
 pub(crate) struct MMap {
     ptr: *mut c_void,
@@ -31,24 +25,9 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(crate) unsafe fn sync_file(fd: i32) -> InternalResult<()> {
-        // NOTE: Kernel treats `nbytes = 0` as "until EOF", which is what exactly we want!
-        let res = libc::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WAIT_AFTER);
-
-        if res != 0 {
-            return Err(Self::_last_os_error());
-        }
-
-        Ok(())
-    }
-
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline]
     pub(crate) unsafe fn unmap(&self) -> InternalResult<()> {
-        let res = munmap(self.ptr, self.len);
-
-        if res != 0 {
+        if munmap(self.ptr, self.len) != 0 {
             return Err(Self::_last_os_error());
         }
 
@@ -57,18 +36,26 @@ impl MMap {
 
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline]
-    pub(crate) unsafe fn fsync(&self, fd: i32) -> InternalResult<()> {
-        let res = munmap(self.ptr, self.len);
-
-        if res != 0 {
+    pub(crate) unsafe fn ms_async(&self) -> InternalResult<()> {
+        if msync(self.ptr, self.len, MS_ASYNC) != 0 {
             return Err(Self::_last_os_error());
         }
 
         Ok(())
     }
 
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline]
+    pub(crate) unsafe fn ms_sync(&self) -> InternalResult<()> {
+        if msync(self.ptr, self.len, MS_SYNC) != 0 {
+            return Err(Self::_last_os_error());
+        }
+
+        Ok(())
+    }
+
+    #[inline]
     fn _last_os_error() -> InternalError {
-        let err = std::io::Error::last_os_error();
-        err.into()
+        std::io::Error::last_os_error().into()
     }
 }
