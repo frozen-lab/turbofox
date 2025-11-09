@@ -1,4 +1,4 @@
-use super::PAGE_SIZE;
+use super::DEFAULT_NUM_PAGES;
 use crate::{errors::InternalResult, logger::Logger, InternalCfg};
 use std::{
     fs::{File, OpenOptions},
@@ -9,152 +9,97 @@ use std::{
 const VERSION: u32 = 0;
 const MAGIC: [u8; 4] = *b"trl1";
 const PATH: &'static str = "trail";
-
-const RESERVED_PAGE_SPACE: usize = std::mem::size_of::<u64>(); // page_link (u64)
-const BITS_PER_PAGE: usize = (PAGE_SIZE - RESERVED_PAGE_SPACE) * 8;
-const ITEMS_PER_ADJ_ARR: usize = 7;
-const RESERVED_ADJ_ARR_SPACE: usize = 2; // arr_link_idx (u32) & page_idx (u32)
-const ADJ_ARR_ITEM_SIZE: usize = std::mem::size_of::<u32>();
-const ADJ_ARR_PER_PAGE: usize = (PAGE_SIZE - RESERVED_PAGE_SPACE) / (ADJ_ARR_ITEM_SIZE * ITEMS_PER_ADJ_ARR);
+const BITS_PER_PAGE: usize = DEFAULT_NUM_PAGES * 8;
+const META_SIZE: usize = std::mem::size_of::<Meta>();
 
 // sanity checks
-const _: () = assert!(std::mem::size_of_val(&VERSION) == 4, "Must be 4 bytes aligned");
+const _: () = assert!(META_SIZE % 8 == 0, "Should be 8 bytes aligned");
+const _: () = assert!(BITS_PER_PAGE % 8 == 0, "Must be multiple of 8");
 const _: () = assert!(std::mem::size_of_val(&MAGIC) == 4, "Must be 4 bytes aligned");
-const _: () = assert!(BITS_PER_PAGE / 8 == (PAGE_SIZE - RESERVED_PAGE_SPACE));
-const _: () = assert!(PAGE_SIZE - RESERVED_PAGE_SPACE == ADJ_ARR_PER_PAGE * ADJ_ARR_ITEM_SIZE * ITEMS_PER_ADJ_ARR);
+const _: () = assert!(std::mem::size_of_val(&VERSION) == 4, "Must be 4 bytes aligned");
 
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 struct Meta {
     magic: [u8; 4],
     version: u32,
-    npages: u32,
-    nbits: u32,
-    nadjarr: u32,
+    nbits: u64,
+    ptr: u64,
 }
 
 impl Meta {
     #[inline(always)]
-    const fn size() -> usize {
-        std::mem::size_of::<Self>()
-    }
-
-    #[inline(always)]
     const fn new() -> Self {
-        // sanity check
-        debug_assert!(BITS_PER_PAGE <= u32::MAX as usize);
-        debug_assert!(ADJ_ARR_PER_PAGE <= u32::MAX as usize);
-
         Self {
             magic: MAGIC,
             version: VERSION,
-            npages: 2,
-            nbits: BITS_PER_PAGE as u32,
-            nadjarr: ADJ_ARR_PER_PAGE as u32,
+            nbits: BITS_PER_PAGE as u64,
+            ptr: META_SIZE as u64,
         }
-    }
-
-    #[inline(always)]
-    const fn from_ptr(ptr: *mut libc::c_void) -> Self {
-        unsafe { *(ptr as *const Meta) }
-    }
-}
-
-// sanity check (meta must be 4 bytes aligned)
-const _: () = assert!(Meta::size() % 4 == 0);
-
-#[derive(Debug)]
-struct BitMap {
-    nbits: usize,
-    ptrs: Vec<*mut libc::c_void>,
-}
-
-impl BitMap {
-    #[inline(always)]
-    fn new(nbits: usize, ptrs: Vec<*mut libc::c_void>) -> Self {
-        Self { nbits, ptrs }
-    }
-}
-
-#[derive(Debug)]
-struct AdjArr {
-    narr: usize,
-    ptrs: Vec<*mut libc::c_void>,
-}
-
-impl AdjArr {
-    #[inline(always)]
-    fn new(narr: usize, ptrs: Vec<*mut libc::c_void>) -> Self {
-        Self { narr, ptrs }
     }
 }
 
 #[derive(Debug)]
 pub(super) struct Trail {
-    cfg: InternalCfg,
     file: File,
-    logger: Logger,
-    mmap_size: u64,
-    mmap_ptr: *mut libc::c_void,
-    bmap: BitMap,
     meta: Meta,
 }
 
 impl Trail {
-    pub(super) fn new(cfg: &InternalCfg) -> InternalResult<Self> {
-        let logger = Logger::new(cfg.logging_enabled, "TurboFox (TRAIL)");
-        let path = cfg.dirpath.join(PATH);
-        let file_size = Meta::size() + cfg.page_size;
+    // pub(super) fn new(cfg: &InternalCfg) -> InternalResult<Self> {
+    //     let logger = Logger::new(cfg.logging_enabled, "TurboFox (TRAIL)");
+    //     let path = cfg.dirpath.join(PATH);
+    //     let file_size = Meta::size() + cfg.page_size;
 
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .inspect(|_| logger.trace("New Trail created"))
-            .map_err(|e| {
-                logger.error("Unable to create new Trail");
-                e
-            })?;
+    //     let file = OpenOptions::new()
+    //         .create(true)
+    //         .read(true)
+    //         .write(true)
+    //         .truncate(true)
+    //         .open(&path)
+    //         .inspect(|_| logger.trace("New Trail created"))
+    //         .map_err(|e| {
+    //             logger.error("Unable to create new Trail");
+    //             e
+    //         })?;
 
-        file.set_len(cfg.page_size as u64)
-            .inspect(|_| logger.debug(format!("Zero Init trail w/ len={}", cfg.page_size)))
-            .map_err(|e| {
-                logger.error("Unabele to set length for new Trail");
-                Self::_delete_file(&path, &logger);
-                e
-            })?;
+    //     file.set_len(cfg.page_size as u64)
+    //         .inspect(|_| logger.debug(format!("Zero Init trail w/ len={}", cfg.page_size)))
+    //         .map_err(|e| {
+    //             logger.error("Unabele to set length for new Trail");
+    //             Self::_delete_file(&path, &logger);
+    //             e
+    //         })?;
 
-        let fd = file.as_raw_fd();
-        let mmap_ptr = unsafe { Self::mmap_file(fd, cfg.page_size, &logger) }?;
+    //     let fd = file.as_raw_fd();
+    //     let mmap_ptr = unsafe { Self::mmap_file(fd, cfg.page_size, &logger) }?;
 
-        let meta = Meta::new();
-        let bmap = BitMap::new(meta.nbits as usize, vec![mmap_ptr]);
+    //     let meta = Meta::new();
+    //     let bmap = BitMap::new(meta.nbits as usize, vec![mmap_ptr]);
 
-        let res = unsafe {
-            let meta_ptr = mmap_ptr as *mut Meta;
-            std::ptr::write(meta_ptr, meta);
-            libc::msync(meta_ptr.cast(), Meta::size(), libc::MS_SYNC)
-        };
+    //     let res = unsafe {
+    //         let meta_ptr = mmap_ptr as *mut Meta;
+    //         std::ptr::write(meta_ptr, meta);
+    //         libc::msync(meta_ptr.cast(), Meta::size(), libc::MS_SYNC)
+    //     };
 
-        if res < 0 {
-            let err = std::io::Error::last_os_error();
-            logger.error("Unable to set Meta for new Trail");
-            Self::_delete_file(&path, &logger);
-            return Err(err.into());
-        }
+    //     if res < 0 {
+    //         let err = std::io::Error::last_os_error();
+    //         logger.error("Unable to set Meta for new Trail");
+    //         Self::_delete_file(&path, &logger);
+    //         return Err(err.into());
+    //     }
 
-        Ok(Self {
-            meta,
-            file,
-            bmap,
-            logger,
-            mmap_ptr,
-            cfg: cfg.clone(),
-            mmap_size: cfg.page_size as u64,
-        })
-    }
+    //     Ok(Self {
+    //         meta,
+    //         file,
+    //         bmap,
+    //         logger,
+    //         mmap_ptr,
+    //         cfg: cfg.clone(),
+    //         mmap_size: cfg.page_size as u64,
+    //     })
+    // }
 
     // pub(super) fn open(cfg: &InternalCfg) -> InternalResult<Option<Self>> {
     //     let logger = Logger::new(cfg.logging_enabled, "TurboFox (TRAIL)");
@@ -262,18 +207,18 @@ impl Trail {
 
 impl Drop for Trail {
     fn drop(&mut self) {
-        unsafe {
-            // unmap mmaped buffer
-            let res = libc::munmap(self.mmap_ptr, self.cfg.page_size);
+        // unsafe {
+        //     // unmap mmaped buffer
+        //     let res = libc::munmap(self.mmap_ptr, self.cfg.page_size);
 
-            if res < 0 {
-                let err = std::io::Error::last_os_error();
-                self.logger
-                    .warn(format!("Unable to unmap the buffer due to, res={res} & err={err}"));
-            } else {
-                self.logger.trace("Unmaped the mapped Trail buffer");
-            }
-        }
+        //     if res != 0 {
+        //         let err = std::io::Error::last_os_error();
+        //         self.logger
+        //             .warn(format!("Unable to unmap the buffer due to, res={res} & err={err}"));
+        //     } else {
+        //         self.logger.trace("Unmaped the mapped Trail buffer");
+        //     }
+        // }
     }
 }
 
