@@ -1,40 +1,65 @@
-use super::DEFAULT_NUM_PAGES;
-use crate::{errors::InternalResult, logger::Logger, InternalCfg};
-use std::{
-    fs::{File, OpenOptions},
-    os::fd::AsRawFd,
-    path::PathBuf,
+use super::OS_PAGE_SIZE;
+use crate::{
+    errors::{InternalError, InternalResult},
+    linux::{file::File, mmap::MMap},
+    logger::Logger,
+    InternalCfg,
 };
 
 const VERSION: u32 = 0;
 const MAGIC: [u8; 4] = *b"trl1";
 const PATH: &'static str = "trail";
-const BITS_PER_PAGE: usize = DEFAULT_NUM_PAGES * 8;
-const META_SIZE: usize = std::mem::size_of::<Meta>();
+
+const RESERVED_SPACE_PER_PAGE: usize = 8;
+const BITES_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE) * 8;
+
+const ADJ_ARR_IDX_SIZE: usize = 8;
+const ITEMS_PER_ADJ_ARR: usize = 8;
+const ADJ_ARR_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE - ADJ_ARR_IDX_SIZE) / ITEMS_PER_ADJ_ARR;
+
+const INIT_OS_PAGES: usize = 2; // Bits + AdjArr
+const INIT_FILE_LEN: usize = META_SIZE + (OS_PAGE_SIZE * INIT_OS_PAGES); // Meta + OS Pages
 
 // sanity checks
 const _: () = assert!(META_SIZE % 8 == 0, "Should be 8 bytes aligned");
-const _: () = assert!(BITS_PER_PAGE % 8 == 0, "Must be multiple of 8");
+const _: () = assert!(BITES_PER_PAGE % 64 == 0, "Must be 8 bytes aligned");
+const _: () = assert!(RESERVED_SPACE_PER_PAGE % 8 == 0, "Must be 8 bytes aligned");
 const _: () = assert!(std::mem::size_of_val(&MAGIC) == 4, "Must be 4 bytes aligned");
 const _: () = assert!(std::mem::size_of_val(&VERSION) == 4, "Must be 4 bytes aligned");
+const _: () = assert!(
+    ADJ_ARR_PER_PAGE * ITEMS_PER_ADJ_ARR == OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE - ADJ_ARR_IDX_SIZE,
+    "Adjcent Array Constants should be valid"
+);
 
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 struct Meta {
     magic: [u8; 4],
     version: u32,
-    nbits: u64,
-    ptr: u64,
+    nbitpages: u32,
+    naddarrpages: u32,
+    bitptr: u64,
+    adjptr: u64,
 }
+
+const META_SIZE: usize = std::mem::size_of::<Meta>();
+
+// sanity check
+const _: () = assert!(META_SIZE % 8 == 0, "Must be 8 bytes aligned");
 
 impl Meta {
     #[inline(always)]
-    const fn new() -> Self {
+    const fn new(n: usize) -> Self {
+        // sanity check
+        debug_assert!(n > 0, "N must not be zero");
+
         Self {
             magic: MAGIC,
             version: VERSION,
-            nbits: BITS_PER_PAGE as u64,
-            ptr: META_SIZE as u64,
+            nbitpages: n as u32,
+            naddarrpages: n as u32,
+            bitptr: 0u64,
+            adjptr: 064,
         }
     }
 }
@@ -43,182 +68,120 @@ impl Meta {
 pub(super) struct Trail {
     file: File,
     meta: Meta,
+    mmap: MMap,
 }
 
 impl Trail {
-    // pub(super) fn new(cfg: &InternalCfg) -> InternalResult<Self> {
-    //     let logger = Logger::new(cfg.logging_enabled, "TurboFox (TRAIL)");
-    //     let path = cfg.dirpath.join(PATH);
-    //     let file_size = Meta::size() + cfg.page_size;
-
-    //     let file = OpenOptions::new()
-    //         .create(true)
-    //         .read(true)
-    //         .write(true)
-    //         .truncate(true)
-    //         .open(&path)
-    //         .inspect(|_| logger.trace("New Trail created"))
-    //         .map_err(|e| {
-    //             logger.error("Unable to create new Trail");
-    //             e
-    //         })?;
-
-    //     file.set_len(cfg.page_size as u64)
-    //         .inspect(|_| logger.debug(format!("Zero Init trail w/ len={}", cfg.page_size)))
-    //         .map_err(|e| {
-    //             logger.error("Unabele to set length for new Trail");
-    //             Self::_delete_file(&path, &logger);
-    //             e
-    //         })?;
-
-    //     let fd = file.as_raw_fd();
-    //     let mmap_ptr = unsafe { Self::mmap_file(fd, cfg.page_size, &logger) }?;
-
-    //     let meta = Meta::new();
-    //     let bmap = BitMap::new(meta.nbits as usize, vec![mmap_ptr]);
-
-    //     let res = unsafe {
-    //         let meta_ptr = mmap_ptr as *mut Meta;
-    //         std::ptr::write(meta_ptr, meta);
-    //         libc::msync(meta_ptr.cast(), Meta::size(), libc::MS_SYNC)
-    //     };
-
-    //     if res < 0 {
-    //         let err = std::io::Error::last_os_error();
-    //         logger.error("Unable to set Meta for new Trail");
-    //         Self::_delete_file(&path, &logger);
-    //         return Err(err.into());
-    //     }
-
-    //     Ok(Self {
-    //         meta,
-    //         file,
-    //         bmap,
-    //         logger,
-    //         mmap_ptr,
-    //         cfg: cfg.clone(),
-    //         mmap_size: cfg.page_size as u64,
-    //     })
-    // }
-
-    // pub(super) fn open(cfg: &InternalCfg) -> InternalResult<Option<Self>> {
-    //     let logger = Logger::new(cfg.logging_enabled, "TurboFox (TRAIL)");
-    //     let path = cfg.dirpath.join(PATH);
-
-    //     if !path.exists() {
-    //         logger.warn("No existing Trail found.");
-    //         return Ok(None);
-    //     }
-
-    //     let file = OpenOptions::new()
-    //         .read(true)
-    //         .write(true)
-    //         .create(false)
-    //         .truncate(false)
-    //         .open(&path)
-    //         .inspect(|_| logger.trace("Opened existing Trail"))
-    //         .map_err(|e| {
-    //             logger.error("Unable to open existing Trail");
-    //             e
-    //         })?;
-
-    //     let file_len = file
-    //         .metadata()
-    //         .map_err(|e| {
-    //             logger.error("Unable to read metadata of existing Trail");
-    //             e
-    //         })?
-    //         .len();
-
-    //     // validate file len
-    //     if file_len != cfg.page_size as u64 {
-    //         logger.error(format!("Trail is invalid and has len={}", file_len));
-    //         return Ok(None);
-    //     }
-
-    //     let fd = file.as_raw_fd();
-    //     let mmap_ptr = unsafe { Self::mmap_file(fd, file_len as usize, &logger) }?;
-    //     let meta = unsafe { *(mmap_ptr as *const Meta) };
-
-    //     if meta.magic != MAGIC || meta.version != VERSION {
-    //         logger.error("Invalid Trail Meta header");
-    //         return Ok(None);
-    //     }
-
-    //     let bmap = BitMap::new(cfg.init_cap as usize, vec![mmap_ptr]);
-
-    //     logger.info(format!("Opened Trail w/ \n{:?} \n{:?}", meta, bmap));
-
-    //     Ok(Some(Self {
-    //         meta,
-    //         file,
-    //         bmap,
-    //         logger,
-    //         mmap_ptr,
-    //         cfg: cfg.clone(),
-    //         mmap_size: file_len,
-    //     }))
-    // }
-
-    /// delete created file, so reopen could work
-    fn _delete_file(path: &PathBuf, logger: &Logger) {
-        match std::fs::remove_file(&path) {
-            Ok(_) => logger.warn("Deleted new Trail, due to err: {e}"),
-            Err(err) => logger.error(format!("Unable to delete new Trail, due to err: {err}")),
-        }
-    }
-
     #[allow(unsafe_op_in_unsafe_fn)]
-    unsafe fn mmap_file(fd: i32, len: usize, logger: &Logger) -> InternalResult<*mut libc::c_void> {
-        // NOTE: Kernel treats `nbytes = 0` as "until EOF", which is what exactly we want!
-        let res = libc::sync_file_range(
-            fd,
-            0,
-            0,
-            libc::SYNC_FILE_RANGE_WAIT_BEFORE | libc::SYNC_FILE_RANGE_WAIT_AFTER,
-        );
+    pub(super) unsafe fn new(cfg: &InternalCfg) -> InternalResult<Self> {
+        let path = cfg.dirpath.join(PATH);
 
-        if res < 0 {
-            let err = std::io::Error::last_os_error();
-            logger.error("Unable to perform data sync on Trail");
-            return Err(err.into());
-        }
+        // file FD
+        let file = File::new(&path)
+            .inspect(|_| cfg.logger.trace("(TRAIL) Created new file"))
+            .map_err(|e| {
+                cfg.logger
+                    .error(format!("(TRAIL) Failed to open file({:?}): {e}", path));
+                e
+            })?;
 
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        );
+        // zero init the file
+        file.zero_extend(INIT_FILE_LEN)
+            .inspect(|_| cfg.logger.trace("(TRAIL) Zero-Extended new file"))
+            .map_err(|e| {
+                cfg.logger
+                    .error(format!("(TRAIL) Failed to zero extend new file({:?}): {e}", path));
+                e
+            })?;
 
-        if ptr == libc::MAP_FAILED {
-            let err = std::io::Error::last_os_error();
-            logger.error(format!("Unable to mmap Trail due to err: {err}"));
-            return Err(err.into());
-        }
+        let mmap = MMap::new(file.0, INIT_FILE_LEN)
+            .inspect(|_| {
+                cfg.logger
+                    .trace(format!("(TRAIL) Mmaped newly created file w/ len={INIT_FILE_LEN}"))
+            })
+            .map_err(|e| {
+                cfg.logger
+                    .error(format!("(TRAIL) Failed to mmap the file({:?}): {e}", path));
+                e
+            })?;
 
-        logger.trace(format!("Mmaped Trace w/ len={len} for fd={fd}"));
+        let meta = Meta::new(INIT_OS_PAGES);
 
-        Ok(ptr)
+        let meta_ptr = mmap.ptr as *mut Meta;
+        std::ptr::write(meta_ptr, meta);
+        mmap.ms_sync().map_err(|e| {
+            cfg.logger
+                .error(format!("(TRAIL) Failed to write Metadata to mmaped file: {e}"));
+            e
+        })?;
+
+        cfg.logger.debug("(TRAIL) Created a new file");
+
+        Ok(Self { file, meta, mmap })
     }
-}
 
-impl Drop for Trail {
-    fn drop(&mut self) {
-        // unsafe {
-        //     // unmap mmaped buffer
-        //     let res = libc::munmap(self.mmap_ptr, self.cfg.page_size);
+    /// Open an existing [Trail] file
+    ///
+    /// *NOTE*: Returns an [InvalidFile] error when the underlying file is corrupted,
+    /// may happen when the file is invalid or tampered with
+    #[allow(unsafe_op_in_unsafe_fn)]
+    pub(super) unsafe fn open(cfg: &InternalCfg) -> InternalResult<Self> {
+        let path = cfg.dirpath.join(PATH);
 
-        //     if res != 0 {
-        //         let err = std::io::Error::last_os_error();
-        //         self.logger
-        //             .warn(format!("Unable to unmap the buffer due to, res={res} & err={err}"));
-        //     } else {
-        //         self.logger.trace("Unmaped the mapped Trail buffer");
-        //     }
-        // }
+        // file must exists
+        if !path.exists() {
+            let err = InternalError::InvalidFile("File does not exists".into());
+            cfg.logger.error(format!("(TRAIL) File does not exsits: {err}"));
+
+            return Err(err);
+        }
+
+        // file FD
+        let file = File::open(&path)
+            .inspect(|_| cfg.logger.trace("(TRAIL) Opened existing file"))
+            .map_err(|e| {
+                cfg.logger.error(format!("(TRAIL) Failed to open existing file: {e}"));
+                e
+            })?;
+
+        // existing file len
+        let file_len = file
+            .fstat()
+            .inspect(|s| cfg.logger.trace(format!("(TRAIL) Existing file has len={}", s.st_size)))
+            .map_err(|e| {
+                cfg.logger.error(format!("(TRAIL) FStat failed for existing file: {e}"));
+                e
+            })?
+            .st_size as usize;
+
+        // file_len validation (must be page aligned)
+        if file_len.wrapping_sub(META_SIZE) == 0 || file_len.wrapping_sub(META_SIZE) % OS_PAGE_SIZE != 0 {
+            let err = InternalError::InvalidFile("File is not page aligned".into());
+            cfg.logger.error(format!("(TRAIL) Existing file is invalid: {err}"));
+
+            return Err(err);
+        }
+
+        let mmap = MMap::new(file.0, file_len)
+            .inspect(|_| cfg.logger.trace("(TRAIL) Created mmap for existing file"))
+            .map_err(|e| {
+                cfg.logger
+                    .error(format!("(TRAIL) Failed to create mmap for existing file: {e}"));
+                e
+            })?;
+
+        let meta = *(mmap.ptr as *mut Meta);
+
+        // metadata validations
+        if meta.magic != MAGIC || meta.version != VERSION {
+            let err = InternalError::InvalidFile("Invalid metadata, file is outdated!".into());
+            cfg.logger
+                .error(format!("(TRAIL) Existing file has invalid metadata: {err}"));
+
+            return Err(err);
+        }
+
+        Ok(Self { file, meta, mmap })
     }
 }
 

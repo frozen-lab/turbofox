@@ -37,13 +37,17 @@ impl<'p> InternalCfg<'p> {
     }
 
     #[inline]
-    pub(crate) fn init_cap(mut self, cap: usize) -> Self {
+    pub(crate) fn cap(mut self, cap: usize) -> Self {
         self.init_cap = cap;
         self
     }
 
     #[inline]
-    pub(crate) fn page_size(mut self, size: usize) -> Self {
+    pub(crate) fn page(mut self, size: usize) -> Self {
+        // sanity checks
+        assert!(size >= 128, "Buffer Size must be equal to or greater then 128 bytes");
+        assert!((size & (size - 1)) == 0, "Buffer Size value must be power of 2");
+
         self.page_size = size;
         self
     }
@@ -78,7 +82,7 @@ mod tests {
         fn test_chained_builder_updates() {
             let dir = TempDir::new().expect("Tempdir");
             let path = dir.path();
-            let cfg = InternalCfg::new(path).log(true).init_cap(512).page_size(4096);
+            let cfg = InternalCfg::new(path).log(true).cap(512).page(4096);
 
             assert!(cfg.logger.enabled);
             assert_eq!(cfg.init_cap, 512);

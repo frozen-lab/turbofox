@@ -5,6 +5,7 @@ use libc::{
 };
 use std::{ffi::CString, os::unix::ffi::OsStrExt, path::Path};
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct File(pub(crate) i32);
 
 impl File {
@@ -13,7 +14,6 @@ impl File {
     pub(crate) unsafe fn new(path: &Path) -> InternalResult<Self> {
         let fd = open(
             Self::get_ffi_valid_path(path)?,
-            // read, write, create & truncate
             O_RDWR | O_CREAT | O_TRUNC | O_NOATIME | O_CLOEXEC,
             // file permission mode (used for O_CREATE)
             0o644,
@@ -42,9 +42,8 @@ impl File {
     #[inline(always)]
     pub(crate) unsafe fn fstat(&self) -> InternalResult<stat> {
         let mut stat = std::mem::zeroed::<stat>();
-        let res = fstat(self.0, &mut stat);
 
-        if res != 0 {
+        if fstat(self.0, &mut stat) != 0 {
             return Err(Self::_last_os_error());
         }
 
@@ -54,9 +53,7 @@ impl File {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(crate) unsafe fn fsync(&self) -> InternalResult<()> {
-        let res = fsync(self.0);
-
-        if res != 0 {
+        if fsync(self.0) != 0 {
             return Err(Self::_last_os_error());
         }
 
@@ -66,25 +63,29 @@ impl File {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(crate) unsafe fn zero_extend(&self, new_len: usize) -> InternalResult<()> {
-        let res = ftruncate(self.0, new_len as off_t);
-
-        if res != 0 {
+        if ftruncate(self.0, new_len as off_t) != 0 {
             return Err(Self::_last_os_error());
         }
 
         Ok(())
     }
 
+    /// Close the file descriptor (i.e. File Handle)
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(crate) unsafe fn close(&self) -> InternalResult<()> {
-        let res = close(self.0);
-
-        if res != 0 {
+        if close(self.0) != 0 {
             return Err(Self::_last_os_error());
         }
 
         Ok(())
+    }
+
+    /// Delete the file from file system
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    pub(crate) unsafe fn del(&self, path: &Path) -> InternalResult<()> {
+        std::fs::remove_file(path).map_err(|e| e.into())
     }
 
     #[inline]
