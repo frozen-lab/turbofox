@@ -49,17 +49,19 @@ const _: () = assert!(META_SIZE % 8 == 0, "Must be 8 bytes aligned");
 
 impl Meta {
     #[inline(always)]
-    const fn new(n: usize) -> Self {
+    const fn new() -> Self {
+        const N: u32 = INIT_OS_PAGES as u32 / 2;
+
         // sanity check
-        debug_assert!(n > 0, "N must not be zero");
+        debug_assert!(N > 0, "N must not be zero");
 
         Self {
             magic: MAGIC,
             version: VERSION,
-            nbitpages: n as u32,
-            naddarrpages: n as u32,
-            bitptr: 0u64,
-            adjptr: 064,
+            nbitpages: N,
+            naddarrpages: N,
+            bitptr: 0u64, // at first idx
+            adjptr: 1u64, // at second idx
         }
     }
 }
@@ -69,6 +71,7 @@ pub(super) struct Trail {
     file: File,
     meta: Meta,
     mmap: MMap,
+    cfg: InternalCfg,
 }
 
 impl Trail {
@@ -105,7 +108,7 @@ impl Trail {
                 e
             })?;
 
-        let meta = Meta::new(INIT_OS_PAGES);
+        let meta = Meta::new();
 
         let meta_ptr = mmap.ptr as *mut Meta;
         std::ptr::write(meta_ptr, meta);
@@ -117,7 +120,12 @@ impl Trail {
 
         cfg.logger.debug("(TRAIL) Created a new file");
 
-        Ok(Self { file, meta, mmap })
+        Ok(Self {
+            file,
+            meta,
+            mmap,
+            cfg: cfg.clone(),
+        })
     }
 
     /// Open an existing [Trail] file
@@ -181,65 +189,98 @@ impl Trail {
             return Err(err);
         }
 
-        Ok(Self { file, meta, mmap })
+        cfg.logger.debug("(TRAIL) Opened an existing file");
+
+        Ok(Self {
+            file,
+            meta,
+            mmap,
+            cfg: cfg.clone(),
+        })
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::logger::init_test_logger;
-//     use tempfile::TempDir;
+impl Drop for Trail {
+    fn drop(&mut self) {
+        unsafe {
+            // munmap the memory mappings
+            self.mmap
+                .unmap()
+                .inspect(|_| {
+                    self.cfg.logger.trace("(TRAIL) Unmapped the mmap");
+                })
+                .map_err(|e| {
+                    self.cfg.logger.warn("(TRAIL) Failed to unmap the mmap");
+                });
 
-//     fn temp_dir() -> TempDir {
-//         let _ = init_test_logger(None);
-//         TempDir::new().expect("temp dir")
-//     }
+            // close the file descriptor
+            self.file
+                .close()
+                .inspect(|_| {
+                    self.cfg.logger.trace("(TRAIL) Closed the file fd");
+                })
+                .map_err(|e| {
+                    self.cfg.logger.warn("(TRAIL) Failed to close the file fd");
+                });
+        }
+    }
+}
 
-//     mod trail {
-//         use super::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logger::init_test_logger;
+    use tempfile::TempDir;
 
-//         #[test]
-//         fn test_new_and_open() {
-//             let tmp = temp_dir();
-//             let dir = tmp.path().to_path_buf();
-//             let cfg = InternalCfg::new(dir);
+    fn temp_dir() -> TempDir {
+        let _ = init_test_logger(None);
+        TempDir::new().expect("temp dir")
+    }
 
-//             let t1 = Trail::open(&cfg).expect("Open existing");
-//             assert!(t1.is_none());
+    mod trail {
+        use libc::MAP_FAILED;
 
-//             let t2 = Trail::new(&cfg).expect("Create New");
+        use super::*;
 
-//             // validate file len
-//             let file_len = t2.file.metadata().expect("Meta").len();
-//             assert_eq!(file_len, cfg.page_size as u64);
+        #[test]
+        fn test_new_is_valid() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
 
-//             // validate mmap
-//             assert!(t2.mmap_ptr != std::ptr::null_mut());
-//             assert_eq!(t2.mmap_size, cfg.page_size as u64);
+            let t1 = unsafe { Trail::new(&cfg) }.expect("new trail");
 
-//             // validate mmap init
-//             assert_eq!(t2.meta.magic, MAGIC);
-//             assert_eq!(t2.meta.version, VERSION);
-//             assert_eq!(t2.meta.nbits, t2.bmap.nbits as u32);
-//             assert_eq!(t2.meta.nadjarr, t2.cfg.init_cap as u32);
+            assert!(t1.file.0 >= 0, "File fd must be valid");
+            assert!(t1.mmap.len > 0, "Mmap must be non zero");
+            assert_eq!(t1.meta.magic, MAGIC, "Correct file MAGIC");
+            assert_eq!(t1.meta.version, VERSION, "Correct file VERSION");
+            assert_eq!(t1.meta.nbitpages, INIT_OS_PAGES as u32 / 2);
+            assert_eq!(t1.meta.naddarrpages, INIT_OS_PAGES as u32 / 2);
+            assert_eq!(t1.meta.bitptr, 0x00, "Correct ptr for Bits");
+            assert_eq!(t1.meta.adjptr, 0x01, "Correct ptr for adjarr");
+        }
 
-//             // NOTE: close the opened Trail instance
-//             drop(t2);
+        #[test]
+        fn test_open_is_valid() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
 
-//             // validate reopen
-//             let t3 = Trail::open(&cfg).expect("Open Existing");
-//             assert!(t3.is_some());
+            {
+                let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
+                drop(t0);
+            }
 
-//             let t4 = t3.unwrap();
+            let t1 = unsafe { Trail::open(&cfg) }.expect("open existing");
 
-//             // validate mmap on reopen
-//             assert_eq!(t4.meta.magic, MAGIC);
-//             assert_eq!(t4.meta.version, VERSION);
-//             assert_eq!(t4.meta.nbits, t4.bmap.nbits as u32);
-//             assert_eq!(t4.meta.nadjarr, t4.cfg.init_cap as u32);
-
-//             drop(t4);
-//         }
-//     }
-// }
+            assert!(t1.file.0 >= 0, "File fd must be valid");
+            assert!(t1.mmap.len > 0, "Mmap must be non zero");
+            assert_eq!(t1.meta.magic, MAGIC, "Correct file MAGIC");
+            assert_eq!(t1.meta.version, VERSION, "Correct file VERSION");
+            assert_eq!(t1.meta.nbitpages, INIT_OS_PAGES as u32 / 2);
+            assert_eq!(t1.meta.naddarrpages, INIT_OS_PAGES as u32 / 2);
+            assert_eq!(t1.meta.bitptr, 0x00, "Correct ptr for Bits");
+            assert_eq!(t1.meta.adjptr, 0x01, "Correct ptr for adjarr");
+        }
+    }
+}

@@ -8,17 +8,17 @@ mod logger;
 #[derive(Debug, Clone, Copy)]
 pub struct TurboFox;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct InternalCfg<'p> {
+#[derive(Debug, Clone)]
+pub(crate) struct InternalCfg {
     pub(crate) init_cap: usize,
     pub(crate) page_size: usize,
-    pub(crate) dirpath: &'p std::path::Path,
+    pub(crate) dirpath: std::path::PathBuf,
     pub(crate) logger: crate::logger::Logger,
 }
 
-impl<'p> InternalCfg<'p> {
+impl InternalCfg {
     #[inline]
-    pub(crate) fn new(dirpath: &'p std::path::Path) -> Self {
+    pub(crate) fn new(dirpath: std::path::PathBuf) -> Self {
         Self {
             dirpath: dirpath,
             init_cap: crate::burrow::DEFAULT_CAP,
@@ -51,6 +51,13 @@ impl<'p> InternalCfg<'p> {
         self.page_size = size;
         self
     }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn log_target(mut self, target: &'static str) -> Self {
+        self.logger.target = target;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -68,8 +75,8 @@ mod tests {
         #[test]
         fn test_builder_pattern_and_default_values() {
             let dir = TempDir::new().expect("Tempdir");
-            let path = dir.path();
-            let cfg = InternalCfg::new(path);
+            let path = dir.path().to_path_buf();
+            let cfg = InternalCfg::new(path.clone());
 
             assert_eq!(cfg.dirpath, path);
             assert_eq!(cfg.init_cap, DEFAULT_CAP);
@@ -81,8 +88,8 @@ mod tests {
         #[test]
         fn test_chained_builder_updates() {
             let dir = TempDir::new().expect("Tempdir");
-            let path = dir.path();
-            let cfg = InternalCfg::new(path).log(true).cap(512).page(4096);
+            let path = dir.path().to_path_buf();
+            let cfg = InternalCfg::new(path.clone()).log(true).cap(512).page(4096);
 
             assert!(cfg.logger.enabled);
             assert_eq!(cfg.init_cap, 512);

@@ -12,14 +12,16 @@ impl File {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(crate) unsafe fn new(path: &Path) -> InternalResult<Self> {
+        let cpath = Self::get_ffi_valid_path(path)?;
         let fd = open(
-            Self::get_ffi_valid_path(path)?,
+            cpath.as_ptr(),
             O_RDWR | O_CREAT | O_TRUNC | O_NOATIME | O_CLOEXEC,
             // file permission mode (used for O_CREATE)
             0o644,
         );
 
         if fd < 0 {
+            eprintln!("ERROR FD: {fd}");
             return Err(Self::_last_os_error());
         }
 
@@ -29,7 +31,8 @@ impl File {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(crate) unsafe fn open(path: &Path) -> InternalResult<Self> {
-        let fd = open(Self::get_ffi_valid_path(path)?, O_RDWR | O_NOATIME | O_CLOEXEC);
+        let cpath = Self::get_ffi_valid_path(path)?;
+        let fd = open(cpath.as_ptr(), O_RDWR | O_NOATIME | O_CLOEXEC);
 
         if fd < 0 {
             return Err(Self::_last_os_error());
@@ -89,19 +92,8 @@ impl File {
     }
 
     #[inline]
-    fn get_ffi_valid_path(path: &Path) -> InternalResult<*const i8> {
-        let path = CString::new(path.as_os_str().as_bytes());
-
-        // sanity check
-        debug_assert!(path.is_ok());
-
-        // NOTE: This can only occur when the static path is invalid!
-        // This error is also protected by the above sanity check
-        if path.is_err() {
-            return Err(InternalError::Misc("Invalid file path".into()));
-        }
-
-        Ok(path.unwrap().as_ptr())
+    fn get_ffi_valid_path(path: &Path) -> InternalResult<CString> {
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| InternalError::Misc("Invalid file path".into()))
     }
 
     #[inline]
