@@ -13,9 +13,11 @@ const PATH: &'static str = "trail";
 const RESERVED_SPACE_PER_PAGE: usize = 8;
 const BITES_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE) * 8;
 
-const ADJ_ARR_IDX_SIZE: usize = 8;
+const ADJ_ARR_IDX_SIZE: usize = 64;
+const ADJ_ARR_IDX_PADD: usize = 2;
 const ITEMS_PER_ADJ_ARR: usize = 8;
-const ADJ_ARR_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE - ADJ_ARR_IDX_SIZE) / ITEMS_PER_ADJ_ARR;
+const ADJ_ARR_PADD: usize = 56;
+const ADJ_ARR_PER_PAGE: usize = 496;
 
 const INIT_OS_PAGES: usize = 2; // Bits + AdjArr
 const INIT_FILE_LEN: usize = META_SIZE + (OS_PAGE_SIZE * INIT_OS_PAGES); // Meta + OS Pages
@@ -26,8 +28,17 @@ const _: () = assert!(BITES_PER_PAGE % 64 == 0, "Must be 8 bytes aligned");
 const _: () = assert!(RESERVED_SPACE_PER_PAGE % 8 == 0, "Must be 8 bytes aligned");
 const _: () = assert!(std::mem::size_of_val(&MAGIC) == 4, "Must be 4 bytes aligned");
 const _: () = assert!(std::mem::size_of_val(&VERSION) == 4, "Must be 4 bytes aligned");
+const _: () = assert!(INIT_OS_PAGES >= 2, "Must be enough pages for Bits and AdjArr");
 const _: () = assert!(
-    ADJ_ARR_PER_PAGE * ITEMS_PER_ADJ_ARR == OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE - ADJ_ARR_IDX_SIZE,
+    (ADJ_ARR_IDX_SIZE - ADJ_ARR_IDX_PADD) * 8 == ADJ_ARR_PER_PAGE,
+    "Index must be large enough"
+);
+const _: () = assert!(
+    OS_PAGE_SIZE == RESERVED_SPACE_PER_PAGE + (BITES_PER_PAGE / 8),
+    "BitMap constants should be valid"
+);
+const _: () = assert!(
+    OS_PAGE_SIZE == RESERVED_SPACE_PER_PAGE + ADJ_ARR_IDX_SIZE + ADJ_ARR_PADD + (ITEMS_PER_ADJ_ARR * ADJ_ARR_PER_PAGE),
     "Adjcent Array Constants should be valid"
 );
 
@@ -36,10 +47,9 @@ const _: () = assert!(
 struct Meta {
     magic: [u8; 4],
     version: u32,
-    nbitpages: u32,
-    naddarrpages: u32,
+    npages: u64,
     bitptr: u64,
-    adjptr: u64,
+    adjarrptr: u64,
 }
 
 const META_SIZE: usize = std::mem::size_of::<Meta>();
@@ -50,18 +60,12 @@ const _: () = assert!(META_SIZE % 8 == 0, "Must be 8 bytes aligned");
 impl Meta {
     #[inline(always)]
     const fn new() -> Self {
-        const N: u32 = INIT_OS_PAGES as u32 / 2;
-
-        // sanity check
-        debug_assert!(N > 0, "N must not be zero");
-
         Self {
             magic: MAGIC,
             version: VERSION,
-            nbitpages: N,
-            naddarrpages: N,
-            bitptr: 0u64, // at first idx
-            adjptr: 1u64, // at second idx
+            npages: INIT_OS_PAGES as u64,
+            bitptr: 0u64,    // at first idx
+            adjarrptr: 1u64, // at second idx
         }
     }
 }
@@ -69,8 +73,10 @@ impl Meta {
 #[derive(Debug)]
 pub(super) struct Trail {
     file: File,
-    meta: Meta,
     mmap: MMap,
+    meta_ptr: *mut Meta,
+    bitmap_ptr: *mut BitMap,
+    adjarr_ptr: *mut AdjArr,
     cfg: InternalCfg,
 }
 
@@ -108,22 +114,32 @@ impl Trail {
                 e
             })?;
 
-        let meta = Meta::new();
-
-        let meta_ptr = mmap.ptr as *mut Meta;
-        std::ptr::write(meta_ptr, meta);
+        // metadata init & sync
+        //
+        // NOTE: we use `ms_sync` here to make sure metadata is persisted before
+        // any other updates are conducted on the mmap,
+        //
+        // NOTE: we can afford this syscall here, as init does not come under the fast
+        // path, and its just one time thing!
+        mmap.write(0, &Meta::new());
         mmap.ms_sync().map_err(|e| {
             cfg.logger
                 .error(format!("(TRAIL) Failed to write Metadata to mmaped file: {e}"));
             e
         })?;
 
+        let meta_ptr = mmap.read_mut::<Meta>(0);
+        let bitmap_ptr = mmap.read_mut::<BitMap>(META_SIZE);
+        let adjarr_ptr = mmap.read_mut::<AdjArr>(META_SIZE + OS_PAGE_SIZE);
+
         cfg.logger.debug("(TRAIL) Created a new file");
 
         Ok(Self {
             file,
-            meta,
             mmap,
+            meta_ptr,
+            bitmap_ptr,
+            adjarr_ptr,
             cfg: cfg.clone(),
         })
     }
@@ -140,7 +156,6 @@ impl Trail {
         if !path.exists() {
             let err = InternalError::InvalidFile("File does not exists".into());
             cfg.logger.error(format!("(TRAIL) File does not exsits: {err}"));
-
             return Err(err);
         }
 
@@ -178,10 +193,10 @@ impl Trail {
                 e
             })?;
 
-        let meta = *(mmap.ptr as *mut Meta);
+        let meta_ptr = mmap.ptr_mut() as *mut Meta;
 
         // metadata validations
-        if meta.magic != MAGIC || meta.version != VERSION {
+        if (*meta_ptr).magic != MAGIC || (*meta_ptr).version != VERSION {
             let err = InternalError::InvalidFile("Invalid metadata, file is outdated!".into());
             cfg.logger
                 .error(format!("(TRAIL) Existing file has invalid metadata: {err}"));
@@ -189,20 +204,56 @@ impl Trail {
             return Err(err);
         }
 
+        let bmap_idx = (*meta_ptr).bitptr;
+        let adjarr_idx = (*meta_ptr).adjarrptr;
+
+        // sanity checks
+        debug_assert!((*meta_ptr).npages < bmap_idx, "BitMap index is out of bounds");
+        debug_assert!((*meta_ptr).npages < adjarr_idx, "AdjcentArray index is out of bounds");
+
+        let bitmap_ptr = mmap.read_mut::<BitMap>(META_SIZE + (bmap_idx as usize * OS_PAGE_SIZE));
+        let adjarr_ptr = mmap.read_mut::<AdjArr>(META_SIZE + (adjarr_idx as usize * OS_PAGE_SIZE));
+
         cfg.logger.debug("(TRAIL) Opened an existing file");
 
         Ok(Self {
             file,
-            meta,
             mmap,
+            meta_ptr,
+            bitmap_ptr,
+            adjarr_ptr,
             cfg: cfg.clone(),
         })
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C, align(8))]
+struct BitMap {
+    bits: [u64; BITES_PER_PAGE / 64],
+    next: u64,
+}
+
+// sanity check
+const _: () = assert!(std::mem::size_of::<BitMap>() == OS_PAGE_SIZE);
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct AdjArr {
+    idx: [u8; ADJ_ARR_IDX_SIZE],
+    arr: [u64; ADJ_ARR_PER_PAGE],
+    padd: [u8; ADJ_ARR_PADD],
+    next: u64,
+}
+
+// sanity check
+const _: () = assert!(std::mem::size_of::<AdjArr>() == OS_PAGE_SIZE);
+
 impl Drop for Trail {
     fn drop(&mut self) {
         unsafe {
+            let mut is_err = false;
+
             // munmap the memory mappings
             self.mmap
                 .unmap()
@@ -210,6 +261,7 @@ impl Drop for Trail {
                     self.cfg.logger.trace("(TRAIL) Unmapped the mmap");
                 })
                 .map_err(|e| {
+                    is_err = true;
                     self.cfg.logger.warn("(TRAIL) Failed to unmap the mmap");
                 });
 
@@ -220,8 +272,13 @@ impl Drop for Trail {
                     self.cfg.logger.trace("(TRAIL) Closed the file fd");
                 })
                 .map_err(|e| {
+                    is_err = true;
                     self.cfg.logger.warn("(TRAIL) Failed to close the file fd");
                 });
+
+            if !is_err {
+                self.cfg.logger.debug("(TRAIL) Dropped Successfully!");
+            }
         }
     }
 }
@@ -238,8 +295,6 @@ mod tests {
     }
 
     mod trail {
-        use libc::MAP_FAILED;
-
         use super::*;
 
         #[test]
@@ -250,14 +305,15 @@ mod tests {
 
             let t1 = unsafe { Trail::new(&cfg) }.expect("new trail");
 
-            assert!(t1.file.0 >= 0, "File fd must be valid");
-            assert!(t1.mmap.len > 0, "Mmap must be non zero");
-            assert_eq!(t1.meta.magic, MAGIC, "Correct file MAGIC");
-            assert_eq!(t1.meta.version, VERSION, "Correct file VERSION");
-            assert_eq!(t1.meta.nbitpages, INIT_OS_PAGES as u32 / 2);
-            assert_eq!(t1.meta.naddarrpages, INIT_OS_PAGES as u32 / 2);
-            assert_eq!(t1.meta.bitptr, 0x00, "Correct ptr for Bits");
-            assert_eq!(t1.meta.adjptr, 0x01, "Correct ptr for adjarr");
+            unsafe {
+                assert!(t1.file.0 >= 0, "File fd must be valid");
+                assert!(t1.mmap.len() > 0, "Mmap must be non zero");
+                assert_eq!((*t1.meta_ptr).magic, MAGIC, "Correct file MAGIC");
+                assert_eq!((*t1.meta_ptr).version, VERSION, "Correct file VERSION");
+                assert_eq!((*t1.meta_ptr).npages, INIT_OS_PAGES as u64, "Correct noOf pages");
+                assert_eq!((*t1.meta_ptr).bitptr, 0x00, "Correct ptr for Bits");
+                assert_eq!((*t1.meta_ptr).adjarrptr, 0x01, "Correct ptr for adjarr");
+            }
         }
 
         #[test]
@@ -273,14 +329,15 @@ mod tests {
 
             let t1 = unsafe { Trail::open(&cfg) }.expect("open existing");
 
-            assert!(t1.file.0 >= 0, "File fd must be valid");
-            assert!(t1.mmap.len > 0, "Mmap must be non zero");
-            assert_eq!(t1.meta.magic, MAGIC, "Correct file MAGIC");
-            assert_eq!(t1.meta.version, VERSION, "Correct file VERSION");
-            assert_eq!(t1.meta.nbitpages, INIT_OS_PAGES as u32 / 2);
-            assert_eq!(t1.meta.naddarrpages, INIT_OS_PAGES as u32 / 2);
-            assert_eq!(t1.meta.bitptr, 0x00, "Correct ptr for Bits");
-            assert_eq!(t1.meta.adjptr, 0x01, "Correct ptr for adjarr");
+            unsafe {
+                assert!(t1.file.0 >= 0, "File fd must be valid");
+                assert!(t1.mmap.len() > 0, "Mmap must be non zero");
+                assert_eq!((*t1.meta_ptr).magic, MAGIC, "Correct file MAGIC");
+                assert_eq!((*t1.meta_ptr).version, VERSION, "Correct file VERSION");
+                assert_eq!((*t1.meta_ptr).npages, INIT_OS_PAGES as u64, "Correct noOf pages");
+                assert_eq!((*t1.meta_ptr).bitptr, 0x00, "Correct ptr for Bits");
+                assert_eq!((*t1.meta_ptr).adjarrptr, 0x01, "Correct ptr for adjarr");
+            }
         }
     }
 }

@@ -1,10 +1,12 @@
+use std::collections::linked_list;
+
 use crate::errors::{InternalError, InternalResult};
 use libc::{c_void, mmap, msync, munmap, stat, MAP_FAILED, MAP_SHARED, MS_ASYNC, MS_SYNC, PROT_READ, PROT_WRITE};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MMap {
-    pub(crate) ptr: *mut c_void,
-    pub(crate) len: usize,
+    ptr: *mut c_void,
+    len: usize,
 }
 
 impl MMap {
@@ -53,6 +55,59 @@ impl MMap {
         }
 
         Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    pub(crate) unsafe fn write<T: Copy>(&self, off: usize, val: &T) {
+        // sanity check
+        debug_assert!(
+            off + std::mem::size_of::<T>() <= self.len,
+            "Offset must not exceed mmap size"
+        );
+
+        let dst = (self.ptr as *mut u8).add(off) as *mut T;
+        std::ptr::write(dst, *val);
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    pub(crate) unsafe fn read<T: Copy>(&self, off: usize) -> T {
+        // sanity check
+        debug_assert!(
+            off + std::mem::size_of::<T>() <= self.len,
+            "Offset must not exceed mmap size"
+        );
+
+        let src = (self.ptr as *const u8).add(off) as *const T;
+        std::ptr::read(src)
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    pub(crate) unsafe fn read_mut<T>(&self, off: usize) -> *mut T {
+        // sanity check
+        debug_assert!(
+            off + std::mem::size_of::<T>() <= self.len,
+            "Offset must not exceed mmap size"
+        );
+
+        (self.ptr as *mut u8).add(off) as *mut T
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline(always)]
+    pub(crate) fn ptr(&self) -> *const u8 {
+        self.ptr as *const u8
+    }
+
+    #[inline(always)]
+    pub(crate) fn ptr_mut(&self) -> *mut u8 {
+        self.ptr as *mut u8
     }
 
     #[inline]
