@@ -13,11 +13,12 @@ const PATH: &'static str = "trail";
 const RESERVED_SPACE_PER_PAGE: usize = 8;
 const BITES_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE) * 8;
 
-const ADJ_ARR_IDX_SIZE: usize = 64;
-const ADJ_ARR_IDX_PADD: usize = 2;
-const ITEMS_PER_ADJ_ARR: usize = 8;
-const ADJ_ARR_PADD: usize = 56;
-const ADJ_ARR_PER_PAGE: usize = 496;
+const ADJ_ARR_INDEX_SIZE: usize = 16; // 16*8 => 128 entries (127 actual)
+const ADJ_ARR_INDEX_PADDING: usize = 1;
+const ENTRIES_PER_ADJ_ARR: usize = 4;
+const ADJ_ARR_PADDING: usize = 8;
+const ADJ_ARR_PER_PAGE: usize =
+    (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE - ADJ_ARR_PADDING - ADJ_ARR_INDEX_SIZE) / (ENTRIES_PER_ADJ_ARR * 8);
 
 const INIT_OS_PAGES: usize = 2; // Bits + AdjArr
 const INIT_FILE_LEN: usize = META_SIZE + (OS_PAGE_SIZE * INIT_OS_PAGES); // Meta + OS Pages
@@ -29,17 +30,19 @@ const _: () = assert!(RESERVED_SPACE_PER_PAGE % 8 == 0, "Must be 8 bytes aligned
 const _: () = assert!(std::mem::size_of_val(&MAGIC) == 4, "Must be 4 bytes aligned");
 const _: () = assert!(std::mem::size_of_val(&VERSION) == 4, "Must be 4 bytes aligned");
 const _: () = assert!(INIT_OS_PAGES >= 2, "Must be enough pages for Bits and AdjArr");
+const _: () = assert!(ADJ_ARR_PER_PAGE == 127);
 const _: () = assert!(
-    (ADJ_ARR_IDX_SIZE - ADJ_ARR_IDX_PADD) * 8 == ADJ_ARR_PER_PAGE,
-    "Index must be large enough"
-);
-const _: () = assert!(
-    OS_PAGE_SIZE == RESERVED_SPACE_PER_PAGE + (BITES_PER_PAGE / 8),
+    OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE == (BITES_PER_PAGE / 8),
     "BitMap constants should be valid"
 );
 const _: () = assert!(
-    OS_PAGE_SIZE == RESERVED_SPACE_PER_PAGE + ADJ_ARR_IDX_SIZE + ADJ_ARR_PADD + (ITEMS_PER_ADJ_ARR * ADJ_ARR_PER_PAGE),
-    "Adjcent Array Constants should be valid"
+    ADJ_ARR_INDEX_SIZE * 8 == ADJ_ARR_PER_PAGE + ADJ_ARR_INDEX_PADDING,
+    "AdjArr index should be valid w/ padding"
+);
+const _: () = assert!(
+    OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE
+        == ADJ_ARR_PADDING + ADJ_ARR_INDEX_SIZE + (ADJ_ARR_PER_PAGE * ENTRIES_PER_ADJ_ARR * 8),
+    "AdjArr constants should be valid"
 );
 
 #[derive(Debug, Copy, Clone)]
@@ -74,9 +77,9 @@ impl Meta {
 pub(super) struct Trail {
     file: File,
     mmap: MMap,
+    bmap: BitMap,
+    adjarr: AdjArr,
     meta_ptr: *mut Meta,
-    bitmap_ptr: *mut BitMap,
-    adjarr_ptr: *mut AdjArr,
     cfg: InternalCfg,
 }
 
@@ -129,8 +132,8 @@ impl Trail {
         })?;
 
         let meta_ptr = mmap.read_mut::<Meta>(0);
-        let bitmap_ptr = mmap.read_mut::<BitMap>(META_SIZE);
-        let adjarr_ptr = mmap.read_mut::<AdjArr>(META_SIZE + OS_PAGE_SIZE);
+        let bitmap_ptr = mmap.read_mut::<BitMapRepr>(META_SIZE);
+        let adjarr_ptr = mmap.read_mut::<AdjArrRepr>(META_SIZE + OS_PAGE_SIZE);
 
         cfg.logger.debug("(TRAIL) Created a new file");
 
@@ -138,9 +141,9 @@ impl Trail {
             file,
             mmap,
             meta_ptr,
-            bitmap_ptr,
-            adjarr_ptr,
             cfg: cfg.clone(),
+            bmap: BitMap::new(bitmap_ptr),
+            adjarr: AdjArr::new(adjarr_ptr),
         })
     }
 
@@ -208,11 +211,11 @@ impl Trail {
         let adjarr_idx = (*meta_ptr).adjarrptr;
 
         // sanity checks
-        debug_assert!((*meta_ptr).npages < bmap_idx, "BitMap index is out of bounds");
-        debug_assert!((*meta_ptr).npages < adjarr_idx, "AdjcentArray index is out of bounds");
+        debug_assert!((*meta_ptr).npages > bmap_idx, "BitMap index is out of bounds");
+        debug_assert!((*meta_ptr).npages > adjarr_idx, "AdjcentArray index is out of bounds");
 
-        let bitmap_ptr = mmap.read_mut::<BitMap>(META_SIZE + (bmap_idx as usize * OS_PAGE_SIZE));
-        let adjarr_ptr = mmap.read_mut::<AdjArr>(META_SIZE + (adjarr_idx as usize * OS_PAGE_SIZE));
+        let bitmap_ptr = mmap.read_mut::<BitMapRepr>(META_SIZE + (bmap_idx as usize * OS_PAGE_SIZE));
+        let adjarr_ptr = mmap.read_mut::<AdjArrRepr>(META_SIZE + (adjarr_idx as usize * OS_PAGE_SIZE));
 
         cfg.logger.debug("(TRAIL) Opened an existing file");
 
@@ -220,39 +223,74 @@ impl Trail {
             file,
             mmap,
             meta_ptr,
-            bitmap_ptr,
-            adjarr_ptr,
             cfg: cfg.clone(),
+            bmap: BitMap::new(bitmap_ptr),
+            adjarr: AdjArr::new(adjarr_ptr),
         })
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, align(8))]
-struct BitMap {
+struct BitMapRepr {
     bits: [u64; BITES_PER_PAGE / 64],
     next: u64,
 }
 
 // sanity check
-const _: () = assert!(std::mem::size_of::<BitMap>() == OS_PAGE_SIZE);
+const _: () = assert!(std::mem::size_of::<BitMapRepr>() == OS_PAGE_SIZE);
+
+#[derive(Debug, Clone, Copy)]
+struct BitMap {
+    ptr: *mut BitMapRepr,
+    idx: usize,
+}
+
+impl BitMap {
+    fn new(ptr: *mut BitMapRepr) -> Self {
+        Self { ptr, idx: 0 }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-struct AdjArr {
-    idx: [u8; ADJ_ARR_IDX_SIZE],
-    arr: [u64; ADJ_ARR_PER_PAGE],
-    padd: [u8; ADJ_ARR_PADD],
+struct AdjArrRepr {
+    padd: u64,
+    idx: [u8; ADJ_ARR_INDEX_SIZE],
+    arr: [[u64; ENTRIES_PER_ADJ_ARR]; ADJ_ARR_PER_PAGE],
     next: u64,
 }
 
 // sanity check
-const _: () = assert!(std::mem::size_of::<AdjArr>() == OS_PAGE_SIZE);
+const _: () = assert!(std::mem::size_of::<AdjArrRepr>() == OS_PAGE_SIZE);
+
+#[derive(Debug, Clone, Copy)]
+struct AdjArr {
+    ptr: *mut AdjArrRepr,
+    idx: usize,
+}
+
+impl AdjArr {
+    fn new(ptr: *mut AdjArrRepr) -> Self {
+        Self { ptr, idx: 0 }
+    }
+}
 
 impl Drop for Trail {
     fn drop(&mut self) {
         unsafe {
             let mut is_err = false;
+
+            // flush dirty pages
+            self.mmap
+                .ms_sync()
+                .inspect(|_| {
+                    self.cfg.logger.trace("(TRAIL) Fsync'ed mmap data");
+                })
+                .map_err(|e| {
+                    is_err = true;
+                    self.cfg.logger.warn(format!("(TRAIL) Failed to fsync on mmap: {e}"));
+                });
 
             // munmap the memory mappings
             self.mmap
@@ -262,7 +300,7 @@ impl Drop for Trail {
                 })
                 .map_err(|e| {
                     is_err = true;
-                    self.cfg.logger.warn("(TRAIL) Failed to unmap the mmap");
+                    self.cfg.logger.warn(format!("(TRAIL) Failed to unmap the mmap: {e}"));
                 });
 
             // close the file descriptor
@@ -273,7 +311,9 @@ impl Drop for Trail {
                 })
                 .map_err(|e| {
                     is_err = true;
-                    self.cfg.logger.warn("(TRAIL) Failed to close the file fd");
+                    self.cfg
+                        .logger
+                        .warn(format!("(TRAIL) Failed to close the file fd: {e}"));
                 });
 
             if !is_err {
@@ -313,6 +353,18 @@ mod tests {
                 assert_eq!((*t1.meta_ptr).npages, INIT_OS_PAGES as u64, "Correct noOf pages");
                 assert_eq!((*t1.meta_ptr).bitptr, 0x00, "Correct ptr for Bits");
                 assert_eq!((*t1.meta_ptr).adjarrptr, 0x01, "Correct ptr for adjarr");
+
+                let bmap = &*t1.bmap.ptr;
+                assert!(bmap.bits.iter().all(|&b| b == 0), "BitMap bits zeroed");
+                assert_eq!(bmap.next, 0, "BitMap next ptr zeroed");
+
+                let adjarr = &*t1.adjarr.ptr;
+                assert!(adjarr.idx.iter().all(|&i| i == 0), "AdjArr index zeroed");
+                assert!(
+                    adjarr.arr.iter().all(|a| a.iter().all(|&v| v == 0)),
+                    "AdjArr data zeroed"
+                );
+                assert_eq!(adjarr.next, 0, "AdjArr next ptr zeroed");
             }
         }
 
@@ -324,6 +376,19 @@ mod tests {
 
             {
                 let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
+
+                unsafe {
+                    let bmap = &mut *t0.bmap.ptr;
+                    let adjarr = &mut *t0.adjarr.ptr;
+
+                    bmap.bits[10] = 0xDEADBEEF;
+                    (*bmap).next = 42;
+
+                    adjarr.idx[5] = 7;
+                    adjarr.arr[3][2] = 0xBEEF;
+                    adjarr.next = 99;
+                }
+
                 drop(t0);
             }
 
@@ -337,7 +402,61 @@ mod tests {
                 assert_eq!((*t1.meta_ptr).npages, INIT_OS_PAGES as u64, "Correct noOf pages");
                 assert_eq!((*t1.meta_ptr).bitptr, 0x00, "Correct ptr for Bits");
                 assert_eq!((*t1.meta_ptr).adjarrptr, 0x01, "Correct ptr for adjarr");
+
+                let bmap = &*t1.bmap.ptr;
+                assert_eq!(bmap.bits[10], 0xDEADBEEF, "BitMap persisted bits");
+                assert_eq!(bmap.next, 42, "BitMap next persisted");
+
+                let adjarr = &*t1.adjarr.ptr;
+                assert_eq!(adjarr.idx[5], 7, "AdjArr idx persisted");
+                assert_eq!(adjarr.arr[3][2], 0xBEEF, "AdjArr data persisted");
+                assert_eq!(adjarr.next, 99, "AdjArr next persisted");
             }
+        }
+
+        #[test]
+        fn test_open_panics_on_invalid_file_meta() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
+                let meta = &mut *t0.meta_ptr;
+
+                // corrupted metadata
+                meta.magic = [u8::MAX; 4];
+                meta.version = u32::MAX;
+
+                drop(t0);
+            }
+
+            // should panic
+            unsafe {
+                assert!(Trail::open(&cfg).is_err());
+            }
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic]
+        fn test_open_panics_on_invalid_metadata_in_file() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
+                let meta = &mut *t0.meta_ptr;
+
+                // corrupted metadata
+                meta.npages = 0;
+
+                drop(t0);
+            }
+
+            // should panic
+            unsafe { Trail::open(&cfg) };
         }
     }
 }
