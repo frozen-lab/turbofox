@@ -86,8 +86,8 @@ impl File {
 
     /// Delete the file from file system
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(crate) unsafe fn del(&self, path: &Path) -> InternalResult<()> {
+    #[inline]
+    pub(crate) unsafe fn del(path: &Path) -> InternalResult<()> {
         std::fs::remove_file(path).map_err(|e| e.into())
     }
 

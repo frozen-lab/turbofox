@@ -28,7 +28,7 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn unmap(&self) -> InternalResult<()> {
         if munmap(self.ptr, self.len) != 0 {
             return Err(Self::_last_os_error());
@@ -38,7 +38,7 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn ms_async(&self) -> InternalResult<()> {
         if msync(self.ptr, self.len, MS_ASYNC) != 0 {
             return Err(Self::_last_os_error());
@@ -48,7 +48,7 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn ms_sync(&self) -> InternalResult<()> {
         if msync(self.ptr, self.len, MS_SYNC) != 0 {
             return Err(Self::_last_os_error());
@@ -95,17 +95,17 @@ impl MMap {
         (self.ptr as *mut u8).add(off) as *mut T
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn ptr(&self) -> *const u8 {
         self.ptr as *const u8
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn ptr_mut(&self) -> *mut u8 {
         self.ptr as *mut u8
     }
