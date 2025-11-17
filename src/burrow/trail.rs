@@ -422,8 +422,8 @@ mod tests {
             let t1 = unsafe { Trail::new(cfg) }.expect("new trail");
 
             unsafe {
-                assert!(t1.file.0 >= 0, "File fd must be valid");
-                assert!(t1.mmap.len() > 0, "Mmap must be non zero");
+                assert!(t1.file.0 >= 0x00, "File fd must be valid");
+                assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
                 assert_eq!((*t1.meta_ptr).magic, MAGIC, "Correct file MAGIC");
                 assert_eq!((*t1.meta_ptr).version, VERSION, "Correct file VERSION");
                 assert_eq!(
@@ -435,16 +435,16 @@ mod tests {
                 assert_eq!((*t1.meta_ptr).adjarr_pidx, 0x01, "Correct ptr for adjarr");
 
                 let bmap = &*t1.bitmap.ptr;
-                assert!(bmap.bits.iter().all(|&b| b == 0), "BitMap bits zeroed");
-                assert_eq!(bmap.next, 0, "BitMap next ptr zeroed");
+                assert!(bmap.bits.iter().all(|&b| b == 0x00), "BitMap bits zeroed");
+                assert_eq!(bmap.next, 0x00, "BitMap next ptr zeroed");
 
                 let adjarr = &*t1.adjarr.ptr;
-                assert!(adjarr.idx.iter().all(|&i| i == 0), "AdjArr index zeroed");
+                assert!(adjarr.idx.iter().all(|&i| i == 0x00), "AdjArr index zeroed");
                 assert!(
-                    adjarr.arrays.iter().all(|a| a.iter().all(|&v| v == 0)),
+                    adjarr.arrays.iter().all(|a| a.iter().all(|&v| v == 0x00)),
                     "AdjArr data zeroed"
                 );
-                assert_eq!(adjarr.next, 0, "AdjArr next ptr zeroed");
+                assert_eq!(adjarr.next, 0x00, "AdjArr next ptr zeroed");
             }
         }
 
@@ -461,12 +461,12 @@ mod tests {
                     let bmap = &mut *t0.bitmap.ptr;
                     let adjarr = &mut *t0.adjarr.ptr;
 
-                    bmap.bits[10] = 0xDEADBEEF;
-                    (*bmap).next = 42;
+                    bmap.bits[0xA] = 0xDEADBEEF;
+                    (*bmap).next = 0x2A;
 
-                    adjarr.idx[5] = 7;
-                    adjarr.arrays[3][2] = 0xBEEF;
-                    adjarr.next = 99;
+                    adjarr.idx[0x05] = 0x07;
+                    adjarr.arrays[0x03][0x02] = 0xBEEF;
+                    adjarr.next = 0x33;
                 }
 
                 drop(t0);
@@ -475,8 +475,8 @@ mod tests {
             let t1 = unsafe { Trail::open(cfg) }.expect("open existing");
 
             unsafe {
-                assert!(t1.file.0 >= 0, "File fd must be valid");
-                assert!(t1.mmap.len() > 0, "Mmap must be non zero");
+                assert!(t1.file.0 >= 0x00, "File fd must be valid");
+                assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
                 assert_eq!((*t1.meta_ptr).magic, MAGIC, "Correct file MAGIC");
                 assert_eq!((*t1.meta_ptr).version, VERSION, "Correct file VERSION");
                 assert_eq!(
@@ -488,13 +488,13 @@ mod tests {
                 assert_eq!((*t1.meta_ptr).adjarr_pidx, 0x01, "Correct ptr for adjarr");
 
                 let bmap = &*t1.bitmap.ptr;
-                assert_eq!(bmap.bits[10], 0xDEADBEEF, "BitMap persisted bits");
-                assert_eq!(bmap.next, 42, "BitMap next persisted");
+                assert_eq!(bmap.bits[0xA], 0xDEADBEEF, "BitMap persisted bits");
+                assert_eq!(bmap.next, 0x2A, "BitMap next persisted");
 
                 let adjarr = &*t1.adjarr.ptr;
-                assert_eq!(adjarr.idx[5], 7, "AdjArr idx persisted");
-                assert_eq!(adjarr.arrays[3][2], 0xBEEF, "AdjArr data persisted");
-                assert_eq!(adjarr.next, 99, "AdjArr next persisted");
+                assert_eq!(adjarr.idx[0x05], 0x07, "AdjArr idx persisted");
+                assert_eq!(adjarr.arrays[0x03][0x02], 0xBEEF, "AdjArr data persisted");
+                assert_eq!(adjarr.next, 0x33, "AdjArr next persisted");
             }
         }
 
