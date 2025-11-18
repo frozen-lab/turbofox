@@ -28,7 +28,7 @@ const INIT_OS_PAGES: u64 = 0x02; // (1) BitMap + (1) AdjArr
 
 const BITS_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE) * 0x08;
 
-#[repr(C, align(0x1000))]
+#[repr(C, align(0x40))]
 #[derive(Debug)]
 struct BitMapPtr {
     bits: [u64; BITS_PER_PAGE / 0x40],
@@ -44,7 +44,11 @@ struct BitMap {
 
 // sanity checks
 const _: () = assert!(BITS_PER_PAGE % 0x40 == 0, "Must be u64 aligned");
-const _: () = assert!(std::mem::size_of::<BitMapPtr>() == OS_PAGE_SIZE);
+const _: () = assert!(std::mem::size_of::<BitMapPtr>() % 0x40 == 0, "Must be 64 bytes aligned");
+const _: () = assert!(
+    std::mem::size_of::<BitMapPtr>() == OS_PAGE_SIZE,
+    "Must align w/ OS_PAGE size"
+);
 const _: () = assert!(
     (BITS_PER_PAGE / 0x08) + RESERVED_SPACE_PER_PAGE == OS_PAGE_SIZE,
     "Correct os page alignment"
@@ -70,7 +74,7 @@ const ADJ_ARR_TOTAL_ENTRIES: usize = ((OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE - 
     / std::mem::size_of::<AdjArrItemType>())
     / ADJ_ARR_ITEMS_PER_ARR;
 
-#[repr(C, align(0x1000))]
+#[repr(C, align(0x40))]
 #[derive(Debug)]
 struct AdjArrPtr {
     idx: [u32; ADJ_ARR_IDX_SIZE / 0x04],
@@ -89,7 +93,11 @@ struct AdjArr {
 // sanity checks
 const _: () = assert!(ADJ_ARR_IDX_SIZE % 0x04 == 0x00, "Must be u32 aligned");
 const _: () = assert!(ADJ_ARR_IDX_SIZE * 0x08 == ADJ_ARR_TOTAL_ENTRIES);
-const _: () = assert!(std::mem::size_of::<AdjArrPtr>() == OS_PAGE_SIZE);
+const _: () = assert!(std::mem::size_of::<AdjArrPtr>() % 0x40 == 0, "Must be 64 bytes aligned");
+const _: () = assert!(
+    std::mem::size_of::<AdjArrPtr>() == OS_PAGE_SIZE,
+    "Must be aligned w/ OS_PAGE size"
+);
 
 impl AdjArr {
     #[inline(always)]
@@ -103,22 +111,26 @@ impl AdjArr {
 //
 
 #[derive(Debug, Copy, Clone)]
-#[repr(C)]
+#[repr(C, align(0x40))]
 struct Meta {
     magic: [u8; 0x04],
     version: u32,
     nbitmap: u16,
     nadjarr: u16,
+    // NOTE: Followig pointers are writeops only, for yank and fetch
+    // we simply use ephemeral pointers
     bitmap_pidx: u16,
     adjarr_pidx: u16,
-    // NOTE: Above pointers are writeops only, for yank and fetch
-    // we simply use ephemeral pointers
+    // NOTE: We add this 48 bytes padding to align the [Meta] to 64 bytes
+    // so it could fit correctly in a cahce line and be aligned w/ other
+    // structs like [BitMapPtr] and [AdjArrPtr]
+    _padd: [u8; 0x30],
 }
 
 const META_SIZE: usize = std::mem::size_of::<Meta>();
 
 // sanity check
-const _: () = assert!(META_SIZE % 0x04 == 0x00, "Must be 4 bytes aligned");
+const _: () = assert!(META_SIZE == 0x40, "Must be 64 bytes aligned");
 
 impl Default for Meta {
     fn default() -> Self {
@@ -129,6 +141,7 @@ impl Default for Meta {
             nbitmap: 0x01,
             bitmap_pidx: 0x00, // first page
             adjarr_pidx: 0x01, // second page
+            _padd: [0u8; 0x30],
         }
     }
 }
