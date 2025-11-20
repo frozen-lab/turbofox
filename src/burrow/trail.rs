@@ -109,7 +109,7 @@ impl BitMap {
 
         // NOTE: Slow Path (when we start again from start while free > 0)
         let mut scanned = 0usize;
-        let mut w = {
+        let mut word = {
             let wi = self.bit_idx >> 6;
 
             if wi >= BIT_MAP_WORDS_PER_PAGE {
@@ -119,94 +119,179 @@ impl BitMap {
             }
         };
 
+        // NOTE: w/ avx2, we process 4 words per lane
+        if is_x86_feature_detected!("avx2") {
+            use core::arch::x86_64::{
+                __m256i, _mm256_castsi256_pd, _mm256_cmpeq_epi64, _mm256_loadu_si256, _mm256_movemask_pd,
+                _mm256_set1_epi64x, _tzcnt_u64,
+            };
+
+            let full_mask = _mm256_set1_epi64x(-0x01);
+
+            while scanned < BIT_MAP_WORDS_PER_PAGE {
+                // fast path (we process 4 words using `mm256`)
+                if (BIT_MAP_WORDS_PER_PAGE - word) >= 0x04 {
+                    let ptr = bitmap_ptr.bits.as_ptr().add(word) as *const __m256i;
+                    let v = _mm256_loadu_si256(ptr);
+                    let cmp = _mm256_cmpeq_epi64(v, full_mask);
+                    let mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp)) as u32; // 4 bit mask one for each lane
+
+                    // sanity check
+                    debug_assert!(mask <= 0x0F, "Only 4 lower bits should be active");
+
+                    // at least one of 4 lane is not full
+                    if mask != 0x0F {
+                        let not_full = (!mask) & 0x0F;
+                        let lane = not_full.trailing_zeros() as usize; // 0..3 (always)
+                        let idx = word + lane;
+
+                        // sanity checks
+                        debug_assert!(lane < 4, "Lane must be between 0..3");
+                        debug_assert!(idx < BIT_MAP_WORDS_PER_PAGE, "Idx should be in the bounds");
+
+                        // scalar dive to get the actual free bit from the lane :) (can't optimize this 🥹)
+                        let w = bitmap_ptr.bits.get_unchecked(idx);
+                        let inv = !*w;
+                        let off = _tzcnt_u64(inv) as usize;
+                        let bit = idx * 0x40 + off;
+
+                        bitmap_ptr.bits[idx] = *w | (0x01u64 << off);
+                        bitmap_ptr.free -= 0x01;
+                        self.bit_idx = bit + 0x01;
+                        return Some(bit);
+                    }
+
+                    // advance by 4 words
+                    scanned += 0x04;
+                    word += 0x04;
+                    if word >= BIT_MAP_WORDS_PER_PAGE {
+                        word -= BIT_MAP_BITS_PER_PAGE;
+                    }
+                    continue;
+                }
+
+                for _ in 0..(BIT_MAP_WORDS_PER_PAGE - word) {
+                    let w0 = bitmap_ptr.bits.get_unchecked(word);
+                    if *w0 != u64::MAX {
+                        let inv = !*w0;
+                        let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
+                        let bit = word * 0x40 + off;
+                        bitmap_ptr.bits[word] = *w0 | (0x01u64 << off);
+                        bitmap_ptr.free -= 0x01;
+                        self.bit_idx = bit + 0x01;
+                        return Some(bit);
+                    }
+
+                    scanned += 0x01;
+                    word = if word + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+                        0x00
+                    } else {
+                        word + 0x01
+                    };
+                }
+            }
+
+            // NOTE: This may never occur because of the `free` check we do earlier
+            return None;
+        }
+
+        // NOTE: w/ avx2, we process 4 words per lane
+        if is_x86_feature_detected!("sse2") {
+            //TODO: Implement SSE2 path
+
+            // NOTE: This may never occur because of the `free` check we do earlier
+            return None;
+        }
+
+        // NOTE: Scalar fallback when avx2/sse2 are not available
         // manually unrolled 4-word scan
         while scanned < BIT_MAP_WORDS_PER_PAGE {
-            let w0 = bitmap_ptr.bits.get_unchecked(w);
+            let w0 = bitmap_ptr.bits.get_unchecked(word);
             if *w0 != u64::MAX {
                 let inv = !*w0;
                 let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
-                let bit = w * 0x40 + off;
-                bitmap_ptr.bits[w] = *w0 | (0x01u64 << off);
+                let bit = word * 0x40 + off;
+                bitmap_ptr.bits[word] = *w0 | (0x01u64 << off);
                 bitmap_ptr.free -= 0x01;
                 self.bit_idx = bit + 0x01;
                 return Some(bit);
             }
 
             scanned += 0x01;
-            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+            word = if word + 0x01 == BIT_MAP_WORDS_PER_PAGE {
                 0x00
             } else {
-                w + 0x01
+                word + 0x01
             };
             if scanned >= BIT_MAP_WORDS_PER_PAGE {
                 break;
             }
 
-            let w1 = bitmap_ptr.bits.get_unchecked(w);
+            let w1 = bitmap_ptr.bits.get_unchecked(word);
             if *w1 != u64::MAX {
                 let inv = !*w1;
                 let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
-                let bit = w * 0x40 + off;
-                bitmap_ptr.bits[w] = *w1 | (0x01u64 << off);
+                let bit = word * 0x40 + off;
+                bitmap_ptr.bits[word] = *w1 | (0x01u64 << off);
                 bitmap_ptr.free -= 0x01;
                 self.bit_idx = bit + 0x01;
                 return Some(bit);
             }
 
             scanned += 0x01;
-            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+            word = if word + 0x01 == BIT_MAP_WORDS_PER_PAGE {
                 0x00
             } else {
-                w + 0x01
+                word + 0x01
             };
             if scanned >= BIT_MAP_WORDS_PER_PAGE {
                 break;
             }
 
-            let w2 = bitmap_ptr.bits.get_unchecked(w);
+            let w2 = bitmap_ptr.bits.get_unchecked(word);
             if *w2 != u64::MAX {
                 let inv = !*w2;
                 let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
-                let bit = w * 0x40 + off;
-                bitmap_ptr.bits[w] = *w2 | (0x01u64 << off);
+                let bit = word * 0x40 + off;
+                bitmap_ptr.bits[word] = *w2 | (0x01u64 << off);
                 bitmap_ptr.free -= 0x01;
                 self.bit_idx = bit + 0x01;
                 return Some(bit);
             }
 
             scanned += 0x01;
-            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+            word = if word + 0x01 == BIT_MAP_WORDS_PER_PAGE {
                 0x00
             } else {
-                w + 0x01
+                word + 0x01
             };
             if scanned >= BIT_MAP_WORDS_PER_PAGE {
                 break;
             }
 
-            let w3 = bitmap_ptr.bits.get_unchecked(w);
+            let w3 = bitmap_ptr.bits.get_unchecked(word);
             if *w3 != u64::MAX {
                 let inv = !*w3;
                 let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
-                let bit = w * 0x40 + off;
-                bitmap_ptr.bits[w] = *w3 | (0x01u64 << off);
+                let bit = word * 0x40 + off;
+                bitmap_ptr.bits[word] = *w3 | (0x01u64 << off);
                 bitmap_ptr.free -= 0x01;
                 self.bit_idx = bit + 0x01;
                 return Some(bit);
             }
 
             scanned += 0x01;
-            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+            word = if word + 0x01 == BIT_MAP_WORDS_PER_PAGE {
                 0x00
             } else {
-                w + 0x01
+                word + 0x01
             };
         }
 
         None
     }
 
-    unsafe fn lookup_n(&self, n: usize) -> Option<Vec<usize>> {
+    unsafe fn lookup_n(&self, n: usize) -> Option<(Vec<usize>, bool)> {
         None
     }
 }
