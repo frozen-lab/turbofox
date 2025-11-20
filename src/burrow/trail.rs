@@ -26,12 +26,13 @@ const INIT_OS_PAGES: u64 = 0x02; // (1) BitMap + (1) AdjArr
 // BitMap (4096) => 8 (next_idx) + 8 (total_free) + 4080 (510 u64's) [i.e. 32640 entries]
 //
 
-const BITS_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE) * 0x08;
+const BIT_MAP_BITS_PER_PAGE: usize = (OS_PAGE_SIZE - RESERVED_SPACE_PER_PAGE) * 0x08;
+const BIT_MAP_WORDS_PER_PAGE: usize = BIT_MAP_BITS_PER_PAGE / 0x40;
 
 #[repr(C, align(0x40))]
 #[derive(Debug)]
 struct BitMapPtr {
-    bits: [u64; BITS_PER_PAGE / 0x40],
+    bits: [u64; BIT_MAP_WORDS_PER_PAGE],
     free: u64,
     next: u64,
 }
@@ -39,27 +40,181 @@ struct BitMapPtr {
 #[derive(Debug)]
 struct BitMap {
     ptr: *mut BitMapPtr,
-    idx: usize,
+    bit_idx: usize,
 }
 
+// TODO's:
+//  x Lookup just single slot (fast path)
+//  - Lookup multiple slots (sequential)
+//  - Lookup multiple slots (non-sequential SIMD path)
+//  ? Lookup multiple slots (non-sequential linear path)
+
 // sanity checks
-const _: () = assert!(BITS_PER_PAGE % 0x40 == 0, "Must be u64 aligned");
+const _: () = assert!(BIT_MAP_BITS_PER_PAGE % 0x40 == 0, "Must be u64 aligned");
 const _: () = assert!(std::mem::size_of::<BitMapPtr>() % 0x40 == 0, "Must be 64 bytes aligned");
 const _: () = assert!(
     std::mem::size_of::<BitMapPtr>() == OS_PAGE_SIZE,
     "Must align w/ OS_PAGE size"
 );
 const _: () = assert!(
-    (BITS_PER_PAGE / 0x08) + RESERVED_SPACE_PER_PAGE == OS_PAGE_SIZE,
+    (BIT_MAP_BITS_PER_PAGE / 0x08) + RESERVED_SPACE_PER_PAGE == OS_PAGE_SIZE,
     "Correct os page alignment"
 );
 
 impl BitMap {
     #[inline(always)]
     fn new(ptr: *mut BitMapPtr) -> Self {
-        Self { ptr, idx: 0 }
+        Self { ptr, bit_idx: 0 }
+    }
+
+    /// Lookup for a single slot
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn lookup(&mut self) -> Option<usize> {
+        let bitmap_ptr = &mut *self.ptr;
+
+        // no more slots available
+        if bitmap_ptr.free == 0 {
+            return None;
+        }
+
+        // NOTE: This is FAST PATH for insertions (when the BitMap is new
+        // we have all the bits freed up, so we can speed things up)
+        if self.bit_idx < BIT_MAP_BITS_PER_PAGE {
+            let w = (self.bit_idx >> 0x06) as usize; // same as `bit_idx / 6`
+            let off = (self.bit_idx & 0x3F) as usize;
+            let word = bitmap_ptr.bits.get_unchecked(w);
+            let mask = 0x01u64 << off;
+
+            // we must make sure that the bit is indeed free
+            if (word & mask) == 0x00 {
+                let bit = self.bit_idx;
+                self.bit_idx += 0x01;
+                bitmap_ptr.bits[w] = *word | mask;
+                bitmap_ptr.free -= 0x01;
+
+                // NOTE: We prefetch next word to avoid cache miss
+                {
+                    let nxt_w_idx = w + 0x01;
+                    if nxt_w_idx < BIT_MAP_WORDS_PER_PAGE {
+                        core::arch::x86_64::_mm_prefetch(
+                            (bitmap_ptr.bits.as_ptr().add(nxt_w_idx) as *const i8),
+                            core::arch::x86_64::_MM_HINT_T0,
+                        );
+                    }
+                }
+
+                return Some(bit);
+            }
+        }
+
+        // NOTE: Slow Path (when we start again from start while free > 0)
+        let mut scanned = 0usize;
+        let mut w = {
+            let wi = self.bit_idx >> 6;
+
+            if wi >= BIT_MAP_WORDS_PER_PAGE {
+                0usize
+            } else {
+                wi
+            }
+        };
+
+        // manually unrolled 4-word scan
+        while scanned < BIT_MAP_WORDS_PER_PAGE {
+            let w0 = bitmap_ptr.bits.get_unchecked(w);
+            if *w0 != u64::MAX {
+                let inv = !*w0;
+                let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
+                let bit = w * 0x40 + off;
+                bitmap_ptr.bits[w] = *w0 | (0x01u64 << off);
+                bitmap_ptr.free -= 0x01;
+                self.bit_idx = bit + 0x01;
+                return Some(bit);
+            }
+
+            scanned += 0x01;
+            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+                0x00
+            } else {
+                w + 0x01
+            };
+            if scanned >= BIT_MAP_WORDS_PER_PAGE {
+                break;
+            }
+
+            let w1 = bitmap_ptr.bits.get_unchecked(w);
+            if *w1 != u64::MAX {
+                let inv = !*w1;
+                let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
+                let bit = w * 0x40 + off;
+                bitmap_ptr.bits[w] = *w1 | (0x01u64 << off);
+                bitmap_ptr.free -= 0x01;
+                self.bit_idx = bit + 0x01;
+                return Some(bit);
+            }
+
+            scanned += 0x01;
+            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+                0x00
+            } else {
+                w + 0x01
+            };
+            if scanned >= BIT_MAP_WORDS_PER_PAGE {
+                break;
+            }
+
+            let w2 = bitmap_ptr.bits.get_unchecked(w);
+            if *w2 != u64::MAX {
+                let inv = !*w2;
+                let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
+                let bit = w * 0x40 + off;
+                bitmap_ptr.bits[w] = *w2 | (0x01u64 << off);
+                bitmap_ptr.free -= 0x01;
+                self.bit_idx = bit + 0x01;
+                return Some(bit);
+            }
+
+            scanned += 0x01;
+            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+                0x00
+            } else {
+                w + 0x01
+            };
+            if scanned >= BIT_MAP_WORDS_PER_PAGE {
+                break;
+            }
+
+            let w3 = bitmap_ptr.bits.get_unchecked(w);
+            if *w3 != u64::MAX {
+                let inv = !*w3;
+                let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
+                let bit = w * 0x40 + off;
+                bitmap_ptr.bits[w] = *w3 | (0x01u64 << off);
+                bitmap_ptr.free -= 0x01;
+                self.bit_idx = bit + 0x01;
+                return Some(bit);
+            }
+
+            scanned += 0x01;
+            w = if w + 0x01 == BIT_MAP_WORDS_PER_PAGE {
+                0x00
+            } else {
+                w + 0x01
+            };
+        }
+
+        None
+    }
+
+    unsafe fn lookup_n(&self, n: usize) -> Option<Vec<usize>> {
+        None
     }
 }
+
+// NOTE/TODO:
+//  - For sequential slots, we could store a u8 in our signs and skip th AdjArr
+//  - Use AdjArr only when writes are scattered
+//  - We avoid SIMD scans for write, hence increasing lookup speeds for write
 
 //
 // AdjArr (4096) => 8 (next_idx) + 8 (total_free) + 36 (288 entries) [u32 * 9] + 4032 (288 * 7 * 2) + 12 (padding)
