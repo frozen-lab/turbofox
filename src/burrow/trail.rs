@@ -43,12 +43,6 @@ struct BitMap {
     bit_idx: usize,
 }
 
-// TODO's:
-//  x Lookup just single slot (fast path)
-//  - Lookup multiple slots (sequential)
-//  - Lookup multiple slots (non-sequential SIMD path)
-//  ? Lookup multiple slots (non-sequential linear path)
-
 // sanity checks
 const _: () = assert!(BIT_MAP_BITS_PER_PAGE % 0x40 == 0, "Must be u64 aligned");
 const _: () = assert!(std::mem::size_of::<BitMapPtr>() % 0x40 == 0, "Must be 64 bytes aligned");
@@ -72,13 +66,19 @@ impl BitMap {
     unsafe fn lookup(&mut self) -> Option<usize> {
         let bitmap_ptr = &mut *self.ptr;
 
+        // sanity check
+        debug_assert!(
+            bitmap_ptr.free as usize <= BIT_MAP_BITS_PER_PAGE,
+            "No of free slots are invalid"
+        );
+
         // no more slots available
-        if bitmap_ptr.free == 0 {
+        if bitmap_ptr.free == 0x00 {
             return None;
         }
 
-        // NOTE: This is FAST PATH for insertions (when the BitMap is new
-        // we have all the bits freed up, so we can speed things up)
+        // NOTE: Fast Path (when the BitMap is new we have all the bits
+        // freed up, so we can speed things up)
         if self.bit_idx < BIT_MAP_BITS_PER_PAGE {
             let w = (self.bit_idx >> 0x06) as usize; // same as `bit_idx / 6`
             let off = (self.bit_idx & 0x3F) as usize;
@@ -110,7 +110,7 @@ impl BitMap {
         // NOTE: Slow Path (when we start again from start while free > 0)
         let mut scanned = 0usize;
         let mut word = {
-            let wi = self.bit_idx >> 6;
+            let wi = self.bit_idx >> 0x06;
 
             if wi >= BIT_MAP_WORDS_PER_PAGE {
                 0usize
@@ -146,7 +146,7 @@ impl BitMap {
                         let idx = word + lane;
 
                         // sanity checks
-                        debug_assert!(lane < 4, "Lane must be between 0..3");
+                        debug_assert!(lane < 0x04, "Lane must be between 0..3");
                         debug_assert!(idx < BIT_MAP_WORDS_PER_PAGE, "Idx should be in the bounds");
 
                         // scalar dive to get the actual free bit from the lane :) (can't optimize this 🥹)
@@ -197,7 +197,12 @@ impl BitMap {
 
         // NOTE: w/ avx2, we process 4 words per lane
         if is_x86_feature_detected!("sse2") {
-            //TODO: Implement SSE2 path
+            use std::arch::x86_64::_mm_set1_epi64x;
+
+            let full_mask = _mm_set1_epi64x(-0x01);
+            while scanned < BIT_MAP_WORDS_PER_PAGE {
+                if (BIT_MAP_WORDS_PER_PAGE - word) >= 0x02 {}
+            }
 
             // NOTE: This may never occur because of the `free` check we do earlier
             return None;
@@ -291,7 +296,66 @@ impl BitMap {
         None
     }
 
-    unsafe fn lookup_n(&self, n: usize) -> Option<(Vec<usize>, bool)> {
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn lookup_n(&mut self, n: usize) -> Option<(Vec<usize>, bool)> {
+        let bitmap_ptr = &mut *self.ptr;
+
+        // sanity checks
+        debug_assert!(n > 0x00, "Invalid inputs");
+        debug_assert!(n <= BIT_MAP_BITS_PER_PAGE, "N is very large");
+        debug_assert!(
+            (bitmap_ptr.free as usize) <= BIT_MAP_BITS_PER_PAGE,
+            "No of free slots are invalid"
+        );
+
+        // not enough slots
+        if (bitmap_ptr.free < n as u64) {
+            return None;
+        }
+
+        let mut out: Vec<usize> = Vec::with_capacity(n);
+
+        // NOTE: Fast path (contagious free blocks)
+        let end = self.bit_idx + n;
+        if end <= BIT_MAP_BITS_PER_PAGE {
+            let mut bit = self.bit_idx;
+            while bit < end {
+                let w = (bit >> 0x06) as usize;
+                let off = (bit & 0x3F) as usize;
+
+                let word = bitmap_ptr.bits.get_unchecked(w);
+                let m = 0x01u64 << off;
+
+                // NOTE: we found the occupied bit! So we break fast path and switch to slow one
+                if (*word & m) != 0x00 {
+                    out.clear();
+                    break;
+                }
+
+                bitmap_ptr.bits[w] = *word | m;
+                out.push(bit);
+                bit += 0x01;
+            }
+
+            if out.len() == n {
+                bitmap_ptr.free -= n as u64;
+                self.bit_idx = bit;
+
+                // NOTE: We prefetch next word to avoid cache miss
+                {
+                    let nxt_w_idx = (bit >> 0x06) + 0x01;
+                    if nxt_w_idx < BIT_MAP_WORDS_PER_PAGE {
+                        core::arch::x86_64::_mm_prefetch(
+                            (bitmap_ptr.bits.as_ptr().add(nxt_w_idx) as *const i8),
+                            core::arch::x86_64::_MM_HINT_T0,
+                        );
+                    }
+                }
+
+                return Some((out, true));
+            }
+        }
+
         None
     }
 }
