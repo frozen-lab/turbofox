@@ -49,7 +49,11 @@ impl InternalCfg {
     }
 
     #[inline]
-    pub(crate) fn cap(mut self, cap: usize) -> Self {
+    pub(crate) fn init_cap(mut self, cap: usize) -> Self {
+        // sanity checks
+        assert!(cap >= 0x80, "InitCap must be equal to or greater then 128 bytes");
+        assert!(cap % 0x80 == 0x00, "InitCap must be power of 2");
+
         self.init_cap = cap;
         self
     }
@@ -57,8 +61,8 @@ impl InternalCfg {
     #[inline]
     pub(crate) fn page(mut self, size: usize) -> Self {
         // sanity checks
-        assert!(size >= 128, "Buffer Size must be equal to or greater then 128 bytes");
-        assert!((size & (size - 1)) == 0, "Buffer Size value must be power of 2");
+        assert!(size >= 0x80, "Page Size must be equal to or greater then 128 bytes");
+        assert!(size % 0x80 == 0x00, "Page Size value must be power of 2");
 
         self.page_size = size;
         self
@@ -101,7 +105,7 @@ mod tests {
         fn test_chained_builder_updates() {
             let dir = TempDir::new().expect("Tempdir");
             let path = dir.path().to_path_buf();
-            let cfg = InternalCfg::new(path.clone()).log(true).cap(512).page(4096);
+            let cfg = InternalCfg::new(path.clone()).log(true).init_cap(512).page(4096);
 
             assert!(cfg.logger.enabled);
             assert_eq!(cfg.init_cap, 512);

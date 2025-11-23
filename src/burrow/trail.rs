@@ -1,4 +1,3 @@
-use super::OS_PAGE_SIZE;
 use crate::{
     errors::{InternalError, InternalResult},
     linux::{file::File, mmap::MMap},
@@ -17,262 +16,68 @@ const _: () = assert!(
 );
 
 //
-// BitMap (4096) => 8 (total_free) + 4088 (511 u64's) [i.e. 32704 entries]
-//
-
-const BIT_MAP_SPACE_FOR_TOTAL_FREE: usize = 0x08; // (u64) free slots available
-const BIT_MAP_BITS_PER_PAGE: usize = (OS_PAGE_SIZE - BIT_MAP_SPACE_FOR_TOTAL_FREE) * 0x08;
-const BIT_MAP_WORDS_PER_PAGE: usize = BIT_MAP_BITS_PER_PAGE / 0x40;
-
-#[repr(C, align(0x40))]
-#[derive(Debug)]
-struct BitMapPtr {
-    free: u64,
-    bits: [u64; BIT_MAP_WORDS_PER_PAGE],
-}
-
-#[derive(Debug)]
-struct BitMap {
-    ptr: *mut BitMapPtr,
-    bit_idx: usize,
-}
-
-// sanity checks
-const _: () = assert!(BIT_MAP_BITS_PER_PAGE % 0x40 == 0, "Must be u64 aligned");
-const _: () = assert!(std::mem::size_of::<BitMapPtr>() % 0x40 == 0, "Must be 64 bytes aligned");
-const _: () = assert!(
-    std::mem::size_of::<BitMapPtr>() == OS_PAGE_SIZE,
-    "Must align w/ OS_PAGE size"
-);
-const _: () = assert!(
-    (BIT_MAP_BITS_PER_PAGE / 0x08) + BIT_MAP_SPACE_FOR_TOTAL_FREE == OS_PAGE_SIZE,
-    "Correct os page alignment"
-);
-
-impl BitMap {
-    #[inline(always)]
-    fn new(ptr: *mut BitMapPtr) -> Self {
-        Self { ptr, bit_idx: 0 }
-    }
-
-    /// Lookup for a single slot
-    #[allow(unsafe_op_in_unsafe_fn)]
-    unsafe fn lookup(&mut self) -> Option<usize> {
-        let bitmap_ptr = &mut *self.ptr;
-
-        // sanity check
-        debug_assert!(
-            bitmap_ptr.free as usize <= BIT_MAP_BITS_PER_PAGE,
-            "No of free slots are invalid"
-        );
-
-        // no more slots available
-        if bitmap_ptr.free == 0x00 {
-            return None;
-        }
-
-        let mut widx = self.bit_idx >> 0x06;
-        let mut scanned = 0usize;
-
-        while scanned < BIT_MAP_WORDS_PER_PAGE {
-            let word = *bitmap_ptr.bits.get_unchecked(widx);
-            if word != u64::MAX {
-                let inv = !word;
-                let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
-                let bit = (widx << 0x06) | off;
-
-                bitmap_ptr.bits[widx] = word | (0x01u64 << off);
-                bitmap_ptr.free -= 0x01;
-                self.bit_idx = bit + 0x01;
-
-                return Some(bit);
-            }
-
-            let nxt = widx + 0x01;
-            scanned += 0x01;
-            widx = nxt - ((nxt == BIT_MAP_WORDS_PER_PAGE) as usize) * BIT_MAP_WORDS_PER_PAGE;
-        }
-
-        None
-    }
-
-    /// Lookup N free slots in [BitMap] (w/ no wraparound and contegious allocations)
-    #[allow(unsafe_op_in_unsafe_fn)]
-    unsafe fn lookup_n(&mut self, n: usize) -> Option<Vec<usize>> {
-        let bitmap_ptr = &mut *self.ptr;
-
-        // sanity checks
-        debug_assert!(n > 0x00, "Invalid inputs");
-        debug_assert!(n <= BIT_MAP_BITS_PER_PAGE, "N is very large");
-        debug_assert!(self.bit_idx <= BIT_MAP_BITS_PER_PAGE, "BitIdx is out of bounds");
-        debug_assert!(
-            (bitmap_ptr.free as usize) <= BIT_MAP_BITS_PER_PAGE,
-            "No of free slots are invalid"
-        );
-
-        // not enough slots
-        if bitmap_ptr.free < n as u64 {
-            return None;
-        }
-
-        // not enough slots (from current idx)
-        if self.bit_idx + n > BIT_MAP_BITS_PER_PAGE {
-            return None;
-        }
-
-        let mut out: Vec<usize> = Vec::with_capacity(n);
-        let mut bit_idx = self.bit_idx;
-
-        while bit_idx + n <= BIT_MAP_BITS_PER_PAGE {
-            let widx = bit_idx >> 0x06;
-            let off = (bit_idx & 0x3F) as usize;
-
-            let word = *bitmap_ptr.bits.get_unchecked(widx);
-            let inv = !word & (!0u64 << off);
-
-            // if no free slots (after the `off`) are available, skip to nxt word
-            if inv == 0x00 {
-                bit_idx += 0x40 - off;
-                continue;
-            }
-
-            let first_off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
-            let first_bit = (widx << 6) | first_off;
-            let avail_slots = 0x40 - first_off; // available slots in current word
-
-            if avail_slots >= n {
-                let mm = (u64::MAX >> (0x40 - n)) << first_off;
-                let p = bitmap_ptr.bits.get_unchecked_mut(widx);
-
-                *p = word | mm;
-                bitmap_ptr.free -= n as u64;
-                self.bit_idx = first_bit + n;
-                out.extend(first_bit..first_bit + n);
-
-                return Some(out);
-            }
-
-            let mut slots = avail_slots;
-            let mut needed_slots = n - avail_slots;
-            let mut word_i = widx + 1;
-
-            while needed_slots > 0 && word_i < BIT_MAP_WORDS_PER_PAGE {
-                let widx2 = *bitmap_ptr.bits.get_unchecked(word_i);
-                if widx2 == 0 {
-                    let slots_taken = needed_slots.min(0x40);
-                    slots += slots_taken;
-                    needed_slots -= slots_taken;
-                    word_i += 0x01;
-
-                    continue;
-                }
-
-                // word is full, hence breaks the contegious order of slots
-                if widx2 == u64::MAX {
-                    break;
-                }
-
-                let tz = core::arch::x86_64::_tzcnt_u64(!widx2) as usize;
-                let take = needed_slots.min(tz);
-
-                slots += take;
-                needed_slots -= take;
-
-                // if true, we cannot extend beyound the `tz` boundry, hence breaks the required order
-                if take < 64 && needed_slots > 0 {
-                    break;
-                }
-
-                word_i += 1;
-            }
-
-            if slots >= n {
-                let mut remaining = n;
-                let mut current = first_bit;
-
-                while remaining > 0 {
-                    let cw = current >> 6;
-                    let cof = current & 63;
-
-                    let take = remaining.min(64 - cof);
-                    let mm = (u64::MAX >> (64 - take)) << cof;
-
-                    let pw = bitmap_ptr.bits.get_unchecked(cw);
-                    *bitmap_ptr.bits.get_unchecked_mut(cw) = pw | mm;
-
-                    out.extend(current..current + take);
-                    remaining -= take;
-                    current += take;
-                }
-
-                bitmap_ptr.free -= n as u64;
-                self.bit_idx = first_bit + n;
-                return Some(out);
-            }
-
-            bit_idx = first_bit + 0x01;
-        }
-
-        None
-    }
-}
-
-//
 // Meta
 //
 
 #[derive(Debug, Copy, Clone)]
-#[repr(C, align(0x40))]
+#[repr(C, align(0x20))]
 struct Meta {
     magic: [u8; 0x04],
     version: u32,
-    nbitmap: u16,
-    // NOTE: Followig pointer are writeops only, for yank and fetch
-    // we simply use ephemeral pointers
-    bitmap_pidx: u16,
-    // NOTE: We add this 48 bytes padding to align the [Meta] to 64 bytes
-    // so it could fit correctly in a cahce line and be aligned w/ other
-    // structs like [BitMapPtr] and [AdjArrPtr]
-    _padd: [u8; 0x30],
+    free: u64,
+    nwords: u64,
+    _padd: [u8; 0x08], // 8 bytes padding to align struct to 32 bytes
 }
 
 const META_SIZE: usize = std::mem::size_of::<Meta>();
 
-// sanity check
-const _: () = assert!(META_SIZE == 0x40, "Must be 64 bytes aligned");
-
-impl Default for Meta {
-    fn default() -> Self {
+impl Meta {
+    const fn new(words: u64) -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
-            nbitmap: 0x01,
-            bitmap_pidx: 0x00, // first page
-            _padd: [0u8; 0x30],
+            nwords: words,
+            free: words * 0x40,
+            _padd: [0u8; 0x08],
         }
     }
 }
+
+// sanity check
+const _: () = assert!(META_SIZE == 0x20, "Must be 32 bytes aligned");
+const _: () = assert!(Meta::new(0x02).free == (0x02 * 0x40), "Must be correctly initialised");
+
+//
+// BitMap
+//
+
+#[repr(C, align(0x08))]
+#[derive(Debug)]
+struct BitMapPtr(u64);
 
 //
 // Trail
 //
 
-const INIT_FILE_LEN: usize = META_SIZE + OS_PAGE_SIZE;
-
 #[derive(Debug)]
 pub(super) struct Trail {
     file: File,
     mmap: MMap,
-    bitmap: BitMap,
     cfg: InternalCfg,
     meta_ptr: *mut Meta,
+    bmap_ptr: *mut BitMapPtr,
 }
 
 impl Trail {
     /// Creates a new [Trail] file
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn new(cfg: InternalCfg) -> InternalResult<Self> {
+    pub(super) unsafe fn new(cfg: &InternalCfg) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
+        let nwords = cfg.init_cap >> 0x06;
+        let init_len = META_SIZE + (nwords << 0x03);
+
+        // sanity checks
+        debug_assert!(nwords * 0x40 == cfg.init_cap, "Must be u64 aligned");
 
         // create new file
         let file = File::new(&path)
@@ -291,7 +96,7 @@ impl Trail {
             })?;
 
         // zero init the file
-        file.zero_extend(INIT_FILE_LEN)
+        file.zero_extend(init_len)
             .inspect(|_| cfg.logger.trace("(TRAIL) Zero-Extended new file"))
             .map_err(|e| {
                 cfg.logger
@@ -306,14 +111,10 @@ impl Trail {
                 e
             })?;
 
-        let mmap = MMap::new(file.0, INIT_FILE_LEN)
-            .inspect(|_| {
-                cfg.logger
-                    .trace(format!("(TRAIL) Mmaped newly created file w/ len={INIT_FILE_LEN}"))
-            })
+        let mmap = MMap::new(file.0, init_len)
+            .inspect(|_| cfg.logger.trace(format!("(TRAIL) Mmaped new file w/ len={init_len}")))
             .map_err(|e| {
-                cfg.logger
-                    .error(format!("(TRAIL) Failed to mmap the file({:?}): {e}", path));
+                cfg.logger.error(format!("(TRAIL) Failed to mmap: {e}"));
 
                 // NOTE: Close + Delete the created file, so new init could work w/o any issues
                 //
@@ -323,15 +124,13 @@ impl Trail {
 
                 e
             })?;
+        mmap.write(0, &Meta::new(nwords as u64));
 
-        // metadata init & sync
-        //
         // NOTE: we use `ms_sync` here to make sure metadata is persisted before
         // any other updates are conducted on the mmap,
         //
         // NOTE: we can afford this syscall here, as init does not come under the fast
         // path. Also it's just one time thing!
-        mmap.write(0, &Meta::default());
         mmap.ms_sync().map_err(|e| {
             cfg.logger
                 .error(format!("(TRAIL) Failed to write Metadata to mmaped file: {e}"));
@@ -339,16 +138,16 @@ impl Trail {
         })?;
 
         let meta_ptr = mmap.read_mut::<Meta>(0);
-        let bitmap_ptr = mmap.read_mut::<BitMapPtr>(META_SIZE);
+        let bmap_ptr = mmap.read_mut::<BitMapPtr>(META_SIZE);
 
         cfg.logger.debug("(TRAIL) Created a new file");
 
         Ok(Self {
-            cfg,
             file,
             mmap,
             meta_ptr,
-            bitmap: BitMap::new(bitmap_ptr),
+            bmap_ptr,
+            cfg: cfg.clone(),
         })
     }
 
@@ -357,7 +156,7 @@ impl Trail {
     /// *NOTE*: Returns an [InvalidFile] error when the underlying file is corrupted,
     /// may happen when the file is invalid or tampered with
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn open(cfg: InternalCfg) -> InternalResult<Self> {
+    pub(super) unsafe fn open(cfg: &InternalCfg) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
 
         // file must exists
@@ -389,7 +188,8 @@ impl Trail {
         //
         // WARN: As this is a fatel scenerio, we delete the existing file, hence clean up the whole db,
         // as we can not simply make any sense of the data!
-        if file_len.wrapping_sub(META_SIZE) == 0 || file_len.wrapping_sub(META_SIZE) % OS_PAGE_SIZE != 0 {
+        let bmap_len = file_len.wrapping_sub(META_SIZE);
+        if bmap_len == 0x00 || bmap_len & 0x07 != 0 {
             let err = InternalError::InvalidFile("File is not page aligned".into());
             cfg.logger.error(format!("(TRAIL) Existing file is invalid: {err}"));
 
@@ -410,7 +210,8 @@ impl Trail {
                 e
             })?;
 
-        let meta_ptr = mmap.ptr_mut() as *mut Meta;
+        let meta_ptr = mmap.read_mut::<Meta>(0);
+        let bmap_ptr = mmap.read_mut::<BitMapPtr>(META_SIZE);
 
         // metadata validations
         //
@@ -419,31 +220,50 @@ impl Trail {
             cfg.logger.warn("(TRAIL) Existing file has invalid VERSION or MAGIC");
         }
 
-        let bitmap_idx = (*meta_ptr).bitmap_pidx;
-
-        // sanity checks
-        #[cfg(debug_assertions)]
-        {
-            let total_pages = (*meta_ptr).nbitmap;
-            debug_assert!(bitmap_idx <= total_pages, "BitMap index is out of bounds");
-        }
-
-        let bitmap_ptr = mmap.read_mut::<BitMapPtr>(META_SIZE + (bitmap_idx as usize * OS_PAGE_SIZE));
-
         cfg.logger.debug("(TRAIL) Opened an existing file");
 
         Ok(Self {
             file,
             mmap,
             meta_ptr,
+            bmap_ptr,
             cfg: cfg.clone(),
-            bitmap: BitMap::new(bitmap_ptr),
         })
     }
 
+    // #[allow(unsafe_op_in_unsafe_fn)]
+    // #[inline(always)]
+    // unsafe fn extend_and_remap(&mut self) -> InternalResult<()> {
+    //     // STEP 1: Unmap the file
+    //     self.mmap
+    //         .unmap()
+    //         .inspect(|_| self.cfg.logger.trace("(TRAIL) Successfully unmapped (extend & remap)"))
+    //         .map_err(|e| {
+    //             self.cfg
+    //                 .logger
+    //                 .error(format!("(TRAIL) Unable to unmap (extend & remap): {e}"));
+    //             e
+    //         })?;
+
+    //     // STEP 2: Zero extend the file
+    //     let new_nwords = (*self.meta_ptr).nwords as usize + self.cfg.init_cap >> 0x06;
+    //     let new_len = META_SIZE + (new_nwords << 0x03);
+    //     self.file
+    //         .zero_extend(new_len)
+    //         .inspect(|_| self.cfg.logger.trace("(TRIAL) Zero extend successful (extend & remap)"))
+    //         .map_err(|e| {
+    //             self.cfg
+    //                 .logger
+    //                 .error(format!("(TRAIL) Unable to unmap (extend & remap): {e}"));
+    //             e
+    //         })?;
+
+    //     Ok(())
+    // }
+
     /// Close & Delete [Trail] file
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline]
+    #[inline(always)]
     unsafe fn close_and_del_file(cfg: &InternalCfg, file: &File) {
         let path = cfg.dirpath.join(PATH);
 
@@ -512,126 +332,91 @@ impl Drop for Trail {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::logger::init_test_logger;
-//     use tempfile::TempDir;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logger::init_test_logger;
+    use tempfile::TempDir;
 
-//     fn temp_dir() -> TempDir {
-//         let _ = init_test_logger(None);
-//         TempDir::new().expect("temp dir")
-//     }
+    fn temp_dir() -> TempDir {
+        let _ = init_test_logger(None);
+        TempDir::new().expect("temp dir")
+    }
 
-//     mod trail {
-//         use super::*;
+    mod trail {
+        use super::*;
 
-//         #[test]
-//         fn test_new_is_valid() {
-//             let tmp = temp_dir();
-//             let dir = tmp.path().to_path_buf();
-//             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+        #[test]
+        fn test_new_is_valid() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let nwords = cfg.init_cap >> 0x06;
+            let init_len = META_SIZE + (nwords << 0x03);
+            let t1 = unsafe { Trail::new(&cfg) }.expect("new trail");
 
-//             let t1 = unsafe { Trail::new(cfg) }.expect("new trail");
+            unsafe {
+                let meta = (*t1.meta_ptr);
 
-//             unsafe {
-//                 assert!(t1.file.0 >= 0x00, "File fd must be valid");
-//                 assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
-//                 assert_eq!((*t1.meta_ptr).magic, MAGIC, "Correct file MAGIC");
-//                 assert_eq!((*t1.meta_ptr).version, VERSION, "Correct file VERSION");
-//                 assert_eq!(
-//                     (*t1.meta_ptr).nbitmap + (*t1.meta_ptr).nadjarr,
-//                     INIT_OS_PAGES as u16,
-//                     "Correct numOf pages"
-//                 );
-//                 assert_eq!((*t1.meta_ptr).bitmap_pidx, 0x00, "Correct ptr for Bits");
-//                 assert_eq!((*t1.meta_ptr).adjarr_pidx, 0x01, "Correct ptr for adjarr");
+                assert!(t1.file.0 >= 0x00, "File fd must be valid");
+                assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
 
-//                 let bmap = &*t1.bitmap.ptr;
-//                 assert!(bmap.bits.iter().all(|&b| b == 0x00), "BitMap bits zeroed");
-//                 assert_eq!(bmap.next, 0x00, "BitMap next ptr zeroed");
+                assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
+                assert_eq!(meta.version, VERSION, "Correct file VERSION");
+                assert_eq!(meta.nwords, nwords as u64);
+                assert_eq!(meta.free, cfg.init_cap as u64);
 
-//                 let adjarr = &*t1.adjarr.ptr;
-//                 assert!(adjarr.idx.iter().all(|&i| i == 0x00), "AdjArr index zeroed");
-//                 assert!(
-//                     adjarr.arrays.iter().all(|a| a.iter().all(|&v| v == 0x00)),
-//                     "AdjArr data zeroed"
-//                 );
-//                 assert_eq!(adjarr.next, 0x00, "AdjArr next ptr zeroed");
-//             }
-//         }
+                assert!(!t1.meta_ptr.is_null());
+                assert!(!t1.bmap_ptr.is_null());
+            }
+        }
 
-//         #[test]
-//         fn test_open_is_valid() {
-//             let tmp = temp_dir();
-//             let dir = tmp.path().to_path_buf();
-//             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+        #[test]
+        fn test_open_is_valid() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
 
-//             {
-//                 let t0 = unsafe { Trail::new(cfg.clone()) }.expect("new trail");
+            unsafe {
+                let t0 = Trail::new(&cfg).expect("new trail");
 
-//                 unsafe {
-//                     let bmap = &mut *t0.bitmap.ptr;
-//                     let adjarr = &mut *t0.adjarr.ptr;
+                (*t0.meta_ptr).free = 0x01;
+                (*t0.meta_ptr).nwords = 0x02;
 
-//                     bmap.bits[0xA] = 0xDEADBEEF;
-//                     (*bmap).next = 0x2A;
+                drop(t0);
+            }
 
-//                     adjarr.idx[0x05] = 0x07;
-//                     adjarr.arrays[0x03][0x02] = 0xBEEF;
-//                     adjarr.next = 0x33;
-//                 }
+            let t1 = unsafe { Trail::open(&cfg) }.expect("open existing");
 
-//                 drop(t0);
-//             }
+            unsafe {
+                let meta = (*t1.meta_ptr);
 
-//             let t1 = unsafe { Trail::open(cfg) }.expect("open existing");
+                assert!(t1.file.0 >= 0x00, "File fd must be valid");
+                assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
 
-//             unsafe {
-//                 assert!(t1.file.0 >= 0x00, "File fd must be valid");
-//                 assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
-//                 assert_eq!((*t1.meta_ptr).magic, MAGIC, "Correct file MAGIC");
-//                 assert_eq!((*t1.meta_ptr).version, VERSION, "Correct file VERSION");
-//                 assert_eq!(
-//                     (*t1.meta_ptr).nbitmap + (*t1.meta_ptr).nadjarr,
-//                     INIT_OS_PAGES as u16,
-//                     "Correct noOf pages"
-//                 );
-//                 assert_eq!((*t1.meta_ptr).bitmap_pidx, 0x00, "Correct ptr for Bits");
-//                 assert_eq!((*t1.meta_ptr).adjarr_pidx, 0x01, "Correct ptr for adjarr");
+                assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
+                assert_eq!(meta.version, VERSION, "Correct file VERSION");
+                assert_eq!(meta.nwords, 0x02);
+                assert_eq!(meta.free, 0x01);
 
-//                 let bmap = &*t1.bitmap.ptr;
-//                 assert_eq!(bmap.bits[0xA], 0xDEADBEEF, "BitMap persisted bits");
-//                 assert_eq!(bmap.next, 0x2A, "BitMap next persisted");
+                assert!(!t1.meta_ptr.is_null());
+                assert!(!t1.bmap_ptr.is_null());
+            }
+        }
 
-//                 let adjarr = &*t1.adjarr.ptr;
-//                 assert_eq!(adjarr.idx[0x05], 0x07, "AdjArr idx persisted");
-//                 assert_eq!(adjarr.arrays[0x03][0x02], 0xBEEF, "AdjArr data persisted");
-//                 assert_eq!(adjarr.next, 0x33, "AdjArr next persisted");
-//             }
-//         }
+        #[test]
+        fn test_open_panics_on_invalid_metadata_in_file() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
 
-//         #[test]
-//         #[cfg(debug_assertions)]
-//         #[should_panic]
-//         fn test_open_panics_on_invalid_metadata_in_file() {
-//             let tmp = temp_dir();
-//             let dir = tmp.path().to_path_buf();
-//             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            unsafe {
+                let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
+                t0.file.zero_extend(META_SIZE).expect("Update file len");
+            }
 
-//             unsafe {
-//                 let t0 = unsafe { Trail::new(cfg.clone()) }.expect("new trail");
-//                 let meta = &mut *t0.meta_ptr;
-
-//                 // corrupted metadata
-//                 meta.nadjarr = 0x00;
-//                 meta.nbitmap = 0x00;
-
-//                 drop(t0);
-//             }
-
-//             // should panic
-//             unsafe { Trail::open(cfg) };
-//         }
-//     }
-// }
+            // should panic
+            assert!(unsafe { Trail::open(&cfg) }.is_err());
+        }
+    }
+}
