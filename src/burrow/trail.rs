@@ -472,6 +472,10 @@ mod tests {
             // should panic
             assert!(unsafe { Trail::open(&cfg) }.is_err());
         }
+    }
+
+    mod extend_remap {
+        use super::*;
 
         #[test]
         fn test_extend_remap_grows_file_and_updates_meta() {
@@ -486,14 +490,14 @@ mod tests {
                 let og_free = (*trail.meta_ptr).free;
                 let og_len = trail.mmap.len();
 
-                trail.extend_remap().expect("extend");
+                trail.extend_remap().expect("extend and remap");
 
                 let meta = *trail.meta_ptr;
 
                 assert!(!trail.bmap_ptr.is_null());
                 assert_eq!(meta.free, og_free + cfg.init_cap as u64);
                 assert!(trail.mmap.len() > og_len, "mmap len must grow");
-                assert_eq!(meta.nwords, og_nwords + (cfg.init_cap >> 6) as u64);
+                assert_eq!(meta.nwords, og_nwords + (cfg.init_cap >> 0x06) as u64);
             }
         }
 
@@ -508,7 +512,7 @@ mod tests {
 
                 let nw0 = (*trail.meta_ptr).nwords;
                 let fr0 = (*trail.meta_ptr).free;
-                let inc = (cfg.init_cap >> 6) as u64;
+                let inc = (cfg.init_cap >> 0x06) as u64;
 
                 trail.extend_remap().expect("first extend works");
                 let w1 = (*trail.meta_ptr).nwords;
@@ -521,8 +525,82 @@ mod tests {
                 let w2 = (*trail.meta_ptr).nwords;
                 let f2 = (*trail.meta_ptr).free;
 
-                assert_eq!(w2, nw0 + inc * 2);
-                assert_eq!(f2, fr0 + cfg.init_cap as u64 * 2);
+                assert_eq!(w2, nw0 + inc * 0x02);
+                assert_eq!(f2, fr0 + cfg.init_cap as u64 * 0x02);
+            }
+        }
+
+        #[test]
+        fn test_extend_remap_zero_inits_correctly() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let curr_words = (*trail.meta_ptr).nwords as usize;
+
+                // Fill in current words
+                for i in 0..curr_words {
+                    (*trail.bmap_ptr.add(i)).0 = 0xFFFF_FFFF_FFFF_FFFF;
+                }
+
+                trail.extend_remap().expect("extend and remap");
+
+                let meta = *trail.meta_ptr;
+                let total_words = meta.nwords as usize;
+                let new_words = total_words - curr_words;
+
+                for i in curr_words..total_words {
+                    assert_eq!(
+                        (*trail.bmap_ptr.add(i)).0,
+                        0x00,
+                        "Newly allocated word {} must be zero",
+                        i
+                    );
+                }
+
+                assert!(new_words > 0x00, "Extend must add at least one word");
+            }
+        }
+
+        #[test]
+        fn test_extend_remap_refreshes_pointers() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+
+                let og_meta = trail.meta_ptr;
+                let og_bmap = trail.bmap_ptr;
+
+                trail.extend_remap().expect("extend and remap");
+
+                assert!(trail.mmap.len() > 0);
+                assert!(!trail.meta_ptr.is_null());
+                assert!(!trail.bmap_ptr.is_null());
+            }
+        }
+
+        #[test]
+        fn test_extend_remap_preserves_free_invariant() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+
+                for _ in 0x00..0x04 {
+                    trail.extend_remap().expect("extend and remap");
+                    assert_eq!(
+                        (*trail.meta_ptr).free,
+                        (*trail.meta_ptr).nwords * 0x40,
+                        "free must always equal nwords * 64 bits"
+                    );
+                }
             }
         }
     }
