@@ -88,6 +88,11 @@ impl File {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline]
     pub(crate) unsafe fn del(path: &Path) -> InternalResult<()> {
+        // quick pass
+        if !path.exists() {
+            return Ok(());
+        }
+
         std::fs::remove_file(path).map_err(|e| e.into())
     }
 
@@ -294,14 +299,12 @@ mod tests {
     }
 
     #[test]
-    fn test_del_fails_on_dne() {
+    fn test_del_does_not_fails_on_dne() {
         let (_dir, path) = create_file();
 
         unsafe {
-            // NOTE: this is a guard to make sure file simply does not exists
             assert!(!path.exists());
-
-            assert!(File::del(&path).is_err());
+            assert!(File::del(&path).is_ok());
         }
     }
 }
