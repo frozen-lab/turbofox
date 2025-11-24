@@ -399,6 +399,7 @@ mod tests {
 
     mod trail {
         use super::*;
+        use std::os::unix::fs::PermissionsExt;
 
         #[test]
         fn test_new_is_valid() {
@@ -471,6 +472,41 @@ mod tests {
 
             // should panic
             assert!(unsafe { Trail::open(&cfg) }.is_err());
+        }
+
+        #[test]
+        fn test_new_fails_when_dir_is_not_writable() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir.clone()).log(true).log_target("Trail");
+
+            // NOTE: w/ chmod 000 we simulate unwriteable directory
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+            assert!(
+                unsafe { Trail::new(&cfg) }.is_err(),
+                "Trail::new should fail on unwritable directory"
+            );
+
+            // WARN: Must always restore back to avoid shutdown issues
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        #[test]
+        fn test_open_fails_when_dir_is_not_readable() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir.clone()).log(true).log_target("Trail");
+            let path = dir.join("trail");
+
+            std::fs::write(&path, &[0u8; 64]).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+            let res = unsafe { Trail::open(&cfg) };
+            assert!(res.is_err(), "Trail::open should fail when directory is unreadable");
+
+            // WARN: Must always restore back to avoid shutdown issues
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
 
