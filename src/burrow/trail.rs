@@ -272,128 +272,6 @@ impl Trail {
 
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    /// Lookup `N` slots in the [BitMap]
-    unsafe fn lookup_n(&mut self, n: usize) -> Option<usize> {
-        // sanity checks
-        debug_assert!(n > 0x00, "N must not be zero");
-
-        let meta = &mut *self.meta_ptr;
-
-        // not enough slots
-        if meta.free < n as u64 {
-            return None;
-        }
-
-        let nwords = meta.nwords as usize;
-        let mut scanned: usize = 0x00;
-
-        // normalized `w_idx`
-        let mut w_idx = meta.cw_idx as usize;
-        if w_idx >= nwords {
-            w_idx = 0x00;
-        }
-
-        // contineous free slots found w/ it's start idx
-        let mut run_len: usize = 0x00;
-        let mut run_start: usize = 0x00;
-
-        while scanned < nwords {
-            // NOTE: We prefetch next batch to avoid cache miss
-            #[cfg(target_arch = "x86_64")]
-            {
-                let pf = {
-                    let p = w_idx + 0x04;
-                    if p >= nwords {
-                        0x00
-                    } else {
-                        p
-                    }
-                };
-                let pf_ptr = self.bmap_ptr.add(pf) as *const i8;
-                core::arch::x86_64::_mm_prefetch(pf_ptr, core::arch::x86_64::_MM_HINT_T0);
-            }
-
-            let w_ptr = self.bmap_ptr.add(w_idx);
-            let mut word = !(*w_ptr).0;
-
-            // current word is full, reset and continue to next
-            if word == 0x00 {
-                run_len = 0x00;
-                scanned += 0x01;
-
-                w_idx += 0x01;
-                if w_idx >= nwords {
-                    w_idx = 0x00;
-                }
-
-                continue;
-            }
-
-            let base_bit = w_idx << 0x06;
-            while word != 0x00 {
-                let pos = core::arch::x86_64::_tzcnt_u64(word) as usize;
-                let suffix = word >> pos;
-                let chunk = core::arch::x86_64::_tzcnt_u64(!suffix) as usize;
-
-                if run_len == 0x00 {
-                    run_start = base_bit + pos;
-                    run_len = chunk;
-                } else {
-                    let expected = run_start + run_len;
-                    let this_start = base_bit + pos;
-
-                    // is not contiguous!
-                    if this_start != expected {
-                        run_start = this_start;
-                        run_len = chunk;
-                    } else {
-                        run_len += chunk;
-                    }
-                }
-
-                if run_len >= n {
-                    let mut remaining = n;
-                    let mut bitpos = run_start;
-                    while remaining > 0x00 {
-                        let wi = bitpos >> 0x06;
-                        let off = bitpos & 0x3F;
-                        let take = core::cmp::min(remaining, 0x40 - off);
-                        let mask: u64 = if take == 0x40 {
-                            u64::MAX
-                        } else {
-                            ((u64::MAX >> (0x40 - take)) as u64) << off
-                        };
-
-                        (*self.bmap_ptr.add(wi)).0 |= mask;
-                        remaining -= take;
-                        bitpos += take;
-                    }
-
-                    meta.free -= n as u64;
-                    meta.cw_idx = (run_start / 0x40) as u64;
-                    return Some(run_start);
-                }
-
-                let shift = pos + chunk;
-                if shift >= 0x40 {
-                    word = 0x00;
-                } else {
-                    word >>= shift;
-                }
-            }
-
-            w_idx += 0x01;
-            scanned += 0x01;
-            if w_idx >= nwords {
-                w_idx = 0x00;
-            }
-        }
-
-        None
-    }
-
-    #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
     /// Lookup one slot in the [BitMap]
     ///
     /// ## Perf
@@ -501,6 +379,124 @@ impl Trail {
                 w_idx = 0x00;
             }
             remaining -= 0x01;
+        }
+
+        None
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    /// Lookup `N` slots in the [BitMap]
+    unsafe fn lookup_n(&mut self, n: usize) -> Option<usize> {
+        // sanity checks
+        debug_assert!(n > 0x00, "N must not be zero");
+
+        let meta = &mut *self.meta_ptr;
+        let nwords = meta.nwords as usize;
+        let mut scanned: usize = 0x00;
+
+        // not enough free slots
+        if meta.free < n as u64 {
+            return None;
+        }
+
+        // normalized `w_idx`
+        let mut w_idx = meta.cw_idx as usize;
+        if w_idx >= nwords {
+            w_idx = 0x00;
+        }
+
+        // contineous free slots found w/ it's start idx
+        let mut run_len: usize = 0x00;
+        let mut run_start: usize = 0x00;
+
+        while scanned < nwords {
+            // NOTE: We prefetch next batch to avoid cache miss
+            #[cfg(target_arch = "x86_64")]
+            {
+                let pf = {
+                    let p = w_idx + 0x04;
+                    if p >= nwords {
+                        0x00
+                    } else {
+                        p
+                    }
+                };
+                let pf_ptr = self.bmap_ptr.add(pf) as *const i8;
+                core::arch::x86_64::_mm_prefetch(pf_ptr, core::arch::x86_64::_MM_HINT_T0);
+            }
+
+            let w_ptr = self.bmap_ptr.add(w_idx);
+            let mut word = !(*w_ptr).0;
+
+            // current word is full, reset and continue to next
+            if word == 0x00 {
+                run_len = 0x00;
+                scanned += 0x01;
+
+                w_idx += 0x01;
+                w_idx -= (w_idx == nwords) as usize * nwords;
+
+                continue;
+            }
+
+            // NOTE: If prev run existed, but this word does not have a free slot at 0th idx,
+            // the current run can't continue!
+            if run_len > 0x00 && (word & 0x01) == 0x00 {
+                run_len = 0x00;
+            }
+
+            let base_bit = w_idx << 0x06;
+            while word != 0x00 {
+                let pos = core::arch::x86_64::_tzcnt_u64(word) as usize;
+                let suffix = word >> pos;
+                let chunk = suffix.trailing_ones() as usize;
+
+                if run_len == 0x00 {
+                    run_start = base_bit + pos;
+                    run_len = chunk;
+                } else {
+                    let expected = run_start + run_len;
+                    let this_start = base_bit + pos;
+
+                    // is not contiguous!
+                    if this_start != expected {
+                        run_start = this_start;
+                        run_len = chunk;
+                    } else {
+                        run_len += chunk;
+                    }
+                }
+
+                if run_len >= n {
+                    let mut remaining = n;
+                    let mut bitpos = run_start;
+                    while remaining > 0x00 {
+                        let wi = bitpos >> 0x06;
+                        let off = bitpos & 0x3F;
+                        let take = core::cmp::min(remaining, 0x40 - off);
+                        let mask = (!0x00 >> (0x40 - take)) << off;
+
+                        (*self.bmap_ptr.add(wi)).0 |= mask;
+                        remaining -= take;
+                        bitpos += take;
+                    }
+
+                    meta.free -= n as u64;
+                    meta.cw_idx = (run_start / 0x40) as u64;
+                    return Some(run_start);
+                }
+
+                let shift = pos + chunk;
+                if shift >= 0x40 {
+                    break;
+                }
+                word >>= shift;
+            }
+
+            scanned += 0x01;
+            w_idx += 0x01;
+            w_idx -= (w_idx == nwords) as usize * nwords;
         }
 
         None
@@ -1089,6 +1085,131 @@ mod tests {
                         avg,
                         threshold_ns
                     );
+                }
+            }
+        }
+    }
+
+    mod trail_lookup_n {
+        use super::*;
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        #[test]
+        fn test_lookup_n_correctly_works() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let total = (*trail.meta_ptr).nwords * 0x40;
+
+                // allocate chunks of 2
+                for i in (0x00..total).step_by(0x02) {
+                    let ix = trail.lookup_n(0x02).expect("slot");
+                    assert_eq!(ix as u64, i);
+                }
+
+                assert!(trail.lookup_n(0x02).is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+
+        #[test]
+        fn test_lookup_n_returns_contineous_blocks() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let total = (*trail.meta_ptr).nwords * 0x40;
+
+                let want = 0x0B;
+                let ix = trail.lookup_n(want).expect("slot");
+                assert_eq!(ix, 0x00);
+
+                for b in 0x00..want {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    assert!(((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01 == 0x01);
+                }
+
+                assert_eq!((*trail.meta_ptr).free, total - want as u64);
+            }
+        }
+
+        #[test]
+        fn test_lookup_n_wraps_correctly() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let nw = (*trail.meta_ptr).nwords as usize;
+
+                // fill all of word(0)
+                assert!(trail.lookup_n(0x40).is_some());
+                assert_eq!((*trail.meta_ptr).cw_idx, 0x00);
+
+                // next must start at word(1)
+                let ix = trail.lookup_n(0x03).expect("slot");
+                assert_eq!(ix, 0x40);
+                assert_eq!((*trail.meta_ptr).cw_idx, 0x01);
+
+                // force start near last word
+                (*trail.meta_ptr).cw_idx = (nw - 0x01) as u64;
+                let ix2 = trail.lookup_n(0x02).expect("slot");
+                assert_eq!(ix2, (nw - 0x01) * 0x40);
+            }
+        }
+
+        #[test]
+        fn test_lookup_n_bit_consistency() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let total = (*trail.meta_ptr).nwords as usize * 0x40;
+
+                // Snap of [BitMap]
+                let mut bitmap = vec![0x00u64; (*trail.meta_ptr).nwords as usize];
+                let mut taken = 0x00usize;
+
+                for n in [0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x0B, 0x10, 0x1F, 0x40].repeat(0x08) {
+                    if taken + n > total {
+                        break;
+                    }
+
+                    let start = trail.lookup_n(n).expect("slot");
+                    assert_eq!(start, taken, "lookup_n must allocate sequentially");
+
+                    for b in start..start + n {
+                        let wi = b >> 0x06;
+                        let off = b & 0x3F;
+                        bitmap[wi] |= 0x01 << off;
+                    }
+                    taken += n;
+                    for (i, word) in bitmap.iter().enumerate() {
+                        assert_eq!((*trail.bmap_ptr.add(i)).0, *word, "bitmap mismatch at word {i}");
+                    }
+                }
+
+                // all bits up to `taken` must be 1, all after must be 0
+                for b in 0x00..total {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    let actual = ((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01;
+
+                    if b < taken {
+                        assert_eq!(actual, 0x01, "bit {b} must be allocated (1)");
+                    } else {
+                        assert_eq!(actual, 0x00, "bit {b} must remain free (0)");
+                    }
                 }
             }
         }
