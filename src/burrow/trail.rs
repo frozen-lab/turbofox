@@ -1,3 +1,5 @@
+use libc::W_OK;
+
 use crate::{
     errors::{InternalError, InternalResult},
     linux::{file::File, mmap::MMap},
@@ -26,7 +28,7 @@ struct Meta {
     version: u32,
     free: u64,
     nwords: u64,
-    _padd: [u8; 0x08], // 8 bytes padding to align struct to 32 bytes
+    cw_idx: u64,
 }
 
 const META_SIZE: usize = std::mem::size_of::<Meta>();
@@ -36,9 +38,9 @@ impl Meta {
         Self {
             magic: MAGIC,
             version: VERSION,
+            cw_idx: 0,
             nwords: words,
             free: words * 0x40,
-            _padd: [0u8; 0x08],
         }
     }
 }
@@ -53,7 +55,26 @@ const _: () = assert!(Meta::new(0x02).free == (0x02 * 0x40), "Must be correctly 
 
 #[repr(C, align(0x08))]
 #[derive(Debug)]
-struct BitMapPtr(u64);
+struct BMapPtr(u64);
+
+impl BMapPtr {
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn lookup_one(&mut self, wi: usize, meta: &mut Meta) -> Option<usize> {
+        if self.0 == u64::MAX {
+            return None;
+        }
+
+        let inv = !self.0;
+        let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
+
+        self.0 = self.0 | (1u64 << off);
+        meta.free -= 1;
+        meta.cw_idx = wi as u64;
+
+        Some((wi << 6) + off)
+    }
+}
 
 //
 // Trail
@@ -65,7 +86,7 @@ pub(super) struct Trail {
     mmap: MMap,
     cfg: InternalCfg,
     meta_ptr: *mut Meta,
-    bmap_ptr: *mut BitMapPtr,
+    bmap_ptr: *mut BMapPtr,
 }
 
 impl Trail {
@@ -150,7 +171,7 @@ impl Trail {
             })?;
 
         let meta_ptr = mmap.read_mut::<Meta>(0);
-        let bmap_ptr = mmap.read_mut::<BitMapPtr>(META_SIZE);
+        let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
 
         cfg.logger.debug("(TRAIL) [new] New successfully completed");
 
@@ -231,7 +252,7 @@ impl Trail {
         debug_assert_eq!(mmap.len(), file_len, "MMap len must be same as file len");
 
         let meta_ptr = mmap.read_mut::<Meta>(0);
-        let bmap_ptr = mmap.read_mut::<BitMapPtr>(META_SIZE);
+        let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
 
         // metadata validations
         //
@@ -249,6 +270,109 @@ impl Trail {
             bmap_ptr,
             cfg: cfg.clone(),
         })
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn lookup_one(&mut self) -> Option<usize> {
+        let meta = &mut *self.meta_ptr;
+
+        // no slots left
+        if meta.free == 0x00 {
+            return None;
+        }
+
+        let nwords = meta.nwords as usize;
+        let mut w_idx = meta.cw_idx as usize;
+        let mut remaining = nwords;
+
+        // normalize `w_idx`
+        if w_idx >= nwords {
+            w_idx = 0x00;
+        }
+
+        while remaining >= 0x04 {
+            // NOTE: We prefetch next batch to avoid cache miss
+            let pf = {
+                let p = w_idx + 0x08;
+                if p >= nwords {
+                    0x00
+                } else {
+                    p
+                }
+            };
+            let pf_ptr = self.bmap_ptr.add(pf) as *const i8;
+            core::arch::x86_64::_mm_prefetch(pf_ptr, core::arch::x86_64::_MM_HINT_T0);
+
+            // compute indexes
+
+            let i1 = {
+                let x = w_idx + 0x01;
+                if x >= nwords {
+                    x - nwords
+                } else {
+                    x
+                }
+            };
+            let i2 = {
+                let x = w_idx + 0x02;
+                if x >= nwords {
+                    x - nwords
+                } else {
+                    x
+                }
+            };
+            let i3 = {
+                let x = w_idx + 0x03;
+                if x >= nwords {
+                    x - nwords
+                } else {
+                    x
+                }
+            };
+
+            let w0 = &mut *self.bmap_ptr.add(w_idx);
+            if let Some(idx) = w0.lookup_one(w_idx, meta) {
+                return Some(idx);
+            }
+
+            let w1 = &mut *self.bmap_ptr.add(i1);
+            if let Some(idx) = w1.lookup_one(i1, meta) {
+                return Some(idx);
+            }
+
+            let w2 = &mut *self.bmap_ptr.add(i2);
+            if let Some(idx) = w2.lookup_one(i2, meta) {
+                return Some(idx);
+            }
+
+            let w3 = &mut *self.bmap_ptr.add(i3);
+            if let Some(idx) = w3.lookup_one(i3, meta) {
+                return Some(idx);
+            }
+
+            // next up
+
+            remaining -= 0x04;
+            w_idx += 0x04;
+            if w_idx >= nwords {
+                w_idx = 0x00;
+            }
+        }
+
+        while remaining > 0x00 {
+            let word = &mut *self.bmap_ptr.add(w_idx);
+            if let Some(idx) = word.lookup_one(w_idx, meta) {
+                return Some(idx);
+            }
+
+            w_idx += 0x01;
+            if w_idx >= nwords {
+                w_idx = 0x00;
+            }
+            remaining -= 0x01;
+        }
+
+        None
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
@@ -296,7 +420,7 @@ impl Trail {
                 e
             })?;
         self.meta_ptr = self.mmap.read_mut::<Meta>(0);
-        self.bmap_ptr = self.mmap.read_mut::<BitMapPtr>(META_SIZE);
+        self.bmap_ptr = self.mmap.read_mut::<BMapPtr>(META_SIZE);
 
         // STEP 4: Update & Sync Meta
         (*self.meta_ptr).nwords = new_nwords;
@@ -481,7 +605,7 @@ mod tests {
             let cfg = InternalCfg::new(dir.clone()).log(true).log_target("Trail");
 
             // NOTE: w/ chmod 000 we simulate unwriteable directory
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("Set permission");
 
             assert!(
                 unsafe { Trail::new(&cfg) }.is_err(),
@@ -489,7 +613,7 @@ mod tests {
             );
 
             // WARN: Must always restore back to avoid shutdown issues
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("Re-Set Permission");
         }
 
         #[test]
@@ -499,14 +623,14 @@ mod tests {
             let cfg = InternalCfg::new(dir.clone()).log(true).log_target("Trail");
             let path = dir.join("trail");
 
-            std::fs::write(&path, &[0u8; 64]).unwrap();
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+            std::fs::write(&path, &[0u8; 64]).expect("Write");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("Set Permission");
 
             let res = unsafe { Trail::open(&cfg) };
             assert!(res.is_err(), "Trail::open should fail when directory is unreadable");
 
             // WARN: Must always restore back to avoid shutdown issues
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("Re-Set Permission");
         }
     }
 
@@ -636,6 +760,134 @@ mod tests {
                         (*trail.meta_ptr).nwords * 0x40,
                         "free must always equal nwords * 64 bits"
                     );
+                }
+            }
+        }
+    }
+
+    mod bmap {
+        use super::*;
+
+        #[test]
+        fn test_lookup_one_works() {
+            unsafe {
+                let mut meta = Meta::new(0x01);
+                let mut w = BMapPtr(0x00);
+
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x00));
+                assert_eq!(w.0, 0b1);
+
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x01));
+                assert_eq!(w.0, 0b11);
+
+                assert_eq!(meta.free, 0x3E);
+            }
+        }
+
+        #[test]
+        fn test_lookup_one_returns_none_on_full() {
+            unsafe {
+                let mut meta = Meta::new(0x01);
+                let mut w = BMapPtr(u64::MAX);
+
+                assert!(w.lookup_one(0x00, &mut meta).is_none());
+                assert_eq!(meta.free, 0x40);
+            }
+        }
+    }
+
+    mod trail_lookup_one {
+        use super::*;
+
+        #[test]
+        fn test_trail_lookup_one_sequential_filling() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new trail");
+                let total = (*trail.meta_ptr).nwords * 0x40;
+
+                for i in 0x00..total {
+                    let got = trail.lookup_one().expect("slot");
+                    assert_eq!(got as u64, i);
+                }
+
+                assert!(trail.lookup_one().is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_one_wraps_around_correctly() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+
+                // We fill in word(0) completely
+                for i in 0x00..0x40 {
+                    assert_eq!(trail.lookup_one(), Some(i));
+                }
+
+                assert_eq!((*trail.meta_ptr).cw_idx, 0x00);
+
+                assert_eq!(trail.lookup_one(), Some(0x40));
+                assert_eq!((*trail.meta_ptr).cw_idx, 0x01);
+
+                // NOTE: We force alloc starting point by setting the near last bit
+                (*trail.meta_ptr).cw_idx = (nwords - 0x01) as u64;
+
+                // Nxt alloc should be first free bit in the last word
+                let idx = trail.lookup_one().expect("Lookup");
+                assert_eq!(idx, (nwords - 0x01) * 0x40);
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_one_preserves_meta_free_invariant() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new trail");
+                let total = (*trail.meta_ptr).nwords * 0x40;
+
+                for i in 0x00..total {
+                    let before = (*trail.meta_ptr).free;
+
+                    assert!(trail.lookup_one().is_some());
+                    assert_eq!((*trail.meta_ptr).free, before - 0x01);
+                }
+
+                assert!(trail.lookup_one().is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_one_bit_consistency() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new trail");
+                let total = (*trail.meta_ptr).nwords as usize * 0x40;
+                let mut seen = vec![false; total];
+
+                for _ in 0x00..total {
+                    let ix = trail.lookup_one().expect("Insert slot");
+                    seen[ix] = true;
+                }
+
+                for s in seen {
+                    assert!(s, "every index must be returned exactly once");
                 }
             }
         }
