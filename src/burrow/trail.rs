@@ -1031,7 +1031,7 @@ mod tests {
             let cfg = InternalCfg::new(dir)
                 .init_cap(INIT_CAP)
                 .log(true)
-                .log_target("[BENCH] Trail");
+                .log_target("[BENCH] Trail::lookup_one");
 
             cfg.logger.info("----------Lookup(1)----------");
 
@@ -1092,6 +1092,7 @@ mod tests {
 
     mod trail_lookup_n {
         use super::*;
+        use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
         use std::hint::black_box;
         use std::time::Instant;
 
@@ -1210,6 +1211,95 @@ mod tests {
                     } else {
                         assert_eq!(actual, 0x00, "bit {b} must remain free (0)");
                     }
+                }
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn bench_lookup_n() {
+            const INIT_CAP: usize = 0x7D000; // 512K bits
+
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir)
+                .init_cap(INIT_CAP)
+                .log(true)
+                .log_target("[BENCH] Trail::lookup_n");
+
+            cfg.logger.info("----------Lookup(N)----------");
+
+            unsafe {
+                let rounds = 0x08;
+
+                // STEP 1: Generate seq of N-values
+                let mut chunks: Vec<usize> = Vec::new();
+                let mut rem = INIT_CAP;
+                let mut sizes = (0x02..0x10).collect::<Vec<_>>();
+                let mut rng = StdRng::seed_from_u64(0xBEEFCAFE);
+                sizes.shuffle(&mut rng);
+
+                while rem > 0x00 {
+                    for &s in &sizes {
+                        if s <= rem {
+                            chunks.push(s);
+                            rem -= s;
+                        } else if rem > 0x00 {
+                            chunks.push(rem);
+                            rem = 0x00;
+                        }
+                    }
+                }
+
+                cfg.logger.info(format!(
+                    "Generated {} lookup_n calls, total bits = {}",
+                    chunks.len(),
+                    chunks.iter().sum::<usize>()
+                ));
+
+                let mut trail = Trail::new(&cfg).expect("New Trail");
+
+                // STEP 2: Warmup
+                //
+                // NOTE: warmup to eliminate cold cache & cold cpu, and branch predictor effects
+                for _ in 0x00..0x2710 {
+                    assert!(trail.lookup_n(0x02).is_some());
+                }
+
+                // STEP 3: Benchmark
+                let mut results = Vec::with_capacity(rounds);
+                for r in 0x00..rounds {
+                    let meta = &mut *trail.meta_ptr;
+                    let w = meta.nwords as usize;
+                    meta.free = meta.nwords * 0x40;
+                    meta.cw_idx = 0x00;
+
+                    for i in 0x00..w {
+                        (*trail.bmap_ptr.add(i)).0 = 0x00;
+                    }
+
+                    let start = Instant::now();
+
+                    for &n in &chunks {
+                        assert!(trail.lookup_n(n).is_some());
+                    }
+
+                    let elapsed = start.elapsed();
+                    let calls = chunks.len();
+                    let ns = elapsed.as_nanos() as f64 / calls as f64;
+
+                    cfg.logger.info(format!("[Round {r}] {ns:.2} ns/op"));
+                    results.push(ns);
+                }
+
+                // STEP 4: Compute Results
+                let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
+                cfg.logger.info(format!("AVERAGE: {:.2} ns/op", avg));
+
+                #[cfg(not(debug_assertions))]
+                {
+                    let threshold = 0x20 as f64;
+                    assert!(avg <= threshold, "lookup_n too slow: {avg} ns/op");
                 }
             }
         }
