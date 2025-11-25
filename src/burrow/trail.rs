@@ -1,5 +1,3 @@
-use libc::W_OK;
-
 use crate::{
     errors::{InternalError, InternalResult},
     linux::{file::File, mmap::MMap},
@@ -38,7 +36,7 @@ impl Meta {
         Self {
             magic: MAGIC,
             version: VERSION,
-            cw_idx: 0,
+            cw_idx: 0x00,
             nwords: words,
             free: words * 0x40,
         }
@@ -50,7 +48,7 @@ const _: () = assert!(META_SIZE == 0x20, "Must be 32 bytes aligned");
 const _: () = assert!(Meta::new(0x02).free == (0x02 * 0x40), "Must be correctly initialised");
 
 //
-// BitMap
+// BMap
 //
 
 #[repr(C, align(0x08))]
@@ -69,10 +67,10 @@ impl BMapPtr {
         let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
 
         self.0 = self.0 | (1u64 << off);
-        meta.free -= 1;
+        meta.free -= 0x01;
         meta.cw_idx = wi as u64;
 
-        Some((wi << 6) + off)
+        Some((wi << 0x06) + off)
     }
 }
 
@@ -161,7 +159,7 @@ impl Trail {
         //
         // NOTE: we can afford this syscall here, as init does not come under the fast
         // path. Also it's just one time thing!
-        mmap.write(0, &Meta::new(nwords as u64));
+        mmap.write(0x00, &Meta::new(nwords as u64));
         mmap.ms_sync()
             .inspect(|_| cfg.logger.trace("(TRAIL) [new] MsSync successful on Meta"))
             .map_err(|e| {
@@ -170,7 +168,7 @@ impl Trail {
                 e
             })?;
 
-        let meta_ptr = mmap.read_mut::<Meta>(0);
+        let meta_ptr = mmap.read_mut::<Meta>(0x00);
         let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
 
         cfg.logger.debug("(TRAIL) [new] New successfully completed");
@@ -227,7 +225,7 @@ impl Trail {
         // WARN: As this is a fatel scenerio, we delete the existing file, hence clean up the whole db,
         // as we can not simply make any sense of the data!
         let bmap_len = file_len.wrapping_sub(META_SIZE);
-        if bmap_len == 0x00 || bmap_len & 0x07 != 0 {
+        if bmap_len == 0x00 || bmap_len & 0x07 != 0x00 {
             let err = InternalError::InvalidFile("File is not page aligned".into());
             cfg.logger
                 .error(format!("(TRAIL) [open] Existing file is invalid: {err}"));
@@ -251,7 +249,7 @@ impl Trail {
         // sanity check
         debug_assert_eq!(mmap.len(), file_len, "MMap len must be same as file len");
 
-        let meta_ptr = mmap.read_mut::<Meta>(0);
+        let meta_ptr = mmap.read_mut::<Meta>(0x00);
         let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
 
         // metadata validations
@@ -273,6 +271,136 @@ impl Trail {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    /// Lookup `N` slots in the [BitMap]
+    unsafe fn lookup_n(&mut self, n: usize) -> Option<usize> {
+        // sanity checks
+        debug_assert!(n > 0x00, "N must not be zero");
+
+        let meta = &mut *self.meta_ptr;
+
+        // not enough slots
+        if meta.free < n as u64 {
+            return None;
+        }
+
+        let nwords = meta.nwords as usize;
+        let mut scanned: usize = 0x00;
+
+        // normalized `w_idx`
+        let mut w_idx = meta.cw_idx as usize;
+        if w_idx >= nwords {
+            w_idx = 0x00;
+        }
+
+        // contineous free slots found w/ it's start idx
+        let mut run_len: usize = 0x00;
+        let mut run_start: usize = 0x00;
+
+        while scanned < nwords {
+            // NOTE: We prefetch next batch to avoid cache miss
+            #[cfg(target_arch = "x86_64")]
+            {
+                let pf = {
+                    let p = w_idx + 0x04;
+                    if p >= nwords {
+                        0x00
+                    } else {
+                        p
+                    }
+                };
+                let pf_ptr = self.bmap_ptr.add(pf) as *const i8;
+                core::arch::x86_64::_mm_prefetch(pf_ptr, core::arch::x86_64::_MM_HINT_T0);
+            }
+
+            let w_ptr = self.bmap_ptr.add(w_idx);
+            let mut word = !(*w_ptr).0;
+
+            // current word is full, reset and continue to next
+            if word == 0x00 {
+                run_len = 0x00;
+                scanned += 0x01;
+
+                w_idx += 0x01;
+                if w_idx >= nwords {
+                    w_idx = 0x00;
+                }
+
+                continue;
+            }
+
+            let base_bit = w_idx << 0x06;
+            while word != 0x00 {
+                let pos = core::arch::x86_64::_tzcnt_u64(word) as usize;
+                let suffix = word >> pos;
+                let chunk = core::arch::x86_64::_tzcnt_u64(!suffix) as usize;
+
+                if run_len == 0x00 {
+                    run_start = base_bit + pos;
+                    run_len = chunk;
+                } else {
+                    let expected = run_start + run_len;
+                    let this_start = base_bit + pos;
+
+                    // is not contiguous!
+                    if this_start != expected {
+                        run_start = this_start;
+                        run_len = chunk;
+                    } else {
+                        run_len += chunk;
+                    }
+                }
+
+                if run_len >= n {
+                    let mut remaining = n;
+                    let mut bitpos = run_start;
+                    while remaining > 0x00 {
+                        let wi = bitpos >> 0x06;
+                        let off = bitpos & 0x3F;
+                        let take = core::cmp::min(remaining, 0x40 - off);
+                        let mask: u64 = if take == 0x40 {
+                            u64::MAX
+                        } else {
+                            ((u64::MAX >> (0x40 - take)) as u64) << off
+                        };
+
+                        (*self.bmap_ptr.add(wi)).0 |= mask;
+                        remaining -= take;
+                        bitpos += take;
+                    }
+
+                    meta.free -= n as u64;
+                    meta.cw_idx = (run_start / 0x40) as u64;
+                    return Some(run_start);
+                }
+
+                let shift = pos + chunk;
+                if shift >= 0x40 {
+                    word = 0x00;
+                } else {
+                    word >>= shift;
+                }
+            }
+
+            w_idx += 0x01;
+            scanned += 0x01;
+            if w_idx >= nwords {
+                w_idx = 0x00;
+            }
+        }
+
+        None
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    /// Lookup one slot in the [BitMap]
+    ///
+    /// ## Perf
+    ///  - On scalar about 2.7 ns/ops
+    ///
+    /// ## TODO's
+    ///  - Impl of SIMD
     unsafe fn lookup_one(&mut self) -> Option<usize> {
         let meta = &mut *self.meta_ptr;
 
@@ -282,26 +410,29 @@ impl Trail {
         }
 
         let nwords = meta.nwords as usize;
-        let mut w_idx = meta.cw_idx as usize;
         let mut remaining = nwords;
 
-        // normalize `w_idx`
+        // normalized `w_idx`
+        let mut w_idx = meta.cw_idx as usize;
         if w_idx >= nwords {
             w_idx = 0x00;
         }
 
         while remaining >= 0x04 {
             // NOTE: We prefetch next batch to avoid cache miss
-            let pf = {
-                let p = w_idx + 0x08;
-                if p >= nwords {
-                    0x00
-                } else {
-                    p
-                }
-            };
-            let pf_ptr = self.bmap_ptr.add(pf) as *const i8;
-            core::arch::x86_64::_mm_prefetch(pf_ptr, core::arch::x86_64::_MM_HINT_T0);
+            #[cfg(target_arch = "x86_64")]
+            {
+                let pf = {
+                    let p = w_idx + 0x04;
+                    if p >= nwords {
+                        0x00
+                    } else {
+                        p
+                    }
+                };
+                let pf_ptr = self.bmap_ptr.add(pf) as *const i8;
+                core::arch::x86_64::_mm_prefetch(pf_ptr, core::arch::x86_64::_MM_HINT_T0);
+            }
 
             // compute indexes
 
@@ -952,7 +1083,6 @@ mod tests {
                 #[cfg(not(debug_assertions))]
                 {
                     let threshold_ns = 0x05 as f64;
-
                     assert!(
                         avg <= threshold_ns,
                         "lookup_one too slow: {:.2} ns/op (threshold: {} ns)",
