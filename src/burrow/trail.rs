@@ -798,6 +798,8 @@ mod tests {
 
     mod trail_lookup_one {
         use super::*;
+        use std::hint::black_box;
+        use std::time::Instant;
 
         #[test]
         fn test_trail_lookup_one_sequential_filling() {
@@ -888,6 +890,75 @@ mod tests {
 
                 for s in seen {
                     assert!(s, "every index must be returned exactly once");
+                }
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn bench_lookup_one() {
+            const INIT_CAP: usize = 0x7D000; // 512K
+
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir)
+                .init_cap(INIT_CAP)
+                .log(true)
+                .log_target("[BENCH] Trail");
+
+            cfg.logger.info("----------Lookup(1)----------");
+
+            unsafe {
+                let rounds = 0x0A;
+                let iters = INIT_CAP;
+                cfg.logger.info(format!("Rounds={rounds}, Iters={iters}"));
+
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let mut results: Vec<f64> = Vec::with_capacity(rounds);
+
+                // NOTE: warmup to eliminate cold cache & cold cpu, and branch predictor effects
+                for _ in 0x00..0x2710 {
+                    assert!(trail.lookup_one().is_some());
+                }
+
+                for r in 0..rounds {
+                    // HACK: We reset bmap so lookup always does real work
+                    let meta = &mut *trail.meta_ptr;
+                    meta.free = meta.nwords * 64;
+                    meta.cw_idx = 0;
+
+                    // Clear up all bmap words
+                    let nwords = meta.nwords as usize;
+                    for i in 0..nwords {
+                        (*trail.bmap_ptr.add(i)).0 = 0;
+                    }
+
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        assert!(trail.lookup_one().is_some());
+                    }
+                    let elapsed = start.elapsed();
+
+                    let ns_per_op = elapsed.as_nanos() as f64 / iters as f64;
+                    cfg.logger
+                        .info(format!("[Round {r}] Time={:?}  =>  {:.2} ns/op", elapsed, ns_per_op));
+
+                    results.push(ns_per_op);
+                }
+
+                let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
+                cfg.logger.info(format!("AVERAGE: {:.2} ns/op", avg));
+
+                #[cfg(not(debug_assertions))]
+                {
+                    let threshold_ns = 0x05 as f64;
+
+                    assert!(
+                        avg <= threshold_ns,
+                        "lookup_one too slow: {:.2} ns/op (threshold: {} ns)",
+                        avg,
+                        threshold_ns
+                    );
                 }
             }
         }
