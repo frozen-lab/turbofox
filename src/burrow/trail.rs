@@ -272,6 +272,32 @@ impl Trail {
 
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
+    pub(super) unsafe fn lookup(&mut self, n: usize) -> Option<usize> {
+        let meta = &mut *self.meta_ptr;
+
+        // sanity checks
+        debug_assert!(n != 0x00, "N must not be zero");
+
+        // just one slot to get
+        if n == 0x01 {
+            // no slot left
+            if meta.free == 0x00 {
+                return None;
+            }
+
+            return self.lookup_one();
+        }
+
+        // not enough slots
+        if meta.free < n as u64 {
+            return None;
+        }
+
+        self.lookup_n(n)
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
     /// Lookup one slot in the [BitMap]
     ///
     /// ## Perf
@@ -282,10 +308,8 @@ impl Trail {
     unsafe fn lookup_one(&mut self) -> Option<usize> {
         let meta = &mut *self.meta_ptr;
 
-        // no slots left
-        if meta.free == 0x00 {
-            return None;
-        }
+        // sanity checks
+        debug_assert!(meta.free != 0x00, "No free slots found");
 
         let nwords = meta.nwords as usize;
         let mut remaining = nwords;
@@ -394,17 +418,14 @@ impl Trail {
     /// ## TODO's
     ///  - Impl of SIMD
     unsafe fn lookup_n(&mut self, n: usize) -> Option<usize> {
+        let meta = &mut *self.meta_ptr;
+
         // sanity checks
         debug_assert!(n > 0x00, "N must not be zero");
+        debug_assert!(meta.free >= n as u64, "Must be enough slots to fill in");
 
-        let meta = &mut *self.meta_ptr;
         let nwords = meta.nwords as usize;
         let mut scanned: usize = 0x00;
-
-        // not enough free slots
-        if meta.free < n as u64 {
-            return None;
-        }
 
         // normalized `w_idx`
         let mut w_idx = meta.cw_idx as usize;
@@ -956,10 +977,11 @@ mod tests {
         use std::time::Instant;
 
         #[test]
+        #[cfg(not(debug_assertions))]
         fn test_trail_lookup_one_sequential_filling() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -979,7 +1001,7 @@ mod tests {
         fn test_trail_lookup_one_wraps_around_correctly() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1005,10 +1027,11 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(debug_assertions))]
         fn test_trail_lookup_one_preserves_meta_free_invariant() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1030,7 +1053,7 @@ mod tests {
         fn test_trail_lookup_one_bit_consistency() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1049,8 +1072,59 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_trail_lookup_one_returns_none_when_full() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+
+                // fill in the entire map
+                for _ in 0x00..0x100 {
+                    assert!(trail.lookup_one().is_some());
+                }
+
+                // no slots left now
+                assert!(trail.lookup_one().is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_one_finds_single_freed_slot() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+                let total_bits = nwords * 0x40;
+
+                // fill in the entire map
+                for _ in 0x00..0x100 {
+                    assert!(trail.lookup_one().is_some());
+                }
+
+                // clear a single bit from the map
+                let free_idx = 0x7B;
+                let wi = free_idx >> 6;
+                let off = free_idx & 0x3F;
+                (*trail.bmap_ptr.add(wi)).0 &= !(1u64 << off);
+                (*trail.meta_ptr).free = 1;
+
+                // lookup_one now must return the exact freed slot
+                let found = trail.lookup_one().expect("should find the freed slot");
+                assert_eq!(found, free_idx);
+            }
+        }
+
+        #[test]
         #[ignore]
-        fn bench_lookup_one() {
+        fn bench_trail_lookup_one() {
             const INIT_CAP: usize = 0x7D000; // 512K
 
             let tmp = temp_dir();
@@ -1126,7 +1200,8 @@ mod tests {
         use std::time::Instant;
 
         #[test]
-        fn test_lookup_n_correctly_works() {
+        #[cfg(not(debug_assertions))]
+        fn test_trail_lookup_n_correctly_works() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1147,7 +1222,7 @@ mod tests {
         }
 
         #[test]
-        fn test_lookup_n_returns_contineous_blocks() {
+        fn test_trail_lookup_n_returns_contineous_blocks() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1171,7 +1246,7 @@ mod tests {
         }
 
         #[test]
-        fn test_lookup_n_wraps_correctly() {
+        fn test_trail_lookup_n_wraps_correctly() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1197,7 +1272,7 @@ mod tests {
         }
 
         #[test]
-        fn test_lookup_n_bit_consistency() {
+        fn test_trail_lookup_n_bit_consistency() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1245,8 +1320,74 @@ mod tests {
         }
 
         #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic]
+        fn test_trail_lookup_n_zero_panics() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new trail");
+                let _ = trail.lookup_n(0x00);
+            }
+        }
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn test_trail_lookup_n_returns_none_when_full() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+
+                // fill in the entire map
+                for _ in 0x00..0x80 {
+                    assert!(trail.lookup_n(0x02).is_some());
+                }
+
+                assert!(trail.lookup_n(0x02).is_none());
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_n_finds_freed_block() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+                let total = nwords * 0x40;
+
+                // fill in the entire map
+                for _ in 0x00..0x80 {
+                    assert!(trail.lookup_n(0x02).is_some());
+                }
+
+                // free up some slots
+                let want = 0x05;
+                let start = 0x2A.min(total - want);
+                let end = start + want;
+                for b in start..end {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    (*trail.bmap_ptr.add(wi)).0 &= !(0x01 << off);
+                }
+                (*trail.meta_ptr).free = want as u64;
+
+                let got = trail.lookup_n(want).expect("must find freed block");
+                assert_eq!(got, start, "lookup_n must return the freed region start");
+            }
+        }
+
+        #[test]
         #[ignore]
-        fn bench_lookup_n() {
+        fn bench_trail_lookup_n() {
             const INIT_CAP: usize = 0x7D000; // 512K bits
             const ROUNDS: usize = 0x14;
             const CHUNKS: [usize; 0x0C] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x14, 0x18, 0x20];
