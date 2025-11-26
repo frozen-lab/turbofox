@@ -973,6 +973,7 @@ mod tests {
 
     mod trail_lookup {
         use super::*;
+        use std::time::Instant;
 
         #[test]
         fn test_trail_lookup_maps_correctly_to_lookup_one() {
@@ -1156,6 +1157,139 @@ mod tests {
                 // no slots left
                 assert!(trail.lookup(0x01).is_none());
                 assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_after_extend_remap_returns_correct_next_index() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let initial_total = (*trail.meta_ptr).nwords as usize * 0x40; // 128
+
+                // Fill entire bitmap
+                for _ in 0x00..initial_total {
+                    assert!(trail.lookup(0x01).is_some());
+                }
+
+                // sanity checks
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+                assert!(trail.lookup(0x01).is_none());
+
+                // grow (current + init_cap)
+                assert!(trail.extend_remap().is_ok(), "extend_remap must work");
+
+                let new_total = (*trail.meta_ptr).nwords as usize * 0x40;
+                assert_eq!(new_total, initial_total * 0x02);
+
+                let got = trail.lookup(0x01).expect("must allocate in extended region");
+                assert_eq!(got, initial_total, "lookup() must return first free slot after extend");
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn bench_trail_lookup_with_extend_remap() {
+            const INIT_CAP: usize = 0x1000;
+            const TARGET_CAP: usize = 0x20_000; // grow until total `1_31_072`
+            const MAX_GROWS: usize = TARGET_CAP / INIT_CAP;
+
+            // 50% single slot lookup
+            const CHUNKS: [usize; 0x0C] = [0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x04, 0x05, 0x06, 0x07, 0x18, 0x20];
+            let sum: usize = CHUNKS.into_iter().sum();
+
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir)
+                .init_cap(INIT_CAP)
+                .log(true)
+                .log_target("[BENCH] Trail::lookup_extend_remap");
+
+            cfg.logger.info("----------Lookup(extend_remap)----------");
+            cfg.logger.info(format!(
+                "InitCap={}, TargetCap={}, MaxGrows={}",
+                INIT_CAP, TARGET_CAP, MAX_GROWS
+            ));
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let mut total_allocs: usize = 0x00;
+                let mut t_start = Instant::now();
+                let mut results = Vec::new();
+
+                for grow in 0x00..MAX_GROWS {
+                    // measure allocations until this region is exhausted
+                    let mut ops_count: usize = 0;
+                    let mut bits_allocated: usize = 0;
+
+                    let start = Instant::now();
+                    // repeatedly try CHUNKS pattern, but skip chunks larger than remaining free bits
+                    while (*trail.meta_ptr).free > 0 {
+                        let mut progressed = false;
+                        for &n in CHUNKS.iter() {
+                            let free_bits = (*trail.meta_ptr).free as usize;
+                            if free_bits < n {
+                                continue;
+                            }
+                            // allocate
+                            assert!(trail.lookup(n).is_some());
+                            ops_count += 1;
+                            bits_allocated += n;
+                            progressed = true;
+                        }
+                        // defensive: if no CHUNK fit (shouldn't with CHUNKS containing 1), break to avoid infinite loop
+                        if !progressed {
+                            // fallback allocate single slots until drained
+                            while (*trail.meta_ptr).free > 0 {
+                                assert!(trail.lookup(1).is_some());
+                                ops_count += 1;
+                                bits_allocated += 1;
+                            }
+                            break;
+                        }
+                    }
+                    let elapsed = start.elapsed();
+                    total_allocs += bits_allocated;
+
+                    let ns_op = elapsed.as_nanos() as f64 / (ops_count as f64);
+                    results.push(ns_op);
+
+                    cfg.logger.info(format!(
+                        "[Grow {grow}]   allocated_bits={}  ops={}  =>  {:.2} ns/op  (total_allocs={})",
+                        bits_allocated, ops_count, ns_op, total_allocs
+                    ));
+
+                    // confirm region exhausted
+                    assert!(trail.lookup(0x01).is_none());
+
+                    if total_allocs >= TARGET_CAP {
+                        break;
+                    }
+
+                    trail.extend_remap().expect("extend_remap must succeed");
+                }
+
+                let total_time = t_start.elapsed();
+                let avg = results.iter().sum::<f64>() / results.len() as f64;
+
+                cfg.logger.info(format!("-- SUMMARY --"));
+                cfg.logger.info(format!("Total Allocs: {}", total_allocs));
+                cfg.logger.info(format!("Avg: {:.2} ns/op", avg));
+                cfg.logger.info(format!("Total Time: {:?}", total_time));
+
+                #[cfg(not(debug_assertions))]
+                {
+                    let threshold = 0x20 as f64;
+                    assert!(
+                        avg <= threshold,
+                        "lookup() too slow: {:.2} ns/op  (threshold={})",
+                        avg,
+                        threshold
+                    );
+                }
             }
         }
     }
