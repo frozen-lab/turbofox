@@ -275,7 +275,7 @@ impl Trail {
     /// Lookup one slot in the [BitMap]
     ///
     /// ## Perf
-    ///  - On scalar about 2.7 ns/ops
+    ///  - On scalar about `2.7 ns/ops`
     ///
     /// ## TODO's
     ///  - Impl of SIMD
@@ -387,6 +387,12 @@ impl Trail {
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     /// Lookup `N` slots in the [BitMap]
+    ///
+    /// ## Perf
+    ///  - On scalar about `7 ns/ops`
+    ///
+    /// ## TODO's
+    ///  - Impl of SIMD
     unsafe fn lookup_n(&mut self, n: usize) -> Option<usize> {
         // sanity checks
         debug_assert!(n > 0x00, "N must not be zero");
@@ -471,15 +477,36 @@ impl Trail {
                 if run_len >= n {
                     let mut remaining = n;
                     let mut bitpos = run_start;
-                    while remaining > 0x00 {
-                        let wi = bitpos >> 0x06;
-                        let off = bitpos & 0x3F;
-                        let take = core::cmp::min(remaining, 0x40 - off);
-                        let mask = (!0x00 >> (0x40 - take)) << off;
 
-                        (*self.bmap_ptr.add(wi)).0 |= mask;
-                        remaining -= take;
-                        bitpos += take;
+                    let first_wi = bitpos >> 0x06;
+                    let first_off = bitpos & 0x3F;
+                    let end_bit = run_start + n;
+                    let last_wi = (end_bit - 0x01) >> 0x06;
+                    let last_off = (end_bit - 0x01) & 0x3F;
+
+                    // entirely within one word
+                    if first_wi == last_wi {
+                        let take = n;
+                        let mask = ((!0x00u64) >> (0x40 - take)) << first_off;
+                        (*self.bmap_ptr.add(first_wi)).0 |= mask;
+                    } else {
+                        if first_off != 0x00 {
+                            let head_mask = (!0x00) << first_off;
+                            (*self.bmap_ptr.add(first_wi)).0 |= head_mask;
+                        } else {
+                            (*self.bmap_ptr.add(first_wi)).0 = !0x00;
+                        }
+
+                        if last_wi > first_wi + 0x01 {
+                            let mut wi = first_wi + 0x01;
+                            while wi < last_wi {
+                                (*self.bmap_ptr.add(wi)).0 = !0x00;
+                                wi += 0x01;
+                            }
+                        }
+
+                        let tail_mask = (!0x00) >> (0x3F - (last_off as u64));
+                        (*self.bmap_ptr.add(last_wi)).0 |= tail_mask;
                     }
 
                     meta.free -= n as u64;
@@ -1044,24 +1071,27 @@ mod tests {
                 let mut results: Vec<f64> = Vec::with_capacity(rounds);
 
                 // NOTE: warmup to eliminate cold cache & cold cpu, and branch predictor effects
-                for _ in 0x00..0x2710 {
-                    assert!(trail.lookup_one().is_some());
+                let meta = &mut *trail.meta_ptr;
+                let nwords = meta.nwords as usize;
+                let total = nwords * 0x40;
+                for _ in 0x00..total {
+                    let _ = trail.lookup_one();
                 }
 
-                for r in 0..rounds {
+                for r in 0x00..rounds {
                     // HACK: We reset bmap so lookup always does real work
                     let meta = &mut *trail.meta_ptr;
-                    meta.free = meta.nwords * 64;
-                    meta.cw_idx = 0;
+                    meta.free = meta.nwords * 0x40;
+                    meta.cw_idx = 0x00;
 
                     // Clear up all bmap words
                     let nwords = meta.nwords as usize;
-                    for i in 0..nwords {
-                        (*trail.bmap_ptr.add(i)).0 = 0;
+                    for i in 0x00..nwords {
+                        (*trail.bmap_ptr.add(i)).0 = 0x00;
                     }
 
                     let start = Instant::now();
-                    for _ in 0..iters {
+                    for _ in 0x00..iters {
                         assert!(trail.lookup_one().is_some());
                     }
                     let elapsed = start.elapsed();
@@ -1092,7 +1122,6 @@ mod tests {
 
     mod trail_lookup_n {
         use super::*;
-        use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
         use std::hint::black_box;
         use std::time::Instant;
 
@@ -1219,6 +1248,11 @@ mod tests {
         #[ignore]
         fn bench_lookup_n() {
             const INIT_CAP: usize = 0x7D000; // 512K bits
+            const ROUNDS: usize = 0x14;
+            const CHUNKS: [usize; 0x0C] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x14, 0x18, 0x20];
+
+            let sum: usize = CHUNKS.into_iter().sum();
+            let iters = INIT_CAP / sum;
 
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
@@ -1230,75 +1264,53 @@ mod tests {
             cfg.logger.info("----------Lookup(N)----------");
 
             unsafe {
-                let rounds = 0x08;
-
-                // STEP 1: Generate seq of N-values
-                let mut chunks: Vec<usize> = Vec::new();
-                let mut rem = INIT_CAP;
-                let mut sizes = (0x02..0x10).collect::<Vec<_>>();
-                let mut rng = StdRng::seed_from_u64(0xBEEFCAFE);
-                sizes.shuffle(&mut rng);
-
-                while rem > 0x00 {
-                    for &s in &sizes {
-                        if s <= rem {
-                            chunks.push(s);
-                            rem -= s;
-                        } else if rem > 0x00 {
-                            chunks.push(rem);
-                            rem = 0x00;
-                        }
-                    }
-                }
-
-                cfg.logger.info(format!(
-                    "Generated {} lookup_n calls, total bits = {}",
-                    chunks.len(),
-                    chunks.iter().sum::<usize>()
-                ));
-
                 let mut trail = Trail::new(&cfg).expect("New Trail");
 
-                // STEP 2: Warmup
+                // STEP 1: Warmup
                 //
                 // NOTE: warmup to eliminate cold cache & cold cpu, and branch predictor effects
-                for _ in 0x00..0x2710 {
-                    assert!(trail.lookup_n(0x02).is_some());
+                let meta = &mut *trail.meta_ptr;
+                let nwords = meta.nwords as usize;
+                let total = nwords * 0x40;
+                for _ in 0x00..total {
+                    let _ = trail.lookup_one();
                 }
 
-                // STEP 3: Benchmark
-                let mut results = Vec::with_capacity(rounds);
-                for r in 0x00..rounds {
+                // STEP 2: Benchmark
+                let mut results = Vec::with_capacity(ROUNDS);
+                for r in 0x00..ROUNDS {
+                    // HACK: We reset bmap so lookup always does real work
                     let meta = &mut *trail.meta_ptr;
-                    let w = meta.nwords as usize;
                     meta.free = meta.nwords * 0x40;
                     meta.cw_idx = 0x00;
 
-                    for i in 0x00..w {
+                    // Clear up all bmap words
+                    let nwords = meta.nwords as usize;
+                    for i in 0x00..nwords {
                         (*trail.bmap_ptr.add(i)).0 = 0x00;
                     }
 
                     let start = Instant::now();
-
-                    for &n in &chunks {
-                        assert!(trail.lookup_n(n).is_some());
+                    for _ in 0x00..iters {
+                        for n in CHUNKS {
+                            assert!(trail.lookup_n(n).is_some());
+                        }
                     }
-
                     let elapsed = start.elapsed();
-                    let calls = chunks.len();
-                    let ns = elapsed.as_nanos() as f64 / calls as f64;
 
-                    cfg.logger.info(format!("[Round {r}] {ns:.2} ns/op"));
-                    results.push(ns);
+                    let ops = (iters * CHUNKS.len()) as f64;
+                    let ns_op = elapsed.as_nanos() as f64 / ops;
+                    cfg.logger.info(format!("[Round {r}] {ns_op:.2} ns/op"));
+                    results.push(ns_op);
                 }
 
-                // STEP 4: Compute Results
+                // STEP 3: Compute Results
                 let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
                 cfg.logger.info(format!("AVERAGE: {:.2} ns/op", avg));
 
                 #[cfg(not(debug_assertions))]
                 {
-                    let threshold = 0x20 as f64;
+                    let threshold = 0x0A as f64;
                     assert!(avg <= threshold, "lookup_n too slow: {avg} ns/op");
                 }
             }
