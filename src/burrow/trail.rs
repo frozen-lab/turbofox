@@ -1115,7 +1115,7 @@ mod tests {
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic]
-        fn test_lookup_zero_panics_in_debug() {
+        fn test_trail_lookup_zero_panics_in_debug() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1123,6 +1123,39 @@ mod tests {
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
                 let _ = trail.lookup(0x00);
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_and_extend_remap_cycle_works_correctly() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+
+                // fill in entire bmap
+                for _ in 0x00..0x04 {
+                    assert!(trail.lookup(0x20).is_some());
+                }
+
+                // no slots left
+                assert!(trail.lookup(0x01).is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+
+                // extend to creat space
+                assert!(trail.extend_remap().is_ok());
+                assert_eq!((*trail.meta_ptr).free, 0x80);
+
+                // again lookup for exact amout
+                for _ in 0x00..0x04 {
+                    assert!(trail.lookup(0x20).is_some());
+                }
+
+                // no slots left
+                assert!(trail.lookup(0x01).is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
             }
         }
     }
@@ -1536,6 +1569,71 @@ mod tests {
 
                 let got = trail.lookup_n(want).expect("must find freed block");
                 assert_eq!(got, start, "lookup_n must return the freed region start");
+            }
+        }
+
+        #[test]
+        fn test_lookup_n_spans_word_boundary_start_near_end() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+                let total = nwords * 0x40;
+
+                // fill entire bitmap
+                for wi in 0x00..nwords {
+                    (*trail.bmap_ptr.add(wi)).0 = u64::MAX;
+                }
+                (*trail.meta_ptr).free = 0x00;
+
+                // cross word run (60..68)
+                let start = 0x3C;
+                let want = 0x08;
+                for b in start..start + want {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    (*trail.bmap_ptr.add(wi)).0 &= !(0x01 << off);
+                }
+                (*trail.meta_ptr).free = want as u64;
+                (*trail.meta_ptr).cw_idx = (start >> 0x06) as u64;
+
+                let got = trail.lookup_n(want).expect("must find freed run");
+                assert_eq!(got, start, "must return exact cross-word start");
+            }
+        }
+
+        #[test]
+        fn test_lookup_n_exactly_ends_on_word_boundary() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+
+                // fill entire bitmap
+                for wi in 0x00..nwords {
+                    (*trail.bmap_ptr.add(wi)).0 = u64::MAX;
+                }
+                (*trail.meta_ptr).free = 0x00;
+
+                // start=16, want=48 -> ends at 64
+                let start = 0x10;
+                let want = 0x30; // start+want == 64
+                for b in start..start + want {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    (*trail.bmap_ptr.add(wi)).0 &= !(0x01 << off);
+                }
+                (*trail.meta_ptr).free = want as u64;
+                (*trail.meta_ptr).cw_idx = (start >> 0x06) as u64;
+
+                let got = trail.lookup_n(want).expect("must find block ending at word boundary");
+                assert_eq!(got, start, "must return start for block that ends exactly on boundary");
             }
         }
 
