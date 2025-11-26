@@ -272,6 +272,69 @@ impl Trail {
 
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
+    pub(super) unsafe fn extend_remap(&mut self) -> InternalResult<()> {
+        let curr_nwords = (*self.meta_ptr).nwords;
+        let slots_to_add = self.cfg.init_cap as u64;
+        let nwords_to_add = slots_to_add >> 0x06;
+        let new_len = self.mmap.len() + (nwords_to_add << 0x03) as usize;
+        let new_nwords = curr_nwords + nwords_to_add as u64;
+
+        // sanity checks
+        debug_assert!(nwords_to_add > 0, "Words to be added must not be 0");
+        debug_assert!(new_len > self.mmap.len(), "New len must be larger then current len");
+
+        // STEP 1: Unmap
+        self.mmap
+            .unmap()
+            .inspect(|_| self.cfg.logger.trace("(TRAIL) [extend_remap] Munmap successful"))
+            .map_err(|e| {
+                self.cfg
+                    .logger
+                    .error(format!("(TRAIL) [extend_remap] Munmap failed: {e}"));
+                e
+            })?;
+
+        // STEP 2: Zero extend the file
+        self.file
+            .zero_extend(new_len)
+            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] Zero extend successful"))
+            .map_err(|e| {
+                self.cfg
+                    .logger
+                    .error(format!("(TRAIL) [extend_remap] Failed on zero extend: {e}"));
+                e
+            })?;
+
+        // STEP 3: Re-MMap
+        self.mmap = MMap::new(self.file.0, new_len)
+            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] Mmap successful"))
+            .map_err(|e| {
+                self.cfg
+                    .logger
+                    .error(format!("(TRAIL) [extend_remap] MMap Failed: {e}"));
+                e
+            })?;
+        self.meta_ptr = self.mmap.read_mut::<Meta>(0);
+        self.bmap_ptr = self.mmap.read_mut::<BMapPtr>(META_SIZE);
+
+        // STEP 4: Update & Sync Meta
+        (*self.meta_ptr).nwords = new_nwords;
+        (*self.meta_ptr).free += slots_to_add;
+        self.mmap
+            .ms_sync()
+            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] MsSync Successful"))
+            .map_err(|e| {
+                self.cfg
+                    .logger
+                    .error(format!("(TRAIL) [extend_remap] Failed to write Metadata: {e}"));
+                e
+            })?;
+
+        Ok(())
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
     pub(super) unsafe fn lookup(&mut self, n: usize) -> Option<usize> {
         let meta = &mut *self.meta_ptr;
 
@@ -550,69 +613,6 @@ impl Trail {
         None
     }
 
-    #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    unsafe fn extend_remap(&mut self) -> InternalResult<()> {
-        let curr_nwords = (*self.meta_ptr).nwords;
-        let slots_to_add = self.cfg.init_cap as u64;
-        let nwords_to_add = slots_to_add >> 0x06;
-        let new_len = self.mmap.len() + (nwords_to_add << 0x03) as usize;
-        let new_nwords = curr_nwords + nwords_to_add as u64;
-
-        // sanity checks
-        debug_assert!(nwords_to_add > 0, "Words to be added must not be 0");
-        debug_assert!(new_len > self.mmap.len(), "New len must be larger then current len");
-
-        // STEP 1: Unmap
-        self.mmap
-            .unmap()
-            .inspect(|_| self.cfg.logger.trace("(TRAIL) [extend_remap] Munmap successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] Munmap failed: {e}"));
-                e
-            })?;
-
-        // STEP 2: Zero extend the file
-        self.file
-            .zero_extend(new_len)
-            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] Zero extend successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] Failed on zero extend: {e}"));
-                e
-            })?;
-
-        // STEP 3: Re-MMap
-        self.mmap = MMap::new(self.file.0, new_len)
-            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] Mmap successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] MMap Failed: {e}"));
-                e
-            })?;
-        self.meta_ptr = self.mmap.read_mut::<Meta>(0);
-        self.bmap_ptr = self.mmap.read_mut::<BMapPtr>(META_SIZE);
-
-        // STEP 4: Update & Sync Meta
-        (*self.meta_ptr).nwords = new_nwords;
-        (*self.meta_ptr).free += slots_to_add;
-        self.mmap
-            .ms_sync()
-            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] MsSync Successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] Failed to write Metadata: {e}"));
-                e
-            })?;
-
-        Ok(())
-    }
-
     /// Close & Delete [Trail] file
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
@@ -694,6 +694,37 @@ mod tests {
     fn temp_dir() -> TempDir {
         let _ = init_test_logger(None);
         TempDir::new().expect("temp dir")
+    }
+
+    mod bmap {
+        use super::*;
+
+        #[test]
+        fn test_lookup_one_works() {
+            unsafe {
+                let mut meta = Meta::new(0x01);
+                let mut w = BMapPtr(0x00);
+
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x00));
+                assert_eq!(w.0, 0b1);
+
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x01));
+                assert_eq!(w.0, 0b11);
+
+                assert_eq!(meta.free, 0x3E);
+            }
+        }
+
+        #[test]
+        fn test_lookup_one_returns_none_on_full() {
+            unsafe {
+                let mut meta = Meta::new(0x01);
+                let mut w = BMapPtr(u64::MAX);
+
+                assert!(w.lookup_one(0x00, &mut meta).is_none());
+                assert_eq!(meta.free, 0x40);
+            }
+        }
     }
 
     mod trail {
@@ -940,40 +971,164 @@ mod tests {
         }
     }
 
-    mod bmap {
+    mod trail_lookup {
         use super::*;
 
         #[test]
-        fn test_lookup_one_works() {
+        fn test_trail_lookup_maps_correctly_to_lookup_one() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
             unsafe {
-                let mut meta = Meta::new(0x01);
-                let mut w = BMapPtr(0x00);
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let total = (*trail.meta_ptr).nwords * 0x40;
 
-                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x00));
-                assert_eq!(w.0, 0b1);
+                for i in 0x00..total {
+                    let a = trail.lookup(0x01).expect("Slot");
+                    assert_eq!(a as u64, i);
+                }
 
-                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x01));
-                assert_eq!(w.0, 0b11);
-
-                assert_eq!(meta.free, 0x3E);
+                assert!(trail.lookup(0x01).is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
             }
         }
 
         #[test]
-        fn test_lookup_one_returns_none_on_full() {
-            unsafe {
-                let mut meta = Meta::new(0x01);
-                let mut w = BMapPtr(u64::MAX);
+        fn test_trail_lookup_maps_correctly_to_lookup_n() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
 
-                assert!(w.lookup_one(0x00, &mut meta).is_none());
-                assert_eq!(meta.free, 0x40);
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+
+                let start = trail.lookup(0x05).expect("first block");
+                assert_eq!(start, 0x00);
+
+                for b in 0x00..0x05 {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    assert_eq!(((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01, 0x01);
+                }
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_wraparound() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+
+                // fill 0th word
+                assert!(trail.lookup(0x40).is_some());
+                assert_eq!((*trail.meta_ptr).cw_idx, 0x00);
+
+                // next region shold start at word at idx 1
+                let ix = trail.lookup(0x03).expect("Slot");
+                assert_eq!(ix, 0x40);
+                assert_eq!((*trail.meta_ptr).cw_idx, 0x01);
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_returns_none_when_full() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+
+                // fill entire bmap
+                for wi in 0..nwords {
+                    (*trail.bmap_ptr.add(wi)).0 = u64::MAX;
+                }
+                (*trail.meta_ptr).free = 0;
+
+                assert!(trail.lookup(0x01).is_none());
+                assert!(trail.lookup(0x05).is_none());
+            }
+        }
+
+        #[test]
+        fn test_lookup_finds_exact_freed_region() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+                let total = nwords * 0x40;
+
+                // fill entire bitmap
+                for wi in 0x00..nwords {
+                    (*trail.bmap_ptr.add(wi)).0 = u64::MAX;
+                }
+                (*trail.meta_ptr).free = 0x00;
+
+                // free a block from bmap
+                let want = 0x07;
+                let start = 0x1E.min(total - want);
+                let end = start + want;
+
+                for b in start..end {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    (*trail.bmap_ptr.add(wi)).0 &= !(0x01 << off);
+                }
+                (*trail.meta_ptr).free = want as u64;
+                (*trail.meta_ptr).cw_idx = (start >> 0x06) as u64;
+
+                let got = trail.lookup(want).expect("Slot");
+                assert_eq!(got, start, "lookup() must return freed contiguous region");
+            }
+        }
+
+        #[test]
+        fn test_trail_lookup_preserves_meta_free_invariant() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let total = (*trail.meta_ptr).nwords * 64;
+
+                for i in 0x00..total {
+                    let before = (*trail.meta_ptr).free;
+                    assert!(trail.lookup(0x01).is_some());
+                    assert_eq!((*trail.meta_ptr).free, before - 0x01);
+                }
+
+                assert!(trail.lookup(0x01).is_none());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic]
+        fn test_lookup_zero_panics_in_debug() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let _ = trail.lookup(0x00);
             }
         }
     }
 
     mod trail_lookup_one {
         use super::*;
-        use std::hint::black_box;
         use std::time::Instant;
 
         #[test]
@@ -1196,7 +1351,6 @@ mod tests {
 
     mod trail_lookup_n {
         use super::*;
-        use std::hint::black_box;
         use std::time::Instant;
 
         #[test]
