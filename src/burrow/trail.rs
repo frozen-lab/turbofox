@@ -380,7 +380,7 @@ impl Trail {
     /// Free `N` slots in the [BitMap]
     ///
     /// ## Perf
-    ///  - On scalar about `??`
+    ///  - On scalar about `~ 2 ns/op`
     ///
     /// ## TODO's
     ///  - Impl of SIMD
@@ -658,6 +658,13 @@ impl Trail {
         None
     }
 
+    /// Free up `N` slots in the [BitMap]
+    ///
+    /// ## Perf
+    ///  - On scalar about `~ 2.5 ns/ops`
+    ///
+    /// ## TODO's
+    ///  - Impl of SIMD
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     unsafe fn free_n(&mut self, idx: usize, n: usize) {
@@ -1472,6 +1479,7 @@ mod tests {
 
     mod free {
         use super::*;
+        use std::time::Instant;
 
         #[test]
         fn test_free_maps_correctly_to_free_one() {
@@ -1674,6 +1682,80 @@ mod tests {
                 // reallocate all
                 assert!(trail.lookup(total).is_some());
                 assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn bench_free_till_empty() {
+            const INIT_CAP: usize = 0x20_000; // cap of `1_31_072`
+
+            // 50% single slot lookup
+            const CHUNKS: [usize; 0x10] = [
+                0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x08, 0x0C, 0x10,
+            ];
+            let sum: usize = CHUNKS.into_iter().sum();
+            let iters_to_fill = INIT_CAP / sum;
+
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir)
+                .init_cap(INIT_CAP)
+                .log(true)
+                .log_target("[BENCH] Trail::free");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Create new Trail");
+                let meta = &mut *trail.meta_ptr;
+
+                // STEP 1: Warmup
+                //
+                // NOTE: warmup to eliminate cold cache & cold cpu, and branch predictor effects
+
+                let meta = &mut *trail.meta_ptr;
+                let nwords = meta.nwords as usize;
+                let total = nwords << 0x06;
+                assert!(trail.lookup_n(total).is_some()); // fill up everything
+                trail.free(0x00, total); // free up everything
+
+                // STEP 2: Benching
+
+                // fill up entire bitmap
+                assert!(trail.lookup_n(total).is_some()); // fill up everything
+
+                let mut lookup_timings = Vec::<f64>::new();
+                let mut bitpos = 0x00usize;
+
+                for _ in 0x00..iters_to_fill {
+                    let start = Instant::now();
+                    for chunk in CHUNKS {
+                        trail.free(bitpos, chunk);
+                        bitpos += chunk;
+                    }
+                    let elapsed = start.elapsed();
+
+                    let us_op = elapsed.as_nanos() as f64 / CHUNKS.len() as f64;
+                    lookup_timings.push(us_op);
+                }
+
+                // sanity check
+                assert!(
+                    (*trail.meta_ptr).free == total as u64,
+                    "BMap must be entirely free at this point"
+                );
+
+                // STEP 3: Measure results
+
+                let avg_ns = lookup_timings.iter().sum::<f64>() / lookup_timings.len() as f64;
+                cfg.logger.info(format!("Free: {:.3} ns/op", avg_ns));
+
+                // STEP 4: Validate
+
+                #[cfg(not(debug_assertions))]
+                {
+                    let threshold = 0x0C as f64;
+                    assert!(avg_ns <= threshold, "lookup_n too slow: {avg_ns} ns/op");
+                }
             }
         }
     }
@@ -2226,6 +2308,7 @@ mod tests {
 
     mod free_n {
         use super::*;
+        use std::time::Instant;
 
         #[test]
         fn test_free_n_works_correctly() {
@@ -2371,6 +2454,85 @@ mod tests {
 
                 // must panic (free across boundry)
                 trail.free_n(total - 0x01, 0x04);
+            }
+        }
+
+        #[test]
+        #[ignore]
+        fn bench_free_n() {
+            const INIT_CAP: usize = 0x7D000; // 512K bits
+            const ROUNDS: usize = 0x14;
+            const CHUNKS: [usize; 0x0C] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x14, 0x18, 0x20];
+
+            let sum: usize = CHUNKS.into_iter().sum();
+            let iters = INIT_CAP / sum;
+
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir)
+                .init_cap(INIT_CAP)
+                .log(true)
+                .log_target("[BENCH] Trail::free_n");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("New Trail");
+
+                // STEP 1: Warmup
+
+                let meta = &mut *trail.meta_ptr;
+                let nwords = meta.nwords as usize;
+                let total = nwords << 0x06;
+                assert!(trail.lookup_n(total).is_some()); // fill up everything
+                trail.free(0x00, total); // free up everything
+
+                // STEP 2: Benches
+
+                let mut results = Vec::with_capacity(ROUNDS);
+                for r in 0x00..ROUNDS {
+                    // HACK: We reset bmap so lookup always does real work
+                    let meta = &mut *trail.meta_ptr;
+                    let nwords = meta.nwords as usize;
+                    meta.free = meta.nwords << 0x06;
+                    meta.cw_idx = 0x00;
+                    for i in 0x00..nwords {
+                        (*trail.bmap_ptr.add(i)).0 = 0x00;
+                    }
+
+                    // fill up entier bmap
+                    assert!(trail.lookup_n(total).is_some());
+
+                    for _ in 0x00..iters {
+                        let start = Instant::now();
+
+                        trail.free_n(0x00, CHUNKS[0x00]);
+                        trail.free_n(0x20, CHUNKS[0x01]);
+                        trail.free_n(0x40, CHUNKS[0x02]);
+                        trail.free_n(0x80, CHUNKS[0x03]);
+                        trail.free_n(0xC0, CHUNKS[0x04]);
+                        trail.free_n(0x100, CHUNKS[0x05]);
+                        trail.free_n(0x140, CHUNKS[0x06]);
+                        trail.free_n(0x180, CHUNKS[0x07]);
+                        trail.free_n(0x1C0, CHUNKS[0x08]);
+                        trail.free_n(0x200, CHUNKS[0x09]);
+                        trail.free_n(0x240, CHUNKS[0x0A]);
+                        trail.free_n(0x280, CHUNKS[0x0B]);
+
+                        let elapsed = start.elapsed();
+                        let ns_op = elapsed.as_nanos() as f64 / CHUNKS.len() as f64;
+                        results.push(ns_op);
+                    }
+                }
+
+                // STEP 3: Compute results
+
+                let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
+                cfg.logger.info(format!("Free: {:.3} ns/op", avg));
+
+                #[cfg(not(debug_assertions))]
+                {
+                    let threshold = 0x07 as f64;
+                    assert!(avg <= threshold, "free_n too slow: {avg} ns/op");
+                }
             }
         }
     }
