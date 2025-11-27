@@ -72,6 +72,16 @@ impl BMapPtr {
 
         Some((wi << 0x06) + off)
     }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn free_one(&mut self, idx: usize, meta: &mut Meta) {
+        // sanity check
+        debug_assert!(self.0 & (0x01 << (idx & 0x3F)) != 0x00, "Double free detected");
+
+        self.0 &= !(0x01 << (idx & 0x3F));
+        meta.free += 0x01;
+    }
 }
 
 //
@@ -320,6 +330,7 @@ impl Trail {
         // STEP 4: Update & Sync Meta
         (*self.meta_ptr).nwords = new_nwords;
         (*self.meta_ptr).free += slots_to_add;
+        (*self.meta_ptr).cw_idx = curr_nwords; // we start at the first new idx
         self.mmap
             .ms_sync()
             .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] MsSync Successful"))
@@ -364,6 +375,33 @@ impl Trail {
         }
 
         self.lookup_n(n)
+    }
+
+    /// Free `N` slots in the [BitMap]
+    ///
+    /// ## Perf
+    ///  - On scalar about `??`
+    ///
+    /// ## TODO's
+    ///  - Impl of SIMD
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    pub(super) unsafe fn free(&mut self, idx: usize, n: usize) {
+        let meta = &mut *self.meta_ptr;
+
+        // sanity checks
+        debug_assert!(n != 0x00, "N must not be zero");
+        debug_assert!(idx < (meta.nwords as usize) * 64, "Idx is out of bounds");
+
+        // just one slot to get
+        if n == 0x01 {
+            let w_idx = idx >> 0x06;
+            let word = &mut *self.bmap_ptr.add(w_idx);
+            word.free_one(idx, meta);
+            return;
+        }
+
+        self.free_n(idx, n);
     }
 
     /// Lookup one slot in the [BitMap]
@@ -618,6 +656,62 @@ impl Trail {
         }
 
         None
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
+    unsafe fn free_n(&mut self, idx: usize, n: usize) {
+        let meta = &mut *self.meta_ptr;
+        let nwords = meta.nwords as usize;
+
+        let first_wi = idx >> 0x06;
+        let first_off = idx & 0x3F;
+        let end_bit = idx + n;
+        let last_wi = (end_bit - 0x01) >> 0x06;
+        let last_off = (end_bit - 0x01) & 0x3F;
+
+        // sanity checks
+        debug_assert!(n > 0x00, "n must not be zero");
+        debug_assert!(end_bit <= nwords * 0x40, "free_n range out of bounds");
+        debug_assert!(
+            meta.free + (n as u64) <= (meta.nwords * 0x40),
+            "Meta::free is grown out of bounds"
+        );
+        debug_assert!(
+            first_wi < nwords && last_wi < nwords,
+            "Index calculation is out of range"
+        );
+
+        // single word to operate on
+        if first_wi == last_wi {
+            let mask = ((!0x00) >> (0x40 - n)) << first_off;
+            (*self.bmap_ptr.add(first_wi)).0 &= !mask;
+            meta.free += n as u64;
+            return;
+        }
+
+        // At Head
+        if first_off != 0x00 {
+            let head_mask = (!0x00) << first_off;
+            (*self.bmap_ptr.add(first_wi)).0 &= !head_mask;
+        } else {
+            (*self.bmap_ptr.add(first_wi)).0 = 0x00;
+        }
+
+        // Middle words (if any)
+        if last_wi > first_wi + 0x01 {
+            let mut wi = first_wi + 0x01;
+            while wi < last_wi {
+                (*self.bmap_ptr.add(wi)).0 = 0x00;
+                wi += 0x01;
+            }
+        }
+
+        // At Tail
+        let tail_mask = (!0x00) >> (0x3F - (last_off as u64));
+        (*self.bmap_ptr.add(last_wi)).0 &= !tail_mask;
+
+        meta.free += n as u64;
     }
 
     /// Close & Delete [Trail] file
