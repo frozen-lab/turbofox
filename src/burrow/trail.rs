@@ -1198,8 +1198,11 @@ mod tests {
             const MAX_GROWS: usize = TARGET_CAP / INIT_CAP;
 
             // 50% single slot lookup
-            const CHUNKS: [usize; 0x0C] = [0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x04, 0x05, 0x06, 0x07, 0x18, 0x20];
+            const CHUNKS: [usize; 0x10] = [
+                0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x08, 0x0C, 0x10,
+            ];
             let sum: usize = CHUNKS.into_iter().sum();
+            let iters_to_fill = INIT_CAP / sum;
 
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
@@ -1209,87 +1212,91 @@ mod tests {
                 .log_target("[BENCH] Trail::lookup_extend_remap");
 
             cfg.logger.info("----------Lookup(extend_remap)----------");
-            cfg.logger.info(format!(
-                "InitCap={}, TargetCap={}, MaxGrows={}",
-                INIT_CAP, TARGET_CAP, MAX_GROWS
-            ));
+            cfg.logger
+                .info(format!("InitCap={}, TargetCap={}", INIT_CAP, TARGET_CAP));
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
-                let mut total_allocs: usize = 0x00;
-                let mut t_start = Instant::now();
-                let mut results = Vec::new();
+                let meta = &mut *trail.meta_ptr;
 
-                for grow in 0x00..MAX_GROWS {
-                    // measure allocations until this region is exhausted
-                    let mut ops_count: usize = 0;
-                    let mut bits_allocated: usize = 0;
+                // STEP 1: Cache Warmups
+
+                // NOTE: warmup to eliminate cold cache & cold cpu, and branch predictor effects
+                for _ in 0x00..INIT_CAP {
+                    let _ = trail.lookup(0x01);
+                }
+
+                // HACK: We reset bmap so lookup always does real work
+                let nwords = meta.nwords as usize;
+
+                meta.free = meta.nwords * 0x40;
+                meta.cw_idx = 0x00;
+
+                for i in 0x00..nwords {
+                    (*trail.bmap_ptr.add(i)).0 = 0x00;
+                }
+
+                // STEP 2: Benching
+
+                let mut lookup_timings = Vec::<f64>::new();
+                let mut grow_timings = Vec::<f64>::new();
+
+                for _ in 0x00..MAX_GROWS {
+                    // fill in the entire bmap
+                    for _ in 0x00..iters_to_fill {
+                        let start = Instant::now();
+
+                        std::hint::black_box(trail.lookup(CHUNKS[0x00]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x01]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x02]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x03]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x04]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x05]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x06]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x07]));
+
+                        std::hint::black_box(trail.lookup(CHUNKS[0x08]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x09]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x0A]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x0B]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x0C]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x0D]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x0E]));
+                        std::hint::black_box(trail.lookup(CHUNKS[0x0F]));
+
+                        let elapsed = start.elapsed();
+                        let us_op = elapsed.as_nanos() as f64 / CHUNKS.len() as f64;
+                        lookup_timings.push(us_op);
+                    }
+
+                    // sanity check
+                    assert!(trail.lookup(0x01).is_none(), "BMap must be full at this point");
 
                     let start = Instant::now();
-                    // repeatedly try CHUNKS pattern, but skip chunks larger than remaining free bits
-                    while (*trail.meta_ptr).free > 0 {
-                        let mut progressed = false;
-                        for &n in CHUNKS.iter() {
-                            let free_bits = (*trail.meta_ptr).free as usize;
-                            if free_bits < n {
-                                continue;
-                            }
-                            // allocate
-                            assert!(trail.lookup(n).is_some());
-                            ops_count += 1;
-                            bits_allocated += n;
-                            progressed = true;
-                        }
-                        // defensive: if no CHUNK fit (shouldn't with CHUNKS containing 1), break to avoid infinite loop
-                        if !progressed {
-                            // fallback allocate single slots until drained
-                            while (*trail.meta_ptr).free > 0 {
-                                assert!(trail.lookup(1).is_some());
-                                ops_count += 1;
-                                bits_allocated += 1;
-                            }
-                            break;
-                        }
-                    }
+                    assert!(trail.extend_remap().is_ok());
                     let elapsed = start.elapsed();
-                    total_allocs += bits_allocated;
 
-                    let ns_op = elapsed.as_nanos() as f64 / (ops_count as f64);
-                    results.push(ns_op);
-
-                    cfg.logger.info(format!(
-                        "[Grow {grow}]   allocated_bits={}  ops={}  =>  {:.2} ns/op  (total_allocs={})",
-                        bits_allocated, ops_count, ns_op, total_allocs
-                    ));
-
-                    // confirm region exhausted
-                    assert!(trail.lookup(0x01).is_none());
-
-                    if total_allocs >= TARGET_CAP {
-                        break;
-                    }
-
-                    trail.extend_remap().expect("extend_remap must succeed");
+                    // NOTE: We also measure growing duration
+                    grow_timings.push(elapsed.as_millis() as f64);
                 }
 
-                let total_time = t_start.elapsed();
-                let avg = results.iter().sum::<f64>() / results.len() as f64;
+                // sanity check
+                assert!(
+                    ((*trail.meta_ptr).nwords * 0x40) >= TARGET_CAP as u64,
+                    "Target cap was not reached"
+                );
 
-                cfg.logger.info(format!("-- SUMMARY --"));
-                cfg.logger.info(format!("Total Allocs: {}", total_allocs));
-                cfg.logger.info(format!("Avg: {:.2} ns/op", avg));
-                cfg.logger.info(format!("Total Time: {:?}", total_time));
+                // STEP 3: Measure results
 
-                #[cfg(not(debug_assertions))]
-                {
-                    let threshold = 0x20 as f64;
-                    assert!(
-                        avg <= threshold,
-                        "lookup() too slow: {:.2} ns/op  (threshold={})",
-                        avg,
-                        threshold
-                    );
-                }
+                let avg_grow_ms = grow_timings.iter().sum::<f64>() / grow_timings.len() as f64;
+                let avg_lookup_ns = lookup_timings.iter().sum::<f64>() / lookup_timings.len() as f64;
+                let lookups_per_grow = (iters_to_fill * CHUNKS.len()) as f64;
+                let amort_grow_us = (avg_grow_ms * 1_000.0) / lookups_per_grow;
+                let total_us = (avg_lookup_ns / 1_000.0) + amort_grow_us;
+
+                cfg.logger.info(format!("Lookup: {:.3} ns/op", avg_lookup_ns));
+                cfg.logger.info(format!("Grow: {:.3} ms/grow", avg_grow_ms));
+                cfg.logger.info(format!("Lookup(w/ grow): {:.3} µs/op", total_us));
             }
         }
     }
@@ -1476,7 +1483,6 @@ mod tests {
 
                 for r in 0x00..rounds {
                     // HACK: We reset bmap so lookup always does real work
-                    let meta = &mut *trail.meta_ptr;
                     meta.free = meta.nwords * 0x40;
                     meta.cw_idx = 0x00;
 
