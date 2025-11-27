@@ -826,6 +826,72 @@ mod tests {
                 assert_eq!(meta.free, 0x40);
             }
         }
+
+        #[test]
+        fn test_free_one_works_correctly() {
+            unsafe {
+                let mut meta = Meta::new(0x01);
+                let mut w = BMapPtr(0x00);
+
+                // allocate two bits
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x00));
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x01));
+                assert_eq!(w.0, 0b11);
+                assert_eq!(meta.free, 0x3E);
+
+                // free the second one
+                w.free_one(0x01, &mut meta);
+                assert_eq!(w.0, 0b01);
+                assert_eq!(meta.free, 0x3F);
+
+                // free the first one
+                w.free_one(0x00, &mut meta);
+                assert_eq!(w.0, 0b00);
+                assert_eq!(meta.free, 0x40);
+            }
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic]
+        fn test_free_one_should_panic_on_double_free() {
+            unsafe {
+                let mut meta = Meta::new(0x01);
+                let mut w = BMapPtr(0x00);
+
+                // allocate one bit
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x00));
+                assert_eq!(w.0, 0b1);
+
+                // free it
+                w.free_one(0x00, &mut meta);
+                assert_eq!(w.0, 0b0);
+
+                // free again (must panic)
+                w.free_one(0x00, &mut meta);
+            }
+        }
+
+        #[test]
+        fn test_free_one_does_not_affect_other_bits() {
+            unsafe {
+                let mut meta = Meta::new(0x01);
+                let mut w = BMapPtr(0x00);
+
+                // allocate some bits
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x00));
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x01));
+                assert_eq!(w.lookup_one(0x00, &mut meta), Some(0x02));
+                assert_eq!(w.0, 0b111);
+
+                // free the bit
+                w.free_one(0x01, &mut meta);
+
+                // ensure only that bit is flipped
+                assert_eq!(w.0, 0b101);
+                assert_eq!(meta.free, 0x3E);
+            }
+        }
     }
 
     mod trail {
@@ -842,7 +908,7 @@ mod tests {
             let t1 = unsafe { Trail::new(&cfg) }.expect("new trail");
 
             unsafe {
-                let meta = (*t1.meta_ptr);
+                let meta = *t1.meta_ptr;
 
                 assert!(t1.file.0 >= 0x00, "File fd must be valid");
                 assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
@@ -1072,12 +1138,12 @@ mod tests {
         }
     }
 
-    mod trail_lookup {
+    mod lookup {
         use super::*;
         use std::time::Instant;
 
         #[test]
-        fn test_trail_lookup_maps_correctly_to_lookup_one() {
+        fn test_lookup_maps_correctly_to_lookup_one() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1097,7 +1163,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_maps_correctly_to_lookup_n() {
+        fn test_lookup_maps_correctly_to_lookup_n() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1117,7 +1183,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_wraparound() {
+        fn test_lookup_wraparound() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1138,7 +1204,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_returns_none_when_full() {
+        fn test_lookup_returns_none_when_full() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1194,7 +1260,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_preserves_meta_free_invariant() {
+        fn test_lookup_preserves_meta_free_invariant() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1217,7 +1283,7 @@ mod tests {
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic]
-        fn test_trail_lookup_zero_panics_in_debug() {
+        fn test_lookup_zero_panics_in_debug() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1229,7 +1295,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_and_extend_remap_cycle_works_correctly() {
+        fn test_lookup_and_extend_remap_cycle_works_correctly() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
@@ -1262,7 +1328,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_after_extend_remap_returns_correct_next_index() {
+        fn test_lookup_after_extend_remap_returns_correct_next_index() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
@@ -1293,7 +1359,7 @@ mod tests {
 
         #[test]
         #[ignore]
-        fn bench_trail_lookup_with_extend_remap() {
+        fn bench_lookup_with_extend_remap() {
             const INIT_CAP: usize = 0x8000;
             const TARGET_CAP: usize = 0x20_000; // grow until total `1_31_072`
             const MAX_GROWS: usize = TARGET_CAP / INIT_CAP;
@@ -1404,13 +1470,221 @@ mod tests {
         }
     }
 
-    mod trail_lookup_one {
+    mod free {
+        use super::*;
+
+        #[test]
+        fn test_free_maps_correctly_to_free_one() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+                let total = ((*trail.meta_ptr).nwords << 0x06) as usize;
+
+                // fill up entire map
+                assert!(trail.lookup(total).is_some());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+
+                // free the last slot
+                let free_idx = total - 0x01;
+                trail.free(free_idx, 0x01);
+
+                assert_eq!((*trail.meta_ptr).free, 0x01);
+
+                let wi = free_idx >> 0x06;
+                let off = free_idx & 0x3F;
+                assert_eq!(((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01, 0x00);
+            }
+        }
+
+        #[test]
+        fn test_free_maps_correctly_to_free_n() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+                let total = ((*trail.meta_ptr).nwords << 0x06) as usize;
+
+                // fill up entire bitmap
+                assert!(trail.lookup(total).is_some());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+
+                let start = 0x10;
+                let want = 0x0A;
+                trail.free(start, want);
+
+                assert_eq!((*trail.meta_ptr).free, want as u64);
+
+                for b in start..(start + want) {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    assert_eq!(((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01, 0x00);
+                }
+            }
+        }
+
+        #[test]
+        fn test_free_correctly_wraps_around_word_boundary() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+
+                // fill up everything
+                let total = ((*trail.meta_ptr).nwords << 0x06) as usize;
+                assert!(trail.lookup(total).is_some());
+
+                // free block crossing a 64-bit word boundary
+                let start = 0x3C;
+                let want = 0x08;
+                trail.free(start, want);
+
+                assert_eq!((*trail.meta_ptr).free, want as u64);
+
+                for b in start..(start + want) {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    assert_eq!(((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01, 0x00);
+                }
+            }
+        }
+
+        #[test]
+        fn test_free_exactly_ends_on_word_boundary() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+
+                let total = ((*trail.meta_ptr).nwords << 0x06) as usize;
+                assert!(trail.lookup(total).is_some());
+
+                // region (start=16, len=48 => end=64)
+                let start = 0x10;
+                let want = 0x30;
+
+                trail.free(start, want);
+                assert_eq!((*trail.meta_ptr).free, want as u64);
+
+                for b in start..(start + want) {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    assert_eq!(((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01, 0x00);
+                }
+            }
+        }
+
+        #[test]
+        fn test_free_validates_correctly() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+
+                let total = ((*trail.meta_ptr).nwords << 0x06) as usize;
+                assert!(trail.lookup(total).is_some());
+
+                // free a region
+                let start = 0x20;
+                let want = 0x0C;
+                trail.free(start, want);
+                assert_eq!((*trail.meta_ptr).free, want as u64);
+
+                // lookup must return exactly this region
+                let got = trail.lookup(want).expect("Slot");
+                assert_eq!(got, start);
+            }
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic]
+        fn test_free_oob_panics() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x40).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+                // idx out of bitmap range => must panic
+                trail.free(0x200, 0x01);
+            }
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic]
+        fn test_free_zero_panics() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x40).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+                trail.free(0x00, 0x00);
+            }
+        }
+
+        #[test]
+        fn test_free_on_empty_bmap_does_nothing() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+                (*trail.meta_ptr).free = 0x00;
+                trail.free(0x00, 0x04);
+
+                for b in 0x00..0x04 {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    assert_eq!(((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01, 0x00);
+                }
+            }
+        }
+
+        #[test]
+        fn test_free_on_full_bitmap_and_reallocate_all() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("Trail");
+
+                let total = ((*trail.meta_ptr).nwords << 0x06) as usize;
+                assert!(trail.lookup(total).is_some());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+
+                // free up entire bitmap
+                trail.free(0x00, total);
+                assert_eq!((*trail.meta_ptr).free, total as u64);
+
+                // reallocate all
+                assert!(trail.lookup(total).is_some());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+            }
+        }
+    }
+
+    mod lookup_one {
         use super::*;
         use std::time::Instant;
 
         #[test]
         #[cfg(not(debug_assertions))]
-        fn test_trail_lookup_one_sequential_filling() {
+        fn test_lookup_one_sequential_filling() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1430,7 +1704,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_one_wraps_around_correctly() {
+        fn test_lookup_one_wraps_around_correctly() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1460,7 +1734,7 @@ mod tests {
 
         #[test]
         #[cfg(not(debug_assertions))]
-        fn test_trail_lookup_one_preserves_meta_free_invariant() {
+        fn test_lookup_one_preserves_meta_free_invariant() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1482,7 +1756,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_one_bit_consistency() {
+        fn test_lookup_one_bit_consistency() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1505,7 +1779,7 @@ mod tests {
 
         #[test]
         #[cfg(not(debug_assertions))]
-        fn test_trail_lookup_one_returns_none_when_full() {
+        fn test_lookup_one_returns_none_when_full() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1526,7 +1800,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_one_finds_single_freed_slot() {
+        fn test_lookup_one_finds_single_freed_slot() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1556,7 +1830,7 @@ mod tests {
 
         #[test]
         #[ignore]
-        fn bench_trail_lookup_one() {
+        fn bench_lookup_one() {
             const INIT_CAP: usize = 0x7D000; // 512K
 
             let tmp = temp_dir();
@@ -1616,13 +1890,13 @@ mod tests {
         }
     }
 
-    mod trail_lookup_n {
+    mod lookup_n {
         use super::*;
         use std::time::Instant;
 
         #[test]
         #[cfg(not(debug_assertions))]
-        fn test_trail_lookup_n_correctly_works() {
+        fn test_lookup_n_correctly_works() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1643,7 +1917,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_n_returns_contineous_blocks() {
+        fn test_lookup_n_returns_contineous_blocks() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1667,7 +1941,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_n_wraps_correctly() {
+        fn test_lookup_n_wraps_correctly() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1693,7 +1967,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_n_bit_consistency() {
+        fn test_lookup_n_bit_consistency() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
@@ -1743,7 +2017,7 @@ mod tests {
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic]
-        fn test_trail_lookup_n_zero_panics() {
+        fn test_lookup_n_zero_panics() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1756,7 +2030,7 @@ mod tests {
 
         #[test]
         #[cfg(not(debug_assertions))]
-        fn test_trail_lookup_n_returns_none_when_full() {
+        fn test_lookup_n_returns_none_when_full() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1775,7 +2049,7 @@ mod tests {
         }
 
         #[test]
-        fn test_trail_lookup_n_finds_freed_block() {
+        fn test_lookup_n_finds_freed_block() {
             let tmp = temp_dir();
             let dir = tmp.path().to_path_buf();
             let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
@@ -1873,7 +2147,7 @@ mod tests {
 
         #[test]
         #[ignore]
-        fn bench_trail_lookup_n() {
+        fn bench_lookup_n() {
             const INIT_CAP: usize = 0x7D000; // 512K bits
             const ROUNDS: usize = 0x14;
             const CHUNKS: [usize; 0x0C] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x14, 0x18, 0x20];
@@ -1946,6 +2220,157 @@ mod tests {
                     let threshold = 0x0A as f64;
                     assert!(avg <= threshold, "lookup_n too slow: {avg} ns/op");
                 }
+            }
+        }
+    }
+
+    mod free_n {
+        use super::*;
+
+        #[test]
+        fn test_free_n_works_correctly() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let total = (*trail.meta_ptr).nwords as usize * 0x40;
+
+                // fill up entire bitmap
+                assert!(trail.lookup_n(total).is_some());
+                assert_eq!((*trail.meta_ptr).free, 0x00);
+
+                // free slots [20..28]
+                let start = 0x14;
+                let want = 0x08;
+                trail.free(start, want);
+
+                assert_eq!((*trail.meta_ptr).free, want as u64);
+
+                for b in 0x00..total {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    let bit = ((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01;
+
+                    if b >= start && b < start + want {
+                        assert_eq!(bit, 0x00, "bit {b} must be free");
+                    } else {
+                        assert_eq!(bit, 0x01, "bit {b} must remain allocated");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_free_n_correctly_wraps_on_word_boundary() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let total = (*trail.meta_ptr).nwords as usize * 0x40;
+
+                assert!(trail.lookup_n(total).is_some());
+
+                // cross-boundary free (63..70)
+                let start = 0x3F;
+                let want = 0x07;
+
+                trail.free(start, want);
+                assert_eq!((*trail.meta_ptr).free, want as u64);
+
+                for b in 0x00..total {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    let bit = ((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01;
+
+                    if b >= start && b < start + want {
+                        assert_eq!(bit, 0x00, "bit {b} must be free (cross-boundary)");
+                    } else {
+                        assert_eq!(bit, 0x01, "bit {b} must remain allocated");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_free_n_correctly_ends_on_boundary() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let nwords = (*trail.meta_ptr).nwords as usize;
+
+                // fill up entire map
+                let total = nwords * 0x40;
+                assert!(trail.lookup_n(total).is_some());
+
+                // free region ending exactly on word boundary (start=16, len=48 => end=64)
+                let start = 0x10;
+                let want = 0x30;
+
+                trail.free(start, want);
+                assert_eq!((*trail.meta_ptr).free, want as u64);
+
+                for b in 0x00..total {
+                    let wi = b >> 0x06;
+                    let off = b & 0x3F;
+                    let bit = ((*trail.bmap_ptr.add(wi)).0 >> off) & 0x01;
+
+                    if b >= start && b < start + want {
+                        assert_eq!(bit, 0x00, "bit {b} must be free");
+                    } else {
+                        assert_eq!(bit, 0x01, "bit {b} must stay allocated");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_free_n_followed_by_lookup_n_returns_exact_block() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let total = (*trail.meta_ptr).nwords as usize * 0x40;
+
+                // fill up entire map
+                assert!(trail.lookup_n(total).is_some());
+
+                // Free first 12 slots
+                let start = 0x00;
+                let want = 0x0C;
+                trail.free(start, want);
+
+                // Now lookup_n must return exactly that region
+                let got = trail.lookup_n(want).expect("must find freed block");
+                assert_eq!(got, start);
+            }
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic]
+        fn test_free_n_panics_on_out_of_bounds_input() {
+            let tmp = temp_dir();
+            let dir = tmp.path().to_path_buf();
+            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+
+            unsafe {
+                let mut trail = Trail::new(&cfg).expect("trail");
+                let total = (*trail.meta_ptr).nwords as usize * 0x40;
+
+                // allocate all
+                assert!(trail.lookup_n(total).is_some());
+
+                // must panic (free across boundry)
+                trail.free_n(total - 0x01, 0x04);
             }
         }
     }
