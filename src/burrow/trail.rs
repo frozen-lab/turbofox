@@ -333,6 +333,13 @@ impl Trail {
         Ok(())
     }
 
+    /// Lookup `N` slots in the [BitMap]
+    ///
+    /// ## Perf
+    ///  - On scalar about `8 ns/ops` (`24 ns/ops` amortizied)
+    ///
+    /// ## TODO's
+    ///  - Impl of SIMD
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
     pub(super) unsafe fn lookup(&mut self, n: usize) -> Option<usize> {
@@ -359,8 +366,6 @@ impl Trail {
         self.lookup_n(n)
     }
 
-    #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
     /// Lookup one slot in the [BitMap]
     ///
     /// ## Perf
@@ -368,6 +373,8 @@ impl Trail {
     ///
     /// ## TODO's
     ///  - Impl of SIMD
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
     unsafe fn lookup_one(&mut self) -> Option<usize> {
         let meta = &mut *self.meta_ptr;
 
@@ -471,8 +478,6 @@ impl Trail {
         None
     }
 
-    #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
     /// Lookup `N` slots in the [BitMap]
     ///
     /// ## Perf
@@ -480,6 +485,8 @@ impl Trail {
     ///
     /// ## TODO's
     ///  - Impl of SIMD
+    #[allow(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
     unsafe fn lookup_n(&mut self, n: usize) -> Option<usize> {
         let meta = &mut *self.meta_ptr;
 
@@ -1193,7 +1200,7 @@ mod tests {
         #[test]
         #[ignore]
         fn bench_trail_lookup_with_extend_remap() {
-            const INIT_CAP: usize = 0x1000;
+            const INIT_CAP: usize = 0x8000;
             const TARGET_CAP: usize = 0x20_000; // grow until total `1_31_072`
             const MAX_GROWS: usize = TARGET_CAP / INIT_CAP;
 
@@ -1211,10 +1218,6 @@ mod tests {
                 .log(true)
                 .log_target("[BENCH] Trail::lookup_extend_remap");
 
-            cfg.logger.info("----------Lookup(extend_remap)----------");
-            cfg.logger
-                .info(format!("InitCap={}, TargetCap={}", INIT_CAP, TARGET_CAP));
-
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
                 let meta = &mut *trail.meta_ptr;
@@ -1228,10 +1231,8 @@ mod tests {
 
                 // HACK: We reset bmap so lookup always does real work
                 let nwords = meta.nwords as usize;
-
                 meta.free = meta.nwords * 0x40;
                 meta.cw_idx = 0x00;
-
                 for i in 0x00..nwords {
                     (*trail.bmap_ptr.add(i)).0 = 0x00;
                 }
@@ -1289,14 +1290,22 @@ mod tests {
                 // STEP 3: Measure results
 
                 let avg_grow_ms = grow_timings.iter().sum::<f64>() / grow_timings.len() as f64;
-                let avg_lookup_ns = lookup_timings.iter().sum::<f64>() / lookup_timings.len() as f64;
+                let avg_ns = lookup_timings.iter().sum::<f64>() / lookup_timings.len() as f64;
                 let lookups_per_grow = (iters_to_fill * CHUNKS.len()) as f64;
-                let amort_grow_us = (avg_grow_ms * 1_000.0) / lookups_per_grow;
-                let total_us = (avg_lookup_ns / 1_000.0) + amort_grow_us;
+                let amort_grow_ns = (avg_grow_ms * 1_00_000.0) / lookups_per_grow;
+                let total_us = avg_ns + amort_grow_ns;
 
-                cfg.logger.info(format!("Lookup: {:.3} ns/op", avg_lookup_ns));
+                cfg.logger.info(format!("Lookup: {:.3} ns/op", avg_ns));
+                cfg.logger.info(format!("Lookup(w/ grow): {:.3} ns/op", total_us));
                 cfg.logger.info(format!("Grow: {:.3} ms/grow", avg_grow_ms));
-                cfg.logger.info(format!("Lookup(w/ grow): {:.3} µs/op", total_us));
+
+                // STEP 4: Validate
+
+                #[cfg(not(debug_assertions))]
+                {
+                    let threshold = 0x0C as f64;
+                    assert!(avg_ns <= threshold, "lookup_n too slow: {avg_ns} ns/op");
+                }
             }
         }
     }
@@ -1463,12 +1472,9 @@ mod tests {
                 .log(true)
                 .log_target("[BENCH] Trail::lookup_one");
 
-            cfg.logger.info("----------Lookup(1)----------");
-
             unsafe {
                 let rounds = 0x0A;
                 let iters = INIT_CAP;
-                cfg.logger.info(format!("Rounds={rounds}, Iters={iters}"));
 
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
                 let mut results: Vec<f64> = Vec::with_capacity(rounds);
@@ -1483,11 +1489,9 @@ mod tests {
 
                 for r in 0x00..rounds {
                     // HACK: We reset bmap so lookup always does real work
+                    let nwords = meta.nwords as usize;
                     meta.free = meta.nwords * 0x40;
                     meta.cw_idx = 0x00;
-
-                    // Clear up all bmap words
-                    let nwords = meta.nwords as usize;
                     for i in 0x00..nwords {
                         (*trail.bmap_ptr.add(i)).0 = 0x00;
                     }
@@ -1497,16 +1501,12 @@ mod tests {
                         assert!(trail.lookup_one().is_some());
                     }
                     let elapsed = start.elapsed();
-
                     let ns_per_op = elapsed.as_nanos() as f64 / iters as f64;
-                    cfg.logger
-                        .info(format!("[Round {r}] Time={:?}  =>  {:.2} ns/op", elapsed, ns_per_op));
-
                     results.push(ns_per_op);
                 }
 
                 let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
-                cfg.logger.info(format!("AVERAGE: {:.2} ns/op", avg));
+                cfg.logger.info(format!("Lookup: {:.3} ns/op", avg));
 
                 #[cfg(not(debug_assertions))]
                 {
@@ -1794,14 +1794,12 @@ mod tests {
                 .log(true)
                 .log_target("[BENCH] Trail::lookup_n");
 
-            cfg.logger.info("----------Lookup(N)----------");
-
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("New Trail");
 
                 // STEP 1: Warmup
-                //
-                // NOTE: warmup to eliminate cold cache & cold cpu, and branch predictor effects
+
+                // NOTE: warmup eliminates cold cache & cold cpu, and branch predictor effects
                 let meta = &mut *trail.meta_ptr;
                 let nwords = meta.nwords as usize;
                 let total = nwords * 0x40;
@@ -1809,37 +1807,45 @@ mod tests {
                     let _ = trail.lookup_one();
                 }
 
-                // STEP 2: Benchmark
+                // STEP 2: Benches
+
                 let mut results = Vec::with_capacity(ROUNDS);
                 for r in 0x00..ROUNDS {
                     // HACK: We reset bmap so lookup always does real work
                     let meta = &mut *trail.meta_ptr;
+                    let nwords = meta.nwords as usize;
                     meta.free = meta.nwords * 0x40;
                     meta.cw_idx = 0x00;
-
-                    // Clear up all bmap words
-                    let nwords = meta.nwords as usize;
                     for i in 0x00..nwords {
                         (*trail.bmap_ptr.add(i)).0 = 0x00;
                     }
 
-                    let start = Instant::now();
                     for _ in 0x00..iters {
-                        for n in CHUNKS {
-                            assert!(trail.lookup_n(n).is_some());
-                        }
-                    }
-                    let elapsed = start.elapsed();
+                        let start = Instant::now();
 
-                    let ops = (iters * CHUNKS.len()) as f64;
-                    let ns_op = elapsed.as_nanos() as f64 / ops;
-                    cfg.logger.info(format!("[Round {r}] {ns_op:.2} ns/op"));
-                    results.push(ns_op);
+                        assert!(trail.lookup_n(CHUNKS[0x00]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x01]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x02]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x03]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x04]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x05]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x06]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x07]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x08]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x09]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x0A]).is_some());
+                        assert!(trail.lookup_n(CHUNKS[0x0B]).is_some());
+
+                        let elapsed = start.elapsed();
+                        let ns_op = elapsed.as_nanos() as f64 / CHUNKS.len() as f64;
+                        results.push(ns_op);
+                    }
                 }
 
-                // STEP 3: Compute Results
+                // STEP 3: Compute results
+
                 let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
-                cfg.logger.info(format!("AVERAGE: {:.2} ns/op", avg));
+                cfg.logger.info(format!("Lookup: {:.3} ns/op", avg));
 
                 #[cfg(not(debug_assertions))]
                 {
