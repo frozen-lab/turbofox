@@ -2,6 +2,7 @@
 
 mod burrow;
 mod errors;
+mod hasher;
 mod linux;
 mod logger;
 

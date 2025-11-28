@@ -1,4 +1,5 @@
 mod den;
+mod mark;
 mod trail;
 
 pub(crate) const DEFAULT_CAP: usize = 0x400; // 1024
