@@ -314,6 +314,8 @@ mod tests {
 
     #[cfg(test)]
     mod turbo_hash {
+        use rand::{Rng, SeedableRng};
+
         use super::*;
 
         #[test]
@@ -349,17 +351,68 @@ mod tests {
 
         #[test]
         fn test_hash_non_reserved_value() {
-            let mut hash = 0xDEADBEEF;
+            let mut hash = 0xDEADC0DE;
             let result = TurboHash::from_hash(&mut hash);
 
-            assert_eq!(result, 0xDEADBEEF, "Non-reserved hash should remain unchanged");
-            assert_eq!(hash, 0xDEADBEEF);
+            assert_eq!(result, 0xDEADC0DE, "Non-reserved hash should remain unchanged");
+            assert_eq!(hash, 0xDEADC0DE);
         }
 
         #[test]
         fn test_replacement_value_is_different() {
             assert_ne!(REPLACEMENT, TOMBSTONE_SIGN);
             assert_ne!(REPLACEMENT, EMPTY_SIGN);
+        }
+
+        #[test]
+        #[ignore]
+        fn bench_turbo_hash() {
+            const COUNT: usize = 0x1000;
+
+            let mut candis: Vec<Vec<u8>> = Vec::with_capacity(COUNT);
+            let mut timings: Vec<f64> = Vec::with_capacity(COUNT);
+            let mut rng = rand::rngs::StdRng::seed_from_u64(0xDEADC0DE);
+
+            // gen candis
+            for _ in 0x00..COUNT {
+                let len = rng.random_range(0x02..=0x40) as usize;
+
+                // rnd candi buffer
+                let mut buf: Vec<u8> = Vec::with_capacity(len);
+                for _ in 0x00..len {
+                    buf.push(rng.random());
+                }
+
+                candis.push(buf);
+            }
+
+            // warmup
+            for i in 0x00..(COUNT / 0x02) {
+                std::hint::black_box(TurboHash::new(&candis[i]));
+            }
+
+            // benching
+            for buf in candis {
+                let start = std::time::Instant::now();
+                std::hint::black_box(TurboHash::new(&buf));
+                let elapsed = start.elapsed();
+                timings.push(elapsed.as_nanos() as f64);
+            }
+
+            let avg: f64 = timings.iter().sum::<f64>() / timings.len() as f64;
+            println!("TurboHash: {:.3} ns/op", avg);
+
+            // validate
+            #[cfg(not(debug_assertions))]
+            {
+                let threshold_ns = 0x30 as f64;
+                assert!(
+                    avg <= threshold_ns,
+                    "lookup_one too slow: {:.2} ns/op (threshold: {} ns)",
+                    avg,
+                    threshold_ns
+                );
+            }
         }
     }
 }
