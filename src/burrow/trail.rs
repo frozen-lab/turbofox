@@ -20,7 +20,7 @@ const _: () = assert!(
 //
 
 #[derive(Debug, Copy, Clone)]
-#[repr(C, align(0x20))]
+#[repr(C, align(0x08))]
 struct Meta {
     magic: [u8; 0x04],
     version: u32,
