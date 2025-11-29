@@ -20,7 +20,7 @@ const _: () = assert!(
 //
 
 #[derive(Debug, Copy, Clone)]
-#[repr(C, align(0x08))]
+#[repr(C, align(0x20))]
 struct Meta {
     magic: [u8; 0x04],
     version: u32,
@@ -796,11 +796,11 @@ impl Drop for Trail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logger::init_test_logger;
+    // use crate::logger::init_test_logger;
     use tempfile::TempDir;
 
     fn temp_dir() -> TempDir {
-        let _ = init_test_logger(None);
+        // let _ = init_test_logger(None);
         TempDir::new().expect("temp dir")
     }
 

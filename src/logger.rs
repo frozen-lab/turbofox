@@ -1,65 +1,111 @@
 use log::{Level, Record};
 
-#[cfg(test)]
-pub(crate) fn init_test_logger(target: Option<&'static str>) -> Option<Logger> {
-    let _ = env_logger::builder().is_test(true).try_init();
+const TARGET: &'static str = "TurboFox";
 
-    if target.is_none() {
-        return None;
-    }
-
-    Some(Logger::new(true, target.unwrap()))
+#[derive(Debug, Clone)]
+pub(crate) struct Logger {
+    pub(crate) enabled: bool,
+    pub(crate) target: &'static str,
+    pub(crate) level: TurboLogLevel,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Logger {
-    pub enabled: bool,
-    pub target: &'static str,
+impl Default for Logger {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target: TARGET,
+            level: TurboLogLevel::ERROR,
+        }
+    }
 }
 
 impl Logger {
-    #[inline(always)]
-    pub fn new(enabled: bool, target: &'static str) -> Self {
-        Self { enabled, target }
-    }
-
-    #[inline(always)]
-    pub const fn is_enabled(&self) -> bool {
+    pub(crate) const fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    fn log_args(&self, level: Level, args: std::fmt::Arguments) {
-        if !self.enabled {
+    pub(crate) fn trace(&self, args: impl std::fmt::Display) {
+        self._log(Level::Trace, format_args!("{args}"));
+    }
+
+    pub(crate) fn debug(&self, args: impl std::fmt::Display) {
+        self._log(Level::Debug, format_args!("{args}"));
+    }
+
+    pub(crate) fn info(&self, args: impl std::fmt::Display) {
+        self._log(Level::Info, format_args!("{args}"));
+    }
+
+    pub(crate) fn warn(&self, args: impl std::fmt::Display) {
+        self._log(Level::Warn, format_args!("{args}"));
+    }
+
+    pub(crate) fn error(&self, args: impl std::fmt::Display) {
+        self._log(Level::Error, format_args!("{args}"));
+    }
+
+    #[cfg(test)]
+    /// [Logger] instance for test modules
+    pub(crate) fn test_logger(target: &'static str) -> Self {
+        let _ = env_logger::builder().is_test(true).try_init();
+        Logger {
+            enabled: true,
+            target,
+            level: TurboLogLevel::TRACE,
+        }
+    }
+
+    #[inline]
+    fn _log(&self, level: Level, args: std::fmt::Arguments) {
+        // deny logging
+        if !self.enabled || (TurboLogLevel::from_level(level) > self.level) {
             return;
         }
 
         let record = Record::builder().args(args).level(level).target(&self.target).build();
-
         log::logger().log(&record);
     }
+}
 
-    #[inline(always)]
-    pub fn trace(&self, args: impl std::fmt::Display) {
-        self.log_args(Level::Trace, format_args!("{args}"));
-    }
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+pub enum TurboLogLevel {
+    /// Used to log fatel errors via [Logger]
+    ERROR = 0x00,
 
-    #[inline(always)]
-    pub fn debug(&self, args: impl std::fmt::Display) {
-        self.log_args(Level::Debug, format_args!("{args}"));
-    }
+    /// Used to log warning messages via [Logger]
+    WARN = 0x01,
 
-    #[inline(always)]
-    pub fn info(&self, args: impl std::fmt::Display) {
-        self.log_args(Level::Info, format_args!("{args}"));
-    }
+    /// Used to log important information via [Logger]
+    INFO = 0x02,
 
-    #[inline(always)]
-    pub fn warn(&self, args: impl std::fmt::Display) {
-        self.log_args(Level::Warn, format_args!("{args}"));
-    }
+    /// Used to log debubg information via [Logger]
+    ///
+    /// **NOTE**: For internal use only
+    #[doc(hidden)]
+    #[cfg(test)]
+    DEBUG = 0x03,
 
-    #[inline(always)]
-    pub fn error(&self, args: impl std::fmt::Display) {
-        self.log_args(Level::Error, format_args!("{args}"));
+    /// Used to log traces and other debug info via [Logger]
+    ///
+    /// **NOTE**: For internal use only
+    #[doc(hidden)]
+    #[cfg(test)]
+    TRACE = 0x04,
+}
+
+impl TurboLogLevel {
+    #[inline]
+    const fn from_level(level: Level) -> Self {
+        match level {
+            Level::Error => TurboLogLevel::ERROR,
+            Level::Warn => TurboLogLevel::WARN,
+            Level::Info => TurboLogLevel::INFO,
+            #[cfg(test)]
+            Level::Debug => TurboLogLevel::DEBUG,
+            #[cfg(test)]
+            Level::Trace => TurboLogLevel::TRACE,
+            _ => unreachable!(),
+        }
     }
 }

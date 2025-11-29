@@ -1,3 +1,26 @@
+pub type TurboResult<T> = Result<T, TurboError>;
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum TurboError {
+    IO(String),
+    Misc(String),
+    InvalidConfig(String),
+}
+
+impl From<InternalError> for TurboError {
+    fn from(value: InternalError) -> Self {
+        match value {
+            InternalError::IO(err) => TurboError::IO(err),
+            InternalError::Misc(err) => TurboError::Misc(err),
+            InternalError::InvalidFile(err) => TurboError::IO(err),
+        }
+    }
+}
+
+//
+// Internal Error
+//
+
 pub(crate) type InternalResult<T> = Result<T, InternalError>;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
