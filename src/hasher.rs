@@ -369,6 +369,8 @@ mod tests {
         fn bench_turbo_hash() {
             const COUNT: usize = 0x1000;
 
+            let (cfg, _) = crate::cfg::TurboConfig::test_cfg("TurboHash");
+
             let mut candis: Vec<Vec<u8>> = Vec::with_capacity(COUNT);
             let mut timings: Vec<f64> = Vec::with_capacity(COUNT);
             let mut rng = rand::rngs::StdRng::seed_from_u64(0xDEADC0DE);
@@ -400,7 +402,7 @@ mod tests {
             }
 
             let avg: f64 = timings.iter().sum::<f64>() / timings.len() as f64;
-            println!("TurboHash: {:.3} ns/op", avg);
+            cfg.logger.info(format!("Hash: {:.3} ns/op", avg));
 
             // validate
             #[cfg(not(debug_assertions))]

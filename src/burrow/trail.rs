@@ -2,7 +2,7 @@ use crate::{
     errors::{InternalError, InternalResult},
     linux::{file::File, mmap::MMap},
     logger::Logger,
-    InternalCfg,
+    TurboConfig,
 };
 
 const VERSION: u32 = 0x01;
@@ -92,7 +92,7 @@ impl BMapPtr {
 pub(super) struct Trail {
     file: File,
     mmap: MMap,
-    cfg: InternalCfg,
+    cfg: TurboConfig,
     meta_ptr: *mut Meta,
     bmap_ptr: *mut BMapPtr,
 }
@@ -102,7 +102,7 @@ impl Trail {
     ///
     /// *NOTE* Returns an [IO] error if something goes wrong
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn new(cfg: &InternalCfg) -> InternalResult<Self> {
+    pub(super) unsafe fn new(cfg: &TurboConfig) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
         let nwords = cfg.init_cap >> 0x06;
         let init_len = META_SIZE + (nwords << 0x03);
@@ -197,7 +197,7 @@ impl Trail {
     /// *NOTE*: Returns an [InvalidFile] error when the underlying file is corrupted,
     /// may happen when the file is invalid or tampered with
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn open(cfg: &InternalCfg) -> InternalResult<Self> {
+    pub(super) unsafe fn open(cfg: &TurboConfig) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
 
         // file must exists
@@ -724,7 +724,7 @@ impl Trail {
     /// Close & Delete [Trail] file
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    unsafe fn close_and_del_file(cfg: &InternalCfg, file: &File) {
+    unsafe fn close_and_del_file(cfg: &TurboConfig, file: &File) {
         let path = cfg.dirpath.join(PATH);
 
         // close the file handle (NOTE: always before the delete)
@@ -796,13 +796,7 @@ impl Drop for Trail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // use crate::logger::init_test_logger;
     use tempfile::TempDir;
-
-    fn temp_dir() -> TempDir {
-        // let _ = init_test_logger(None);
-        TempDir::new().expect("temp dir")
-    }
 
     mod bmap {
         use super::*;
@@ -907,9 +901,8 @@ mod tests {
 
         #[test]
         fn test_new_is_valid() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+
             let nwords = cfg.init_cap >> 0x06;
             let init_len = META_SIZE + (nwords << 0x03);
             let t1 = unsafe { Trail::new(&cfg) }.expect("new trail");
@@ -932,9 +925,7 @@ mod tests {
 
         #[test]
         fn test_open_is_valid() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let t0 = Trail::new(&cfg).expect("new trail");
@@ -965,9 +956,7 @@ mod tests {
 
         #[test]
         fn test_open_panics_on_invalid_metadata_in_file() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
@@ -980,9 +969,8 @@ mod tests {
 
         #[test]
         fn test_new_fails_when_dir_is_not_writable() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir.clone()).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let dir = _tmp.path().to_path_buf();
 
             // NOTE: w/ chmod 000 we simulate unwriteable directory
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("Set permission");
@@ -998,9 +986,8 @@ mod tests {
 
         #[test]
         fn test_open_fails_when_dir_is_not_readable() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir.clone()).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let dir = _tmp.path().to_path_buf();
             let path = dir.join("trail");
 
             std::fs::write(&path, &[0u8; 64]).expect("Write");
@@ -1019,9 +1006,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_grows_file_and_updates_meta() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1043,9 +1028,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_twice_accumulates_meta_correctly() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1072,9 +1055,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_zero_inits_correctly() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1106,9 +1087,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_refreshes_pointers() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1126,9 +1105,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_preserves_free_invariant() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1151,9 +1128,7 @@ mod tests {
 
         #[test]
         fn test_lookup_maps_correctly_to_lookup_one() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1171,9 +1146,7 @@ mod tests {
 
         #[test]
         fn test_lookup_maps_correctly_to_lookup_n() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1191,9 +1164,7 @@ mod tests {
 
         #[test]
         fn test_lookup_wraparound() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1212,9 +1183,7 @@ mod tests {
 
         #[test]
         fn test_lookup_returns_none_when_full() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1233,9 +1202,7 @@ mod tests {
 
         #[test]
         fn test_lookup_finds_exact_freed_region() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1268,9 +1235,7 @@ mod tests {
 
         #[test]
         fn test_lookup_preserves_meta_free_invariant() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1291,9 +1256,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_lookup_zero_panics_in_debug() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1303,9 +1266,8 @@ mod tests {
 
         #[test]
         fn test_lookup_and_extend_remap_cycle_works_correctly() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            cfg = cfg.init_cap(0x80).expect("Update INIT_CAP");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1336,9 +1298,7 @@ mod tests {
 
         #[test]
         fn test_lookup_after_extend_remap_returns_correct_next_index() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1378,12 +1338,8 @@ mod tests {
             let sum: usize = CHUNKS.into_iter().sum();
             let iters_to_fill = INIT_CAP / sum;
 
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir)
-                .init_cap(INIT_CAP)
-                .log(true)
-                .log_target("[BENCH] Trail::lookup_extend_remap");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("[BENCH] Trail::lookup_extend_remap");
+            cfg = cfg.init_cap(INIT_CAP).expect("Update init cap");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1483,9 +1439,7 @@ mod tests {
 
         #[test]
         fn test_free_maps_correctly_to_free_one() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1509,9 +1463,7 @@ mod tests {
 
         #[test]
         fn test_free_maps_correctly_to_free_n() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1537,9 +1489,7 @@ mod tests {
 
         #[test]
         fn test_free_correctly_wraps_around_word_boundary() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1565,9 +1515,7 @@ mod tests {
 
         #[test]
         fn test_free_exactly_ends_on_word_boundary() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1592,9 +1540,7 @@ mod tests {
 
         #[test]
         fn test_free_validates_correctly() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1618,9 +1564,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_free_oob_panics() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x40).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1633,9 +1577,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_free_zero_panics() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x40).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1645,9 +1587,7 @@ mod tests {
 
         #[test]
         fn test_free_on_empty_bmap_does_nothing() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1664,9 +1604,7 @@ mod tests {
 
         #[test]
         fn test_free_on_full_bitmap_and_reallocate_all() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x80).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1697,12 +1635,8 @@ mod tests {
             let sum: usize = CHUNKS.into_iter().sum();
             let iters_to_fill = INIT_CAP / sum;
 
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir)
-                .init_cap(INIT_CAP)
-                .log(true)
-                .log_target("[BENCH] Trail::free");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("[BENCH] Trail::free_till_empty");
+            cfg = cfg.init_cap(INIT_CAP).expect("Update init cap");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1767,9 +1701,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_one_sequential_filling() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1787,9 +1719,7 @@ mod tests {
 
         #[test]
         fn test_lookup_one_wraps_around_correctly() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1817,9 +1747,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_one_preserves_meta_free_invariant() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1839,9 +1767,7 @@ mod tests {
 
         #[test]
         fn test_lookup_one_bit_consistency() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1862,9 +1788,8 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_one_returns_none_when_full() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1883,9 +1808,8 @@ mod tests {
 
         #[test]
         fn test_lookup_one_finds_single_freed_slot() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1913,14 +1837,10 @@ mod tests {
         #[test]
         #[ignore]
         fn bench_lookup_one() {
-            const INIT_CAP: usize = 0x7D000; // 512K
+            const INIT_CAP: usize = 0x80_000; // 524288 bits
 
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir)
-                .init_cap(INIT_CAP)
-                .log(true)
-                .log_target("[BENCH] Trail::lookup_one");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("[BENCH] Trail::lookup_one");
+            cfg = cfg.init_cap(INIT_CAP).expect("Update init cap");
 
             unsafe {
                 let rounds = 0x0A;
@@ -1979,9 +1899,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_n_correctly_works() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2000,9 +1918,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_returns_contineous_blocks() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2024,9 +1940,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_wraps_correctly() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2050,10 +1964,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_bit_consistency() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).log(true).log_target("Trail");
-
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
                 let total = (*trail.meta_ptr).nwords as usize * 0x40;
@@ -2100,9 +2011,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_lookup_n_zero_panics() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -2113,9 +2022,8 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_n_returns_none_when_full() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2132,9 +2040,8 @@ mod tests {
 
         #[test]
         fn test_lookup_n_finds_freed_block() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true).log_target("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2164,9 +2071,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_spans_word_boundary_start_near_end() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2197,9 +2102,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_exactly_ends_on_word_boundary() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2230,19 +2133,15 @@ mod tests {
         #[test]
         #[ignore]
         fn bench_lookup_n() {
-            const INIT_CAP: usize = 0x7D000; // 512K bits
+            const INIT_CAP: usize = 0x80_000; // 524288 bits
             const ROUNDS: usize = 0x14;
             const CHUNKS: [usize; 0x0C] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x14, 0x18, 0x20];
 
             let sum: usize = CHUNKS.into_iter().sum();
             let iters = INIT_CAP / sum;
 
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir)
-                .init_cap(INIT_CAP)
-                .log(true)
-                .log_target("[BENCH] Trail::lookup_n");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("[BENCH] Trail::lookup_n");
+            cfg = cfg.init_cap(INIT_CAP).expect("Update init cap");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("New Trail");
@@ -2312,9 +2211,7 @@ mod tests {
 
         #[test]
         fn test_free_n_works_correctly() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2347,9 +2244,7 @@ mod tests {
 
         #[test]
         fn test_free_n_correctly_wraps_on_word_boundary() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2380,9 +2275,7 @@ mod tests {
 
         #[test]
         fn test_free_n_correctly_ends_on_boundary() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2415,9 +2308,7 @@ mod tests {
 
         #[test]
         fn test_free_n_followed_by_lookup_n_returns_exact_block() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2441,9 +2332,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_free_n_panics_on_out_of_bounds_input() {
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir).init_cap(0x100).log(true);
+            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2460,19 +2349,15 @@ mod tests {
         #[test]
         #[ignore]
         fn bench_free_n() {
-            const INIT_CAP: usize = 0x7D000; // 512K bits
+            const INIT_CAP: usize = 0x80_000; // 524288 bits
             const ROUNDS: usize = 0x14;
             const CHUNKS: [usize; 0x0C] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x14, 0x18, 0x20];
 
             let sum: usize = CHUNKS.into_iter().sum();
             let iters = INIT_CAP / sum;
 
-            let tmp = temp_dir();
-            let dir = tmp.path().to_path_buf();
-            let cfg = InternalCfg::new(dir)
-                .init_cap(INIT_CAP)
-                .log(true)
-                .log_target("[BENCH] Trail::free_n");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("[BENCH] Trail::free_n");
+            cfg = cfg.init_cap(INIT_CAP).expect("Update init cap");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("New Trail");

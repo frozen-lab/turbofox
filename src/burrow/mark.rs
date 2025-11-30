@@ -1,7 +1,4 @@
-use crate::{
-    linux::{file::File, mmap::MMap},
-    InternalCfg,
-};
+use crate::linux::{file::File, mmap::MMap};
 
 const VERSION: u32 = 0x01;
 const MAGIC: [u8; 0x04] = *b"mrk1";
@@ -53,10 +50,12 @@ const _: () = assert!(META_SIZE == 0x10);
 
 const ITEMS_PER_ROW: usize = 0x10;
 
-#[repr(C, align(0x08))]
+#[repr(C)]
 struct Offsets {
     trail_idx: u32,
     vbuf_slots: u16,
+    klen: u16,
+    vlen: u16,
     flag: u8,
     _padd: u8,
 }
@@ -70,9 +69,9 @@ struct Row {
 const ROW_SIZE: usize = std::mem::size_of::<Row>();
 
 // Sanity checks
-const _: () = assert!(ROW_SIZE == 0xC0, "Row must be of 192 bytes");
-const _: () = assert!(std::mem::size_of::<Offsets>() == 0x08);
-const _: () = assert!(std::mem::size_of::<Row>() % (0x04 + 0x08) == 0x00);
+const _: () = assert!(ROW_SIZE == 0x100, "Row must be of 256 bytes");
+const _: () = assert!(std::mem::size_of::<Offsets>() == 0x0C);
+const _: () = assert!(std::mem::size_of::<Row>() % (0x04 + 0x0C) == 0x00);
 
 //
 // Mark
@@ -81,7 +80,6 @@ const _: () = assert!(std::mem::size_of::<Row>() % (0x04 + 0x08) == 0x00);
 pub(super) struct Mark {
     file: File,
     mmap: MMap,
-    cfg: InternalCfg,
     rows_ptr: *mut Row,
     meta_ptr: *mut Meta,
 }

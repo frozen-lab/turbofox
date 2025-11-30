@@ -10,16 +10,16 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct TurboConfig {
     /// Initial capacity for [TurboFox]
-    init_cap: usize,
-
-    /// Maximum allowed length for **Key** buffer
-    key_buf_len: usize,
+    pub(crate) init_cap: usize,
 
     /// Directory path for [TurboFox] for persistence
-    dirpath: Arc<PathBuf>,
+    pub(crate) dirpath: Arc<PathBuf>,
 
     /// For interal as well as external logging
-    logger: Arc<Logger>,
+    pub(crate) logger: Arc<Logger>,
+
+    /// Buffer size used for paged data persistance
+    pub(crate) page_size: usize,
 }
 
 impl TurboConfig {
@@ -55,7 +55,7 @@ impl TurboConfig {
             logger,
             dirpath,
             init_cap: crate::burrow::DEFAULT_INIT_CAP,
-            key_buf_len: crate::burrow::DEFAULT_KBUF_LEN,
+            page_size: crate::burrow::DEFAULT_PAGE_SIZE,
         })
     }
 
@@ -72,22 +72,6 @@ impl TurboConfig {
             .ok_or_else(|| TurboError::InvalidConfig("init_cap must be power of 2".into()))?;
 
         self.init_cap = cap;
-        Ok(self)
-    }
-
-    /// Update maximum allowed Key Buffer Length for [TurboFox] database.
-    ///
-    /// **NOTE**: Length must be greater then or equal to 8, while also being power of 2
-    pub fn key_buf_len(mut self, len: usize) -> TurboResult<Self> {
-        // sanity checks
-        (len >= 0x08)
-            .then_some(())
-            .ok_or_else(|| TurboError::InvalidConfig("key_buf_len must be >= 8".into()))?;
-        Self::is_power_of_two(len)
-            .then_some(())
-            .ok_or_else(|| TurboError::InvalidConfig("key_buf_len must be power of 2".into()))?;
-
-        self.key_buf_len = len;
         Ok(self)
     }
 
@@ -147,7 +131,7 @@ impl TurboConfig {
             logger,
             dirpath,
             init_cap: crate::burrow::DEFAULT_INIT_CAP,
-            key_buf_len: crate::burrow::DEFAULT_KBUF_LEN,
+            page_size: crate::burrow::DEFAULT_PAGE_SIZE,
         };
 
         (cfg, tempdir)
