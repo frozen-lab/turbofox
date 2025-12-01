@@ -14,7 +14,6 @@ impl MMap {
     /// **WARN**: the sync/flush may not happen if the system crashed while the updates are in flight
     /// **IMP**: mmap must be preceded by fsync to sync any in flight updates
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
     pub(crate) unsafe fn new(fd: i32, len: usize) -> InternalResult<Self> {
         let ptr = mmap(std::ptr::null_mut(), len, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0i64);
 
@@ -26,8 +25,7 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(crate) unsafe fn unmap(&self) -> InternalResult<()> {
+    pub(crate) unsafe fn munmap(&self) -> InternalResult<()> {
         if munmap(self.ptr, self.len) != 0 {
             return Err(Self::_last_os_error());
         }
@@ -36,8 +34,7 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(crate) unsafe fn ms_async(&self) -> InternalResult<()> {
+    pub(crate) unsafe fn masync(&self) -> InternalResult<()> {
         if msync(self.ptr, self.len, MS_ASYNC) != 0 {
             return Err(Self::_last_os_error());
         }
@@ -46,8 +43,7 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(crate) unsafe fn ms_sync(&self) -> InternalResult<()> {
+    pub(crate) unsafe fn msync(&self) -> InternalResult<()> {
         if msync(self.ptr, self.len, MS_SYNC) != 0 {
             return Err(Self::_last_os_error());
         }
@@ -56,7 +52,6 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
     pub(crate) unsafe fn write<T: Copy>(&self, off: usize, val: &T) {
         #[cfg(debug_assertions)]
         {
@@ -72,8 +67,7 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(crate) unsafe fn read<T: Copy>(&self, off: usize) -> T {
+    pub(crate) unsafe fn read<T>(&self, off: usize) -> T {
         #[cfg(debug_assertions)]
         {
             let size = std::mem::size_of::<T>();
@@ -88,7 +82,6 @@ impl MMap {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
     pub(crate) unsafe fn read_mut<T>(&self, off: usize) -> *mut T {
         #[cfg(debug_assertions)]
         {
@@ -103,17 +96,17 @@ impl MMap {
     }
 
     #[inline]
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.len
     }
 
     #[inline]
-    pub(crate) fn ptr(&self) -> *const u8 {
+    pub(crate) const fn ptr(&self) -> *const u8 {
         self.ptr as *const u8
     }
 
     #[inline]
-    pub(crate) fn ptr_mut(&self) -> *mut u8 {
+    pub(crate) const fn ptr_mut(&self) -> *mut u8 {
         self.ptr as *mut u8
     }
 
@@ -123,8 +116,8 @@ impl MMap {
     }
 }
 
-#[cfg(test)]
 #[cfg(target_os = "linux")]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::linux::file::File;
@@ -150,7 +143,7 @@ mod tests {
 
             assert!(!m.ptr().is_null());
             assert_eq!(m.len(), 0x1000);
-            m.unmap().expect("Munmap");
+            m.munmap().expect("Munmap");
         }
     }
 
@@ -160,7 +153,7 @@ mod tests {
 
         unsafe {
             let m = MMap::new(file.fd(), 0x1000).expect("Mmap");
-            assert!(m.unmap().is_ok());
+            assert!(m.munmap().is_ok());
         }
     }
 
@@ -175,7 +168,7 @@ mod tests {
 
             assert!(!m.ptr().is_null());
             assert_eq!(m.len(), 0x2000);
-            m.unmap().expect("Munmap");
+            m.munmap().expect("Munmap");
         }
     }
 
@@ -218,7 +211,7 @@ mod tests {
             mmap.write(0, &val);
             assert_eq!(mmap.read::<u64>(0), val);
 
-            mmap.unmap().expect("Munmap");
+            mmap.munmap().expect("Munmap");
         }
     }
 
@@ -239,7 +232,7 @@ mod tests {
             mmap.write(0, &val2);
             assert_eq!(mmap.read::<u64>(0), val2);
 
-            mmap.unmap().expect("Munmap");
+            mmap.munmap().expect("Munmap");
         }
     }
 
@@ -257,7 +250,7 @@ mod tests {
             *ptr = val;
             assert_eq!(mmap.read::<u64>(offset), val);
 
-            mmap.unmap().expect("Munmap");
+            mmap.munmap().expect("Munmap");
         }
     }
 
@@ -267,8 +260,8 @@ mod tests {
 
         unsafe {
             let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
-            assert!(mmap.ms_async().is_ok());
-            mmap.unmap().expect("Munmap");
+            assert!(mmap.masync().is_ok());
+            mmap.munmap().expect("Munmap");
         }
     }
 
@@ -280,8 +273,8 @@ mod tests {
         unsafe {
             let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
             mmap.write(64, &val);
-            mmap.ms_sync().expect("ms_sync should succeed");
-            mmap.unmap().expect("Munmap");
+            mmap.msync().expect("ms_sync should succeed");
+            mmap.munmap().expect("Munmap");
         }
 
         let data = std::fs::read(&path).expect("Read from file");
@@ -299,8 +292,8 @@ mod tests {
         unsafe {
             let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
             mmap.write(64, &val);
-            mmap.ms_sync().expect("ms_sync should succeed");
-            mmap.unmap().expect("Munmap");
+            mmap.msync().expect("ms_sync should succeed");
+            mmap.munmap().expect("Munmap");
             file.close().expect("Close file handle");
         }
 
@@ -329,7 +322,7 @@ mod tests {
             *p = val;
 
             assert_eq!(mmap.read::<u64>(128), val);
-            mmap.unmap().expect("Munmap");
+            mmap.munmap().expect("Munmap");
         }
     }
 
@@ -345,8 +338,8 @@ mod tests {
             mmap1.write(0, &val);
             assert_eq!(mmap2.read::<u64>(0), val);
 
-            mmap1.unmap().expect("Munmap");
-            mmap2.unmap().expect("Munmap");
+            mmap1.munmap().expect("Munmap");
+            mmap2.munmap().expect("Munmap");
         }
     }
 }

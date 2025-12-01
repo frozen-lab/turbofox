@@ -147,7 +147,7 @@ impl Trail {
         // NOTE: we can afford this syscall here, as init does not come under the fast
         // path. Also it's just one time thing!
         mmap.write(0x00, &Meta::new(nwords as u64));
-        mmap.ms_sync()
+        mmap.msync()
             .inspect(|_| cfg.logger.trace("(TRAIL) [new] MsSync successful on Meta"))
             .map_err(|e| {
                 cfg.logger
@@ -259,7 +259,7 @@ impl Trail {
 
         // STEP 1: Unmap
         self.mmap
-            .unmap()
+            .munmap()
             .inspect(|_| self.cfg.logger.trace("(TRAIL) [extend_remap] Munmap successful"))
             .map_err(|e| {
                 self.cfg
@@ -288,7 +288,7 @@ impl Trail {
         (*self.meta_ptr).free += slots_to_add;
         (*self.meta_ptr).cw_idx = curr_nwords; // we start at the first new idx
         self.mmap
-            .ms_sync()
+            .msync()
             .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] MsSync Successful"))
             .map_err(|e| {
                 self.cfg
@@ -685,7 +685,7 @@ impl Drop for Trail {
 
             // flush dirty pages
             self.mmap
-                .ms_sync()
+                .msync()
                 .inspect(|_| {
                     self.cfg.logger.trace("(TRAIL) [drop] Fsync successful for mmap");
                 })
@@ -698,7 +698,7 @@ impl Drop for Trail {
 
             // munmap the memory mappings
             self.mmap
-                .unmap()
+                .munmap()
                 .inspect(|_| {
                     self.cfg.logger.trace("(TRAIL) [drop] Mummap successful for mmap");
                 })

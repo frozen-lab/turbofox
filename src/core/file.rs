@@ -287,7 +287,7 @@ impl Drop for TurboFile {
             });
 
             // close the file
-            self.file.close().map_err(|e| {
+            self.close().map_err(|e| {
                 self.cfg
                     .logger
                     .warn(format!("{} [drop] Failed to close the file on drop: {e}", self.target));
