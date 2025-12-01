@@ -32,10 +32,9 @@ impl TurboConfig {
     /// ## Default Configs
     ///
     /// - Initial capacity is `1024`
-    /// - Maximum allowed klen is `128`
     /// - Logging is `disabled`
-    /// - Memory overhead is about `~ 12 KiB`
-    /// - Disk overhead is about `~ 268 KiB`
+    /// - Memory overhead is about `~ 16.5 KiB`
+    /// - Disk overhead is about `~ 144.19 KiB`
     pub fn new<P: AsRef<Path>>(dirpath: P) -> TurboResult<Self> {
         let logger: Arc<Logger> = Arc::new(Logger::default());
         let dirpath: Arc<PathBuf> = Arc::new(dirpath.as_ref().into());

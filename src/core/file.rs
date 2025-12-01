@@ -100,6 +100,11 @@ impl TurboFile {
         Ok(())
     }
 
+    pub(crate) fn del(&self) -> InternalResult<()> {
+        let path = self.cfg.dirpath.join(self.target);
+        Self::_del(&path, &self.cfg, self.target)
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[inline]
     pub(crate) fn fd(&self) -> i32 {
@@ -123,7 +128,7 @@ impl TurboFile {
                     .error(format!("({target}) [new] Failed to create TurboFile: {e}"));
 
                 // NOTE: we must delete file (only if created), so new init could work w/o any issues
-                Self::del(&path).map_err(|e| {
+                Self::_del(&path, &cfg, target).map_err(|e| {
                     cfg.logger
                         .warn(format!("({target}) [new] Failed to delete the TurboFile: {e}"));
                 });
@@ -178,7 +183,7 @@ impl TurboFile {
                 // NOTE: We should only delete the file, if file handle (fd on linux) is released or closed!
                 if self.close_linux().is_ok() && clear_on_fail {
                     let path = self.cfg.dirpath.join(self.target);
-                    Self::del(&path).map_err(|e| {
+                    Self::_del(&path, &self.cfg, self.target).map_err(|e| {
                         self.cfg.logger.warn(format!(
                             "({}) [zero-extend] Failed to delete TurboFile: {e}",
                             self.target
@@ -247,15 +252,23 @@ impl TurboFile {
     }
 
     /// Deletes the [File] from filesystem
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline]
-    unsafe fn del(path: &PathBuf) -> InternalResult<()> {
+    fn _del(path: &PathBuf, cfg: &TurboConfig, target: &'static str) -> InternalResult<()> {
         // quick pass
         if !path.exists() {
             return Ok(());
         }
 
-        std::fs::remove_file(path).map_err(|e| e.into())
+        std::fs::remove_file(path)
+            .inspect(|_| {
+                cfg.logger.trace(format!("({target}) [delete] Deleted the TurboFile"));
+            })
+            .map_err(|e| {
+                cfg.logger
+                    .error(format!("({target}) [delete] Failed to delete TurboFile: {e}"));
+
+                e.into()
+            })
     }
 }
 

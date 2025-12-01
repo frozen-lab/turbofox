@@ -1,6 +1,7 @@
 use crate::{
+    core::TurboFile,
     errors::{InternalError, InternalResult},
-    linux::{file::File, mmap::MMap},
+    linux::mmap::MMap,
     logger::Logger,
     TurboConfig,
 };
@@ -90,7 +91,7 @@ impl BMapPtr {
 
 #[derive(Debug)]
 pub(super) struct Trail {
-    file: File,
+    file: TurboFile,
     mmap: MMap,
     cfg: TurboConfig,
     meta_ptr: *mut Meta,
@@ -105,49 +106,21 @@ impl Trail {
     pub(super) unsafe fn new(cfg: &TurboConfig) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
         let nwords = cfg.init_cap >> 0x06;
-        let init_len = META_SIZE + (nwords << 0x03);
+        let new_file_len = META_SIZE + (nwords << 0x03);
 
         // sanity checks
         debug_assert!(nwords * 0x40 == cfg.init_cap, "Must be u64 aligned");
 
         // create new file
-        let file = File::new(&path)
-            .inspect(|_| cfg.logger.trace("(TRAIL) [new] New file created"))
-            .map_err(|e| {
-                cfg.logger
-                    .error(format!("(TRAIL) [new] Failed to create new file at {:?}: {e}", path));
-
-                // NOTE: we must delete file if created, so new init could work w/o any issues
-                File::del(&path).map_err(|e| {
-                    cfg.logger
-                        .warn(format!("(TRAIL) [new] Failed to delete the newly created file: {e}"));
-                });
-
-                e
-            })?;
+        let file = TurboFile::new(&cfg, PATH)?;
 
         // zero init the file
-        file.zero_extend(init_len)
-            .inspect(|_| cfg.logger.trace("(TRAIL) [new] Zero-Extended the file"))
-            .map_err(|e| {
-                cfg.logger.error(format!(
-                    "(TRAIL) [new] Failed to zero extend new file at ({:?}): {e}",
-                    path
-                ));
+        file.zero_extend(new_file_len, true)?;
 
-                // NOTE: Close + Delete the created file, so new init could work w/o any issues
-                //
-                // HACK: We ignore error from `close_and_del` as we are already in an errored
-                // state, and primary error is more imp then this!
-                Self::close_and_del_file(&cfg, &file);
-
-                e
-            })?;
-
-        let mmap = MMap::new(file.0, init_len)
+        let mmap = MMap::new(file.fd(), new_file_len)
             .inspect(|_| {
                 cfg.logger
-                    .trace(format!("(TRAIL) [new] MMap successful w/ len={init_len}"))
+                    .trace(format!("(TRAIL) [new] MMap successful w/ len={new_file_len}"))
             })
             .map_err(|e| {
                 cfg.logger.error(format!("(TRAIL) [new] MMap Failed: {e}"));
@@ -156,13 +129,17 @@ impl Trail {
                 //
                 // HACK: We ignore error from `close_and_del` as we are already in an errored
                 // state, and primary error is more imp then this!
-                Self::close_and_del_file(&cfg, &file);
+
+                // NOTE: We can only delete the file, if file fd is released or closed, e.g. on windows
+                if file.close().is_ok() {
+                    let _ = file.del();
+                }
 
                 e
             })?;
 
         // sanity check
-        debug_assert_eq!(mmap.len(), init_len, "MMap len must be same as file len");
+        debug_assert_eq!(mmap.len(), new_file_len, "MMap len must be same as file len");
 
         // NOTE: we use `ms_sync` here to make sure metadata is persisted before
         // any other updates are conducted on the mmap,
@@ -208,27 +185,10 @@ impl Trail {
         }
 
         // open existing file (file handle)
-        let file = File::open(&path)
-            .inspect(|_| cfg.logger.trace("(TRAIL) [open] File open successful"))
-            .map_err(|e| {
-                cfg.logger.error(format!("(TRAIL) [open] Failed to open file: {e}"));
-                e
-            })?;
+        let file = TurboFile::open(&cfg, PATH)?;
 
         // existing file len (for mmap)
-        let file_len = file
-            .fstat()
-            .inspect(|s| {
-                cfg.logger.trace(format!(
-                    "(TRAIL) [open] FStat success! Existing file has len={}",
-                    s.st_size
-                ))
-            })
-            .map_err(|e| {
-                cfg.logger.error(format!("(TRAIL) [open] FStat failed: {e}"));
-                e
-            })?
-            .st_size as usize;
+        let file_len = file.len()?;
 
         // NOTE: File must always be os page aligned
         //
@@ -244,12 +204,16 @@ impl Trail {
             //
             // HACK: We ignore error from `close_and_del` as we are already in an errored
             // state, and primary error is more imp then this!
-            Self::close_and_del_file(&cfg, &file);
+
+            // NOTE: We can only delete the file, if file fd is released or closed, e.g. on windows
+            if file.close().is_ok() {
+                let _ = file.del();
+            }
 
             return Err(err);
         }
 
-        let mmap = MMap::new(file.0, file_len)
+        let mmap = MMap::new(file.fd(), file_len)
             .inspect(|_| cfg.logger.trace("(TRAIL) [open] MMap successful"))
             .map_err(|e| {
                 cfg.logger.error(format!("(TRAIL) [open] MMap failed: {e}"));
@@ -305,18 +269,10 @@ impl Trail {
             })?;
 
         // STEP 2: Zero extend the file
-        self.file
-            .zero_extend(new_len)
-            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] Zero extend successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] Failed on zero extend: {e}"));
-                e
-            })?;
+        self.file.zero_extend(new_len, false)?;
 
         // STEP 3: Re-MMap
-        self.mmap = MMap::new(self.file.0, new_len)
+        self.mmap = MMap::new(self.file.fd(), new_len)
             .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] Mmap successful"))
             .map_err(|e| {
                 self.cfg
@@ -720,28 +676,6 @@ impl Trail {
 
         meta.free += n as u64;
     }
-
-    /// Close & Delete [Trail] file
-    #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    unsafe fn close_and_del_file(cfg: &TurboConfig, file: &File) {
-        let path = cfg.dirpath.join(PATH);
-
-        // close the file handle (NOTE: always before the delete)
-        let res = file.close().map_err(|e| {
-            cfg.logger
-                .warn(format!("(TRAIL) [close_and_del] Failed to close the file: {e}"));
-            e
-        });
-
-        // NOTE: We can only delete the file, if file fd is released or closed, e.g. on windows
-        if res.is_ok() {
-            File::del(&path).map_err(|e| {
-                cfg.logger
-                    .warn(format!("(TRAIL) [close_and_del] Failed to delete the file: {e}"));
-            });
-        }
-    }
 }
 
 impl Drop for Trail {
@@ -910,7 +844,7 @@ mod tests {
             unsafe {
                 let meta = *t1.meta_ptr;
 
-                assert!(t1.file.0 >= 0x00, "File fd must be valid");
+                assert!(t1.file.fd() >= 0x00, "File fd must be valid");
                 assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
 
                 assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
@@ -941,7 +875,7 @@ mod tests {
             unsafe {
                 let meta = (*t1.meta_ptr);
 
-                assert!(t1.file.0 >= 0x00, "File fd must be valid");
+                assert!(t1.file.fd() >= 0x00, "File fd must be valid");
                 assert!(t1.mmap.len() > 0x00, "Mmap must be non zero");
 
                 assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
@@ -960,7 +894,7 @@ mod tests {
 
             unsafe {
                 let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
-                t0.file.zero_extend(META_SIZE).expect("Update file len");
+                t0.file.zero_extend(META_SIZE, true).expect("Update file len");
             }
 
             // should panic

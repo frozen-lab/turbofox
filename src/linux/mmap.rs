@@ -146,7 +146,7 @@ mod tests {
         let (_dir, _path, file) = create_file(0x1000);
 
         unsafe {
-            let m = MMap::new(file.0, 0x1000).expect("Mmap");
+            let m = MMap::new(file.fd(), 0x1000).expect("Mmap");
 
             assert!(!m.ptr().is_null());
             assert_eq!(m.len(), 0x1000);
@@ -159,7 +159,7 @@ mod tests {
         let (_dir, _path, file) = create_file(0x1000);
 
         unsafe {
-            let m = MMap::new(file.0, 0x1000).expect("Mmap");
+            let m = MMap::new(file.fd(), 0x1000).expect("Mmap");
             assert!(m.unmap().is_ok());
         }
     }
@@ -171,7 +171,7 @@ mod tests {
         let (_dir, _path, file) = create_file(0x1000);
 
         unsafe {
-            let m = MMap::new(file.0, 0x2000).expect("Mmap should work even if len > filesize");
+            let m = MMap::new(file.fd(), 0x2000).expect("Mmap should work even if len > filesize");
 
             assert!(!m.ptr().is_null());
             assert_eq!(m.len(), 0x2000);
@@ -184,7 +184,7 @@ mod tests {
         let (_dir, _path, file) = create_file(0x1000);
 
         unsafe {
-            assert!(MMap::new(file.0, 0).is_err(), "mmap(len=0) must fail");
+            assert!(MMap::new(file.fd(), 0).is_err(), "mmap(len=0) must fail");
         }
     }
 
@@ -203,7 +203,7 @@ mod tests {
 
         unsafe {
             file.close().expect("Close the file handle");
-            assert!(MMap::new(file.0, 4096).is_err());
+            assert!(MMap::new(file.fd(), 4096).is_err());
         }
     }
 
@@ -213,7 +213,7 @@ mod tests {
         let val: u64 = 0xDEADC0DEDEADC0DE;
 
         unsafe {
-            let mmap = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
 
             mmap.write(0, &val);
             assert_eq!(mmap.read::<u64>(0), val);
@@ -229,7 +229,7 @@ mod tests {
         let val2: u64 = 0xC0DEDEADC0DEDEAD;
 
         unsafe {
-            let mmap = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
 
             // write
             mmap.write(0, &val1);
@@ -250,7 +250,7 @@ mod tests {
         let val: u64 = 0xDEADC0DEDEADC0DE;
 
         unsafe {
-            let mmap = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
 
             let ptr = mmap.read_mut::<u64>(offset);
             assert!(!ptr.is_null());
@@ -266,7 +266,7 @@ mod tests {
         let (_dir, _path, file) = create_file(0x1000);
 
         unsafe {
-            let mmap = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
             assert!(mmap.ms_async().is_ok());
             mmap.unmap().expect("Munmap");
         }
@@ -278,7 +278,7 @@ mod tests {
         let val: u64 = 0xFEEDFACEFEEDFACE;
 
         unsafe {
-            let mmap = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
             mmap.write(64, &val);
             mmap.ms_sync().expect("ms_sync should succeed");
             mmap.unmap().expect("Munmap");
@@ -297,7 +297,7 @@ mod tests {
         let val: u64 = 0xFEEDFACEFEEDFACE;
 
         unsafe {
-            let mmap = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
             mmap.write(64, &val);
             mmap.ms_sync().expect("ms_sync should succeed");
             mmap.unmap().expect("Munmap");
@@ -317,7 +317,7 @@ mod tests {
         let val: u64 = 0xFEEDFACEFEEDFACE;
 
         unsafe {
-            let mmap = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
             let ptr = mmap.ptr();
             let ptr_mut = mmap.ptr_mut();
 
@@ -339,8 +339,8 @@ mod tests {
         let val: u64 = 0xFEEDFACEFEEDFACE;
 
         unsafe {
-            let mmap1 = MMap::new(file.0, 0x1000).expect("Create new mmap");
-            let mmap2 = MMap::new(file.0, 0x1000).expect("Create new mmap");
+            let mmap1 = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
+            let mmap2 = MMap::new(file.fd(), 0x1000).expect("Create new mmap");
 
             mmap1.write(0, &val);
             assert_eq!(mmap2.read::<u64>(0), val);
