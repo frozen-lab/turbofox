@@ -1,6 +1,6 @@
 use crate::{
+    core::{TurboFile, TurboMMap},
     errors::InternalResult,
-    linux::{file::File, mmap::MMap},
     TurboConfig,
 };
 
@@ -87,8 +87,8 @@ const _: () = assert!(std::mem::size_of::<Row>() % (0x04 + 0x0C) == 0x00);
 
 #[derive(Debug)]
 pub(super) struct Mark {
-    file: File,
-    mmap: MMap,
+    file: TurboFile,
+    mmap: TurboMMap,
     cfg: TurboConfig,
     rows_ptr: *mut Row,
     meta_ptr: *mut Meta,

@@ -8,7 +8,7 @@ pub(crate) struct TurboMMap {
     target: &'static str,
 
     #[cfg(target_os = "linux")]
-    mmap: crate::linux::mmap::MMap,
+    mmap: crate::linux::MMap,
 
     #[cfg(not(target_os = "linux"))]
     mmap: (),
@@ -137,8 +137,8 @@ impl TurboMMap {
         len: usize,
         cfg: &TurboConfig,
         target: &'static str,
-    ) -> InternalResult<crate::linux::mmap::MMap> {
-        crate::linux::mmap::MMap::new(file.fd(), len)
+    ) -> InternalResult<crate::linux::MMap> {
+        crate::linux::MMap::new(file.fd(), len)
             .inspect(|m| {
                 cfg.logger
                     .trace(format!("({target}) [mmap] TurboMMap created w/ len={}", m.len()))
@@ -239,7 +239,7 @@ impl Drop for TurboMMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{linux::file::File as LFile, TurboConfig};
+    use crate::{linux::File as LFile, TurboConfig};
     use tempfile::TempDir;
 
     const TARGET: &'static str = "TurboMMap";

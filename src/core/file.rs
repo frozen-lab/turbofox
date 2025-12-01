@@ -7,7 +7,7 @@ pub(crate) struct TurboFile {
     target: &'static str,
 
     #[cfg(target_os = "linux")]
-    file: crate::linux::file::File,
+    file: crate::linux::File,
 
     #[cfg(not(target_os = "linux"))]
     file: (),
@@ -113,12 +113,8 @@ impl TurboFile {
 
     #[cfg(target_os = "linux")]
     #[allow(unsafe_op_in_unsafe_fn)]
-    unsafe fn new_linux(
-        cfg: &TurboConfig,
-        path: &PathBuf,
-        target: &'static str,
-    ) -> InternalResult<crate::linux::file::File> {
-        crate::linux::file::File::new(&path)
+    unsafe fn new_linux(cfg: &TurboConfig, path: &PathBuf, target: &'static str) -> InternalResult<crate::linux::File> {
+        crate::linux::File::new(&path)
             .inspect(|_| {
                 cfg.logger
                     .trace(format!("({target}) [new] TurboFile created at {:?}", path))
@@ -143,8 +139,8 @@ impl TurboFile {
         cfg: &TurboConfig,
         path: &PathBuf,
         target: &'static str,
-    ) -> InternalResult<crate::linux::file::File> {
-        crate::linux::file::File::open(&path)
+    ) -> InternalResult<crate::linux::File> {
+        crate::linux::File::open(&path)
             .inspect(|_| {
                 cfg.logger
                     .trace(format!("({target}) [open] TurboFile opened at {:?}", path))

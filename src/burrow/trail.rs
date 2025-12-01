@@ -1,7 +1,6 @@
 use crate::{
-    core::TurboFile,
+    core::{TurboFile, TurboMMap},
     errors::{InternalError, InternalResult},
-    linux::mmap::MMap,
     logger::Logger,
     TurboConfig,
 };
@@ -92,7 +91,7 @@ impl BMapPtr {
 #[derive(Debug)]
 pub(super) struct Trail {
     file: TurboFile,
-    mmap: MMap,
+    mmap: TurboMMap,
     cfg: TurboConfig,
     meta_ptr: *mut Meta,
     bmap_ptr: *mut BMapPtr,
@@ -117,26 +116,19 @@ impl Trail {
         // zero init the file
         file.zero_extend(new_file_len, true)?;
 
-        let mmap = MMap::new(file.fd(), new_file_len)
-            .inspect(|_| {
-                cfg.logger
-                    .trace(format!("(TRAIL) [new] MMap successful w/ len={new_file_len}"))
-            })
-            .map_err(|e| {
-                cfg.logger.error(format!("(TRAIL) [new] MMap Failed: {e}"));
+        let mmap = TurboMMap::new(&cfg, PATH, &file, new_file_len).map_err(|e| {
+            // NOTE: Close + Delete the created file, so new init could work w/o any issues
+            //
+            // HACK: We ignore error from `close` and `del` as we are already in errored state, and primary
+            // error is more imp then this!
 
-                // NOTE: Close + Delete the created file, so new init could work w/o any issues
-                //
-                // HACK: We ignore error from `close_and_del` as we are already in an errored
-                // state, and primary error is more imp then this!
+            // NOTE: We can only delete the file, if file fd is released or closed, e.g. on windows
+            if file.close().is_ok() {
+                let _ = file.del();
+            }
 
-                // NOTE: We can only delete the file, if file fd is released or closed, e.g. on windows
-                if file.close().is_ok() {
-                    let _ = file.del();
-                }
-
-                e
-            })?;
+            e
+        })?;
 
         // sanity check
         debug_assert_eq!(mmap.len(), new_file_len, "MMap len must be same as file len");
@@ -147,18 +139,12 @@ impl Trail {
         // NOTE: we can afford this syscall here, as init does not come under the fast
         // path. Also it's just one time thing!
         mmap.write(0x00, &Meta::new(nwords as u64));
-        mmap.msync()
-            .inspect(|_| cfg.logger.trace("(TRAIL) [new] MsSync successful on Meta"))
-            .map_err(|e| {
-                cfg.logger
-                    .error(format!("(TRAIL) [new] Failed to write Meta on MMap: {e}"));
-                e
-            })?;
+        mmap.msync()?;
 
         let meta_ptr = mmap.read_mut::<Meta>(0x00);
         let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
 
-        cfg.logger.debug("(TRAIL) [new] New successfully completed");
+        cfg.logger.debug("(Trail) [new] New successfully completed");
 
         Ok(Self {
             file,
@@ -180,7 +166,7 @@ impl Trail {
         // file must exists
         if !path.exists() {
             let err = InternalError::InvalidFile("Path does not exists".into());
-            cfg.logger.error(format!("(TRAIL) [open] Invalid path: {err}"));
+            cfg.logger.error(format!("(Trail) [open] Invalid path: {err}"));
             return Err(err);
         }
 
@@ -198,7 +184,7 @@ impl Trail {
         if bmap_len == 0x00 || bmap_len & 0x07 != 0x00 {
             let err = InternalError::InvalidFile("File is not page aligned".into());
             cfg.logger
-                .error(format!("(TRAIL) [open] Existing file is invalid: {err}"));
+                .error(format!("(Trail) [open] Existing file is invalid: {err}"));
 
             // NOTE: Close + Delete the created file, so new init could work w/o any issues
             //
@@ -213,12 +199,7 @@ impl Trail {
             return Err(err);
         }
 
-        let mmap = MMap::new(file.fd(), file_len)
-            .inspect(|_| cfg.logger.trace("(TRAIL) [open] MMap successful"))
-            .map_err(|e| {
-                cfg.logger.error(format!("(TRAIL) [open] MMap failed: {e}"));
-                e
-            })?;
+        let mmap = TurboMMap::new(&cfg, PATH, &file, file_len)?;
 
         // sanity check
         debug_assert_eq!(mmap.len(), file_len, "MMap len must be same as file len");
@@ -230,10 +211,10 @@ impl Trail {
         //
         // NOTE/TODO: In future, we need to support the old file versions, if any!
         if (*meta_ptr).magic != MAGIC || (*meta_ptr).version != VERSION {
-            cfg.logger.warn("(TRAIL) [open] File has invalid VERSION or MAGIC");
+            cfg.logger.warn("(Trail) [open] File has invalid VERSION or MAGIC");
         }
 
-        cfg.logger.debug("(TRAIL) [open] open is successful");
+        cfg.logger.debug("(Trail) [open] open is successful");
 
         Ok(Self {
             file,
@@ -257,45 +238,19 @@ impl Trail {
         debug_assert!(nwords_to_add > 0, "Words to be added must not be 0");
         debug_assert!(new_len > self.mmap.len(), "New len must be larger then current len");
 
-        // STEP 1: Unmap
-        self.mmap
-            .munmap()
-            .inspect(|_| self.cfg.logger.trace("(TRAIL) [extend_remap] Munmap successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] Munmap failed: {e}"));
-                e
-            })?;
-
-        // STEP 2: Zero extend the file
+        // STEP 1: Zero extend the file
         self.file.zero_extend(new_len, false)?;
 
-        // STEP 3: Re-MMap
-        self.mmap = MMap::new(self.file.fd(), new_len)
-            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] Mmap successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] MMap Failed: {e}"));
-                e
-            })?;
+        // STEP 2: Re-MMap
+        self.mmap = TurboMMap::new(&&self.cfg, PATH, &self.file, new_len)?;
         self.meta_ptr = self.mmap.read_mut::<Meta>(0);
         self.bmap_ptr = self.mmap.read_mut::<BMapPtr>(META_SIZE);
 
-        // STEP 4: Update & Sync Meta
+        // STEP 3: Update & Sync Meta
         (*self.meta_ptr).nwords = new_nwords;
         (*self.meta_ptr).free += slots_to_add;
         (*self.meta_ptr).cw_idx = curr_nwords; // we start at the first new idx
-        self.mmap
-            .msync()
-            .inspect(|_| self.cfg.logger.trace("(TRIAL) [extend_remap] MsSync Successful"))
-            .map_err(|e| {
-                self.cfg
-                    .logger
-                    .error(format!("(TRAIL) [extend_remap] Failed to write Metadata: {e}"));
-                e
-            })?;
+        self.mmap.msync()?;
 
         Ok(())
     }
@@ -684,44 +639,16 @@ impl Drop for Trail {
             let mut is_err = false;
 
             // flush dirty pages
-            self.mmap
-                .msync()
-                .inspect(|_| {
-                    self.cfg.logger.trace("(TRAIL) [drop] Fsync successful for mmap");
-                })
-                .map_err(|e| {
-                    is_err = true;
-                    self.cfg
-                        .logger
-                        .warn(format!("(TRAIL) [drop] Failed to fsync on mmap: {e}"));
-                });
+            is_err = self.mmap.msync().is_err();
 
             // munmap the memory mappings
-            self.mmap
-                .munmap()
-                .inspect(|_| {
-                    self.cfg.logger.trace("(TRAIL) [drop] Mummap successful for mmap");
-                })
-                .map_err(|e| {
-                    is_err = true;
-                    self.cfg.logger.warn(format!("(TRAIL) [drop] Failed to munmap: {e}"));
-                });
+            is_err = self.mmap.munmap().is_err();
 
             // close the file descriptor
-            self.file
-                .close()
-                .inspect(|_| {
-                    self.cfg.logger.trace("(TRAIL) [drop] Closed the file fd");
-                })
-                .map_err(|e| {
-                    is_err = true;
-                    self.cfg
-                        .logger
-                        .warn(format!("(TRAIL) [drop] Failed to close the file fd: {e}"));
-                });
+            is_err = self.file.close().is_err();
 
             if !is_err {
-                self.cfg.logger.debug("(TRAIL) [drop] Dropped Successfully!");
+                self.cfg.logger.info("(Trail) [drop] Dropped Successfully!");
             }
         }
     }

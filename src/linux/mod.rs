@@ -1,5 +1,11 @@
 #[cfg(target_os = "linux")]
-pub(crate) mod mmap;
+mod mmap;
 
 #[cfg(target_os = "linux")]
-pub(crate) mod file;
+mod file;
+
+#[cfg(target_os = "linux")]
+pub(crate) use mmap::MMap;
+
+#[cfg(target_os = "linux")]
+pub(crate) use file::File;
