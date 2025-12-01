@@ -43,6 +43,7 @@ impl File {
     }
 
     /// Read the [File] fd
+    #[inline]
     pub(crate) fn fd(&self) -> i32 {
         self.0
     }
@@ -177,16 +178,16 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn create_file() -> (TempDir, PathBuf) {
+    fn tmp_file() -> (TempDir, PathBuf) {
         let dir = TempDir::new().expect("TempDir");
-        let path = dir.path().join("file");
+        let path = dir.path().join("linux_file");
 
         (dir, path)
     }
 
     #[test]
     fn test_create_new_file() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let f = File::new(&path).expect("new() should succeed");
@@ -203,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_open_works_after_new() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let f1 = File::new(&path).expect("Create new file");
@@ -236,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_open_failes_without_new() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             assert!(File::open(&path).is_err());
@@ -245,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_close_works() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
@@ -255,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_close_after_close_fails() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
@@ -266,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_fstat_works() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
@@ -279,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_fstat_fails_on_closed_file() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
@@ -291,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_fsync_works() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
         let data: &'static str = "Dummy Data";
 
         unsafe {
@@ -309,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_fsync_fails_after_close() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
@@ -320,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_fsync_fails_on_closed_file() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
@@ -332,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_zero_extend_grows() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
@@ -357,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_len_works() {
-        let (_dir, path) = create_file();
+        let (_dir, path) = tmp_file();
 
         unsafe {
             let file = File::new(&path).expect("Create new file");
