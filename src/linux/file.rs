@@ -22,7 +22,6 @@ impl File {
         );
 
         if fd < 0 {
-            eprintln!("ERROR FD: {fd}");
             return Err(Self::_last_os_error());
         }
 

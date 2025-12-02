@@ -633,27 +633,6 @@ impl Trail {
     }
 }
 
-impl Drop for Trail {
-    fn drop(&mut self) {
-        unsafe {
-            let mut is_err = false;
-
-            // flush dirty pages
-            is_err = self.mmap.msync().is_err();
-
-            // munmap the memory mappings
-            is_err = self.mmap.munmap().is_err();
-
-            // close the file descriptor
-            is_err = self.file.close().is_err();
-
-            if !is_err {
-                self.cfg.logger.info("(Trail) [drop] Dropped Successfully!");
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,8 +740,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         #[test]
-        fn test_new_is_valid() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+        fn test_new_works() {
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_new_works");
 
             let nwords = cfg.init_cap >> 0x06;
             let init_len = META_SIZE + (nwords << 0x03);
@@ -785,8 +764,8 @@ mod tests {
         }
 
         #[test]
-        fn test_open_is_valid() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+        fn test_open_works() {
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_open_works");
 
             unsafe {
                 let t0 = Trail::new(&cfg).expect("new trail");
@@ -817,7 +796,7 @@ mod tests {
 
         #[test]
         fn test_open_panics_on_invalid_metadata_in_file() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_open_panics");
 
             unsafe {
                 let t0 = unsafe { Trail::new(&cfg) }.expect("new trail");
@@ -830,7 +809,7 @@ mod tests {
 
         #[test]
         fn test_new_fails_when_dir_is_not_writable() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("traol_new_fails");
             let dir = _tmp.path().to_path_buf();
 
             // NOTE: w/ chmod 000 we simulate unwriteable directory
@@ -847,7 +826,7 @@ mod tests {
 
         #[test]
         fn test_open_fails_when_dir_is_not_readable() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_open_fails");
             let dir = _tmp.path().to_path_buf();
             let path = dir.join("trail");
 
@@ -867,7 +846,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_grows_file_and_updates_meta() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("ext_rmp_grows");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -889,7 +868,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_twice_accumulates_meta_correctly() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("ext_rmp_twice_works");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -916,7 +895,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_zero_inits_correctly() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("ext_rmp_zero_init");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -948,7 +927,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_refreshes_pointers() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("ext_rmp_ptr_refresh");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -966,7 +945,7 @@ mod tests {
 
         #[test]
         fn test_extend_remap_preserves_free_invariant() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("ext_rmp_preserves");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -989,7 +968,7 @@ mod tests {
 
         #[test]
         fn test_lookup_maps_correctly_to_lookup_one() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_maps_lookup_one");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1007,7 +986,7 @@ mod tests {
 
         #[test]
         fn test_lookup_maps_correctly_to_lookup_n() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_maps_lookup_n");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1025,7 +1004,7 @@ mod tests {
 
         #[test]
         fn test_lookup_wraparound() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_wraparound");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1044,7 +1023,7 @@ mod tests {
 
         #[test]
         fn test_lookup_returns_none_when_full() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_none_full");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1063,7 +1042,7 @@ mod tests {
 
         #[test]
         fn test_lookup_finds_exact_freed_region() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_find_free");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1096,7 +1075,7 @@ mod tests {
 
         #[test]
         fn test_lookup_preserves_meta_free_invariant() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_preserves_meta");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1117,7 +1096,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_lookup_zero_panics_in_debug() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_zero_panic");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1127,7 +1106,7 @@ mod tests {
 
         #[test]
         fn test_lookup_and_extend_remap_cycle_works_correctly() {
-            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_w/_ext_rmp");
             cfg = cfg.init_cap(0x80).expect("Update INIT_CAP");
 
             unsafe {
@@ -1159,7 +1138,7 @@ mod tests {
 
         #[test]
         fn test_lookup_after_extend_remap_returns_correct_next_index() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_after_ext_rmp");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new Trail");
@@ -1300,7 +1279,7 @@ mod tests {
 
         #[test]
         fn test_free_maps_correctly_to_free_one() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_maps_free_one");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1324,7 +1303,7 @@ mod tests {
 
         #[test]
         fn test_free_maps_correctly_to_free_n() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_maps_free_n");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1350,7 +1329,7 @@ mod tests {
 
         #[test]
         fn test_free_correctly_wraps_around_word_boundary() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_wraps");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1376,7 +1355,7 @@ mod tests {
 
         #[test]
         fn test_free_exactly_ends_on_word_boundary() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_exact_end");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1401,7 +1380,7 @@ mod tests {
 
         #[test]
         fn test_free_validates_correctly() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_validates");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1425,7 +1404,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_free_oob_panics() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_panic_oob");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1438,7 +1417,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_free_zero_panics() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_zero_panic");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1448,7 +1427,7 @@ mod tests {
 
         #[test]
         fn test_free_on_empty_bmap_does_nothing() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_on_empty");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1465,7 +1444,7 @@ mod tests {
 
         #[test]
         fn test_free_on_full_bitmap_and_reallocate_all() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_on_full_bm");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Trail");
@@ -1562,7 +1541,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_one_sequential_filling() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_1_seq_fill");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1580,7 +1559,7 @@ mod tests {
 
         #[test]
         fn test_lookup_one_wraps_around_correctly() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_1_wraps");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1608,7 +1587,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_one_preserves_meta_free_invariant() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_1_preserves_meta");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1628,7 +1607,7 @@ mod tests {
 
         #[test]
         fn test_lookup_one_bit_consistency() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_1_bit_consitancy");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1649,7 +1628,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_one_returns_none_when_full() {
-            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_1_none_full");
             cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
@@ -1669,7 +1648,7 @@ mod tests {
 
         #[test]
         fn test_lookup_one_finds_single_freed_slot() {
-            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_1_finds_single_free");
             cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
@@ -1760,7 +1739,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_n_correctly_works() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_works");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -1779,7 +1758,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_returns_contineous_blocks() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_contienous_blocks");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -1801,7 +1780,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_wraps_correctly() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_wraps");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -1825,7 +1804,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_bit_consistency() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_bit_consistency");
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
                 let total = (*trail.meta_ptr).nwords as usize * 0x40;
@@ -1872,7 +1851,7 @@ mod tests {
         #[cfg(debug_assertions)]
         #[should_panic]
         fn test_lookup_n_zero_panics() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_zero_panics");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("Create new trail");
@@ -1883,7 +1862,7 @@ mod tests {
         #[test]
         #[cfg(not(debug_assertions))]
         fn test_lookup_n_returns_none_when_full() {
-            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_none_full");
             cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
@@ -1901,7 +1880,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_finds_freed_block() {
-            let (mut cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_finds_free");
             cfg = cfg.init_cap(0x100).expect("Update INIT_CAP");
 
             unsafe {
@@ -1932,7 +1911,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_spans_word_boundary_start_near_end() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_spans_words");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -1963,7 +1942,7 @@ mod tests {
 
         #[test]
         fn test_lookup_n_exactly_ends_on_word_boundary() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_lookup_n_exact_word_boundry");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2072,7 +2051,7 @@ mod tests {
 
         #[test]
         fn test_free_n_works_correctly() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_n_works");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2105,7 +2084,7 @@ mod tests {
 
         #[test]
         fn test_free_n_correctly_wraps_on_word_boundary() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_n_wraps");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2136,7 +2115,7 @@ mod tests {
 
         #[test]
         fn test_free_n_correctly_ends_on_boundary() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_n_word_boundry");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2169,7 +2148,7 @@ mod tests {
 
         #[test]
         fn test_free_n_followed_by_lookup_n_returns_exact_block() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_n_fld_lookup_n");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");
@@ -2192,8 +2171,8 @@ mod tests {
         #[test]
         #[cfg(debug_assertions)]
         #[should_panic]
-        fn test_free_n_panics_on_out_of_bounds_input() {
-            let (cfg, _tmp) = TurboConfig::test_cfg("Trail");
+        fn test_free_n_panics_on_oob_input() {
+            let (cfg, _tmp) = TurboConfig::test_cfg("trail_free_n_panics_oob");
 
             unsafe {
                 let mut trail = Trail::new(&cfg).expect("trail");

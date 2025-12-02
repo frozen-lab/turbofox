@@ -24,7 +24,7 @@ impl TurboFile {
         unimplemented!();
 
         cfg.logger
-            .info(format!("({target}) [new] Created new TurboFile at {:?}", path));
+            .debug(format!("({target}) [new] Created new TurboFile at {:?}", path));
 
         Ok(Self {
             target,
@@ -43,7 +43,7 @@ impl TurboFile {
         unimplemented!();
 
         cfg.logger
-            .info(format!("({target}) [open] Opened TurboFile at {:?}", path));
+            .debug(format!("({target}) [open] Opened TurboFile at {:?}", path));
 
         Ok(Self {
             target,
@@ -61,7 +61,7 @@ impl TurboFile {
 
         self.cfg
             .logger
-            .info(format!("({}) [zero-extend] New file len={len}", self.target));
+            .debug(format!("({}) [zero-extend] TurboFile now has len={len}", self.target));
 
         Ok(())
     }
@@ -85,7 +85,7 @@ impl TurboFile {
 
         self.cfg
             .logger
-            .info(format!("({}) [sync] Sync successful on TurboFile", self.target));
+            .debug(format!("({}) [sync] Sync on TurboFile", self.target));
 
         Ok(())
     }
@@ -97,15 +97,24 @@ impl TurboFile {
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
 
+        self.cfg
+            .logger
+            .debug(format!("({}) [close] TurboFile closed", self.target));
+
         Ok(())
     }
 
     pub(crate) fn del(&self) -> InternalResult<()> {
         let path = self.cfg.dirpath.join(self.target);
-        Self::_del(&path, &self.cfg, self.target)
+        Self::_del(&path, &self.cfg, self.target)?;
+
+        self.cfg
+            .logger
+            .debug(format!("({}) [del] Deleted TurboFile", self.target));
+
+        Ok(())
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[inline]
     pub(crate) fn fd(&self) -> i32 {
         self.file.fd()
@@ -124,11 +133,7 @@ impl TurboFile {
                     .error(format!("({target}) [new] Failed to create TurboFile: {e}"));
 
                 // NOTE: we must delete file (only if created), so new init could work w/o any issues
-                Self::_del(&path, &cfg, target).map_err(|e| {
-                    cfg.logger
-                        .warn(format!("({target}) [new] Failed to delete the TurboFile: {e}"));
-                });
-
+                let _ = Self::_del(&path, &cfg, target);
                 e
             })
     }
@@ -179,12 +184,7 @@ impl TurboFile {
                 // NOTE: We should only delete the file, if file handle (fd on linux) is released or closed!
                 if self.close_linux().is_ok() && clear_on_fail {
                     let path = self.cfg.dirpath.join(self.target);
-                    Self::_del(&path, &self.cfg, self.target).map_err(|e| {
-                        self.cfg.logger.warn(format!(
-                            "({}) [zero-extend] Failed to delete TurboFile: {e}",
-                            self.target
-                        ));
-                    });
+                    let _ = Self::_del(&path, &self.cfg, self.target);
                 }
 
                 e
@@ -219,12 +219,12 @@ impl TurboFile {
             .inspect(|_| {
                 self.cfg
                     .logger
-                    .trace(format!("({}) [sync] sync successful", self.target))
+                    .trace(format!("({}) [sync] Sync'ed TurboFile", self.target))
             })
             .map_err(|e| {
                 self.cfg
                     .logger
-                    .error(format!("({}) [sync] sync failed: {e}", self.target));
+                    .error(format!("({}) [sync] Sync failed for TurboFile: {e}", self.target));
                 e
             })
     }
@@ -270,30 +270,24 @@ impl TurboFile {
 
 impl Drop for TurboFile {
     fn drop(&mut self) {
-        let mut is_err = false;
-
         unsafe {
-            // sync the file (save and exit)
-            self.sync().map_err(|e| {
-                self.cfg
-                    .logger
-                    .warn(format!("{} [drop] Failed to sync the file on drop: {e}", self.target));
+            let mut is_err = false;
 
-                is_err = true;
-            });
+            // sync the file (save and exit)
+            is_err = self.sync().is_err();
 
             // close the file
-            self.close().map_err(|e| {
+            is_err = self.close().is_err();
+
+            if is_err {
                 self.cfg
                     .logger
-                    .warn(format!("{} [drop] Failed to close the file on drop: {e}", self.target));
-
-                is_err = true;
-            });
-        }
-
-        if !is_err {
-            self.cfg.logger.trace(format!("{} [drop] Drop successful", self.target));
+                    .warn(format!("{} [drop] Failed to drop TurboFile", self.target));
+            } else {
+                self.cfg
+                    .logger
+                    .trace(format!("{} [drop] Dropped TurboFile", self.target));
+            }
         }
     }
 }
@@ -310,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_new_works() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("new_works");
         let file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
 
         assert!(file.len().is_ok(), "New file must have valid permissions");
@@ -322,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_new_has_zero_len() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("new_has_zero_len");
         let file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
         let len = file.len().expect("Read length");
 
@@ -331,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_open_works_after_new() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("open_works");
 
         let file1 = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
         assert!(file1.len().is_ok(), "New file must have valid permissions");
@@ -342,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_zero_extend_works() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("zero_extend_works");
         let file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
 
         // extend
@@ -355,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_zero_extend_clears_file_on_error() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("zero_extend_clears_on_err");
         let path = _dir.path().join("TurboFile");
         let file = TurboFile::new(&cfg, "TurboFile").expect("New file");
 
@@ -371,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_len_works_across_new_and_reopen() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("len_works_across_new_open");
         let file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
 
         // extend
@@ -391,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_sync_works() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("sync_works");
         let file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
         let data: &'static str = "Dummy Data";
         let path = _dir.path().join("TurboFile").to_path_buf();
@@ -405,18 +399,21 @@ mod tests {
 
     #[test]
     fn test_close_works() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
-        let file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
-
+        let (cfg, _dir) = TurboConfig::test_cfg("close_works");
+        let mut file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
         assert!(file.close().is_ok());
+
+        // NOTE: Expect drop to fail
     }
 
     #[test]
     fn test_close_after_close_fails() {
-        let (cfg, _dir) = TurboConfig::test_cfg("TurboFile");
+        let (cfg, _dir) = TurboConfig::test_cfg("close_fails");
         let file = TurboFile::new(&cfg, "TurboFile").expect("New turbofile");
 
         assert!(file.close().is_ok());
         assert!(file.close().is_err());
+
+        // NOTE: Expect drop to fail
     }
 }
