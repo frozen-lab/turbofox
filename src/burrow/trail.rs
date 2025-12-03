@@ -51,20 +51,19 @@ const _: () = assert!(Meta::new(0x02).free == (0x02 * 0x40), "Must be correctly 
 // BMap
 //
 
-#[repr(C, align(0x08))]
+#[repr(C, align(0x20))]
 #[derive(Debug)]
 struct BMapPtr(u64);
 
 impl BMapPtr {
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    unsafe fn lookup_one(&mut self, wi: usize, meta: &mut Meta) -> Option<usize> {
+    fn lookup_one(&mut self, wi: usize, meta: &mut Meta) -> Option<usize> {
         if self.0 == u64::MAX {
             return None;
         }
 
         let inv = !self.0;
-        let off = core::arch::x86_64::_tzcnt_u64(inv) as usize;
+        let off = unsafe { core::arch::x86_64::_tzcnt_u64(inv) as usize };
 
         self.0 = self.0 | (1u64 << off);
         meta.free -= 0x01;
@@ -73,9 +72,8 @@ impl BMapPtr {
         Some((wi << 0x06) + off)
     }
 
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    unsafe fn free_one(&mut self, idx: usize, meta: &mut Meta) {
+    fn free_one(&mut self, idx: usize, meta: &mut Meta) {
         // sanity check
         debug_assert!(self.0 & (0x01 << (idx & 0x3F)) != 0x00, "Double free detected");
 
@@ -101,19 +99,16 @@ impl Trail {
     /// Creates a new [Trail] file
     ///
     /// *NOTE* Returns an [IO] error if something goes wrong
-    #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn new(cfg: &TurboConfig) -> InternalResult<Self> {
+    pub(super) fn new(cfg: &TurboConfig) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
-        let nwords = cfg.init_cap >> 0x06;
+        let nwords = cfg.init_cap >> 0x06; // 1 byte = 8 slots
         let new_file_len = META_SIZE + (nwords << 0x03);
 
         // sanity checks
         debug_assert!(nwords * 0x40 == cfg.init_cap, "Must be u64 aligned");
 
-        // create new file
+        // new file
         let file = TurboFile::new(&cfg, PATH)?;
-
-        // zero init the file
         file.zero_extend(new_file_len, true)?;
 
         let mmap = TurboMMap::new(&cfg, PATH, &file, new_file_len).map_err(|e| {
@@ -133,18 +128,19 @@ impl Trail {
         // sanity check
         debug_assert_eq!(mmap.len(), new_file_len, "MMap len must be same as file len");
 
+        let meta = Meta::new(nwords as u64);
+        mmap.write(0x00, &meta);
+
         // NOTE: we use `ms_sync` here to make sure metadata is persisted before
         // any other updates are conducted on the mmap,
         //
-        // NOTE: we can afford this syscall here, as init does not come under the fast
-        // path. Also it's just one time thing!
-        mmap.write(0x00, &Meta::new(nwords as u64));
+        // HACK: we can afford this syscall here, as init does not come under the fast path
         mmap.msync()?;
 
         let meta_ptr = mmap.read_mut::<Meta>(0x00);
         let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
 
-        cfg.logger.debug("(Trail) [new] New successfully completed");
+        cfg.logger.debug("(Trail) [new] Created new Trail");
 
         Ok(Self {
             file,
@@ -159,8 +155,7 @@ impl Trail {
     ///
     /// *NOTE*: Returns an [InvalidFile] error when the underlying file is corrupted,
     /// may happen when the file is invalid or tampered with
-    #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn open(cfg: &TurboConfig) -> InternalResult<Self> {
+    pub(super) fn open(cfg: &TurboConfig) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
 
         // file must exists
@@ -172,46 +167,31 @@ impl Trail {
 
         // open existing file (file handle)
         let file = TurboFile::open(&cfg, PATH)?;
-
-        // existing file len (for mmap)
         let file_len = file.len()?;
 
-        // NOTE: File must always be os page aligned
-        //
-        // WARN: As this is a fatel scenerio, we delete the existing file, hence clean up the whole db,
-        // as we can not simply make any sense of the data!
+        // NOTE: File must always be BMap aligned
         let bmap_len = file_len.wrapping_sub(META_SIZE);
         if bmap_len == 0x00 || bmap_len & 0x07 != 0x00 {
-            let err = InternalError::InvalidFile("File is not page aligned".into());
+            let err = InternalError::InvalidFile("Trail is not BitMap aligned".into());
             cfg.logger
                 .error(format!("(Trail) [open] Existing file is invalid: {err}"));
-
-            // NOTE: Close + Delete the created file, so new init could work w/o any issues
-            //
-            // HACK: We ignore error from `close_and_del` as we are already in an errored
-            // state, and primary error is more imp then this!
-
-            // NOTE: We can only delete the file, if file fd is released or closed, e.g. on windows
-            if file.close().is_ok() {
-                let _ = file.del();
-            }
-
             return Err(err);
         }
 
         let mmap = TurboMMap::new(&cfg, PATH, &file, file_len)?;
+        let meta_ptr = mmap.read_mut::<Meta>(0x00);
+        let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
 
         // sanity check
         debug_assert_eq!(mmap.len(), file_len, "MMap len must be same as file len");
 
-        let meta_ptr = mmap.read_mut::<Meta>(0x00);
-        let bmap_ptr = mmap.read_mut::<BMapPtr>(META_SIZE);
-
         // metadata validations
         //
         // NOTE/TODO: In future, we need to support the old file versions, if any!
-        if (*meta_ptr).magic != MAGIC || (*meta_ptr).version != VERSION {
-            cfg.logger.warn("(Trail) [open] File has invalid VERSION or MAGIC");
+        unsafe {
+            if (*meta_ptr).magic != MAGIC || (*meta_ptr).version != VERSION {
+                cfg.logger.warn("(Trail) [open] File has invalid VERSION or MAGIC");
+            }
         }
 
         cfg.logger.debug("(Trail) [open] open is successful");
@@ -226,9 +206,8 @@ impl Trail {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
-    #[inline(always)]
-    pub(super) unsafe fn extend_remap(&mut self) -> InternalResult<()> {
-        let curr_nwords = (*self.meta_ptr).nwords;
+    pub(super) fn extend_remap(&mut self) -> InternalResult<()> {
+        let curr_nwords = unsafe { (*self.meta_ptr).nwords };
         let slots_to_add = self.cfg.init_cap as u64;
         let nwords_to_add = slots_to_add >> 0x06;
         let new_len = self.mmap.len() + (nwords_to_add << 0x03) as usize;
@@ -247,9 +226,11 @@ impl Trail {
         self.bmap_ptr = self.mmap.read_mut::<BMapPtr>(META_SIZE);
 
         // STEP 3: Update & Sync Meta
-        (*self.meta_ptr).nwords = new_nwords;
-        (*self.meta_ptr).free += slots_to_add;
-        (*self.meta_ptr).cw_idx = curr_nwords; // we start at the first new idx
+        unsafe {
+            (*self.meta_ptr).nwords = new_nwords;
+            (*self.meta_ptr).free += slots_to_add;
+            (*self.meta_ptr).cw_idx = curr_nwords; // we start at the first new idx
+        }
         self.mmap.msync()?;
 
         Ok(())
@@ -262,10 +243,9 @@ impl Trail {
     ///
     /// ## TODO's
     ///  - Impl of SIMD
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    pub(super) unsafe fn lookup(&mut self, n: usize) -> Option<usize> {
-        let meta = &mut *self.meta_ptr;
+    pub(super) fn lookup(&mut self, n: usize) -> Option<usize> {
+        let meta = unsafe { &mut *self.meta_ptr };
 
         // sanity checks
         debug_assert!(n != 0x00, "N must not be zero");
@@ -295,10 +275,9 @@ impl Trail {
     ///
     /// ## TODO's
     ///  - Impl of SIMD
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    pub(super) unsafe fn free(&mut self, idx: usize, n: usize) {
-        let meta = &mut *self.meta_ptr;
+    pub(super) fn free(&mut self, idx: usize, n: usize) {
+        let meta = unsafe { &mut *self.meta_ptr };
 
         // sanity checks
         debug_assert!(n != 0x00, "N must not be zero");
@@ -307,7 +286,7 @@ impl Trail {
         // just one slot to get
         if n == 0x01 {
             let w_idx = idx >> 0x06;
-            let word = &mut *self.bmap_ptr.add(w_idx);
+            let word = unsafe { &mut *self.bmap_ptr.add(w_idx) };
             word.free_one(idx, meta);
             return;
         }
@@ -322,10 +301,9 @@ impl Trail {
     ///
     /// ## TODO's
     ///  - Impl of SIMD
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    unsafe fn lookup_one(&mut self) -> Option<usize> {
-        let meta = &mut *self.meta_ptr;
+    fn lookup_one(&mut self) -> Option<usize> {
+        let meta = unsafe { &mut *self.meta_ptr };
 
         // sanity checks
         debug_assert!(meta.free != 0x00, "No free slots found");
@@ -342,7 +320,7 @@ impl Trail {
         while remaining >= 0x04 {
             // NOTE: We prefetch next batch to avoid cache miss
             #[cfg(target_arch = "x86_64")]
-            {
+            unsafe {
                 let pf = {
                     let p = w_idx + 0x04;
                     if p >= nwords {
@@ -382,22 +360,22 @@ impl Trail {
                 }
             };
 
-            let w0 = &mut *self.bmap_ptr.add(w_idx);
+            let w0 = unsafe { &mut *self.bmap_ptr.add(w_idx) };
             if let Some(idx) = w0.lookup_one(w_idx, meta) {
                 return Some(idx);
             }
 
-            let w1 = &mut *self.bmap_ptr.add(i1);
+            let w1 = unsafe { &mut *self.bmap_ptr.add(i1) };
             if let Some(idx) = w1.lookup_one(i1, meta) {
                 return Some(idx);
             }
 
-            let w2 = &mut *self.bmap_ptr.add(i2);
+            let w2 = unsafe { &mut *self.bmap_ptr.add(i2) };
             if let Some(idx) = w2.lookup_one(i2, meta) {
                 return Some(idx);
             }
 
-            let w3 = &mut *self.bmap_ptr.add(i3);
+            let w3 = unsafe { &mut *self.bmap_ptr.add(i3) };
             if let Some(idx) = w3.lookup_one(i3, meta) {
                 return Some(idx);
             }
@@ -409,19 +387,19 @@ impl Trail {
             if w_idx >= nwords {
                 w_idx = 0x00;
             }
-        }
 
-        while remaining > 0x00 {
-            let word = &mut *self.bmap_ptr.add(w_idx);
-            if let Some(idx) = word.lookup_one(w_idx, meta) {
-                return Some(idx);
-            }
+            while remaining > 0x00 {
+                let word = unsafe { &mut *self.bmap_ptr.add(w_idx) };
+                if let Some(idx) = word.lookup_one(w_idx, meta) {
+                    return Some(idx);
+                }
 
-            w_idx += 0x01;
-            if w_idx >= nwords {
-                w_idx = 0x00;
+                w_idx += 0x01;
+                if w_idx >= nwords {
+                    w_idx = 0x00;
+                }
+                remaining -= 0x01;
             }
-            remaining -= 0x01;
         }
 
         None
@@ -434,10 +412,9 @@ impl Trail {
     ///
     /// ## TODO's
     ///  - Impl of SIMD
-    #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    unsafe fn lookup_n(&mut self, n: usize) -> Option<usize> {
-        let meta = &mut *self.meta_ptr;
+    fn lookup_n(&mut self, n: usize) -> Option<usize> {
+        let meta = unsafe { &mut *self.meta_ptr };
 
         // sanity checks
         debug_assert!(n > 0x00, "N must not be zero");
@@ -459,7 +436,7 @@ impl Trail {
         while scanned < nwords {
             // NOTE: We prefetch next batch to avoid cache miss
             #[cfg(target_arch = "x86_64")]
-            {
+            unsafe {
                 let pf = {
                     let p = w_idx + 0x04;
                     if p >= nwords {
@@ -472,98 +449,100 @@ impl Trail {
                 core::arch::x86_64::_mm_prefetch(pf_ptr, core::arch::x86_64::_MM_HINT_T0);
             }
 
-            let w_ptr = self.bmap_ptr.add(w_idx);
-            let mut word = !(*w_ptr).0;
+            unsafe {
+                let w_ptr = self.bmap_ptr.add(w_idx);
+                let mut word = !(*w_ptr).0;
 
-            // current word is full, reset and continue to next
-            if word == 0x00 {
-                run_len = 0x00;
-                scanned += 0x01;
+                // current word is full, reset and continue to next
+                if word == 0x00 {
+                    run_len = 0x00;
+                    scanned += 0x01;
 
-                w_idx += 0x01;
-                w_idx -= (w_idx == nwords) as usize * nwords;
+                    w_idx += 0x01;
+                    w_idx -= (w_idx == nwords) as usize * nwords;
 
-                continue;
-            }
+                    continue;
+                }
 
-            // NOTE: If prev run existed, but this word does not have a free slot at 0th idx,
-            // the current run can't continue!
-            if run_len > 0x00 && (word & 0x01) == 0x00 {
-                run_len = 0x00;
-            }
+                // NOTE: If prev run existed, but this word does not have a free slot at 0th idx,
+                // the current run can't continue!
+                if run_len > 0x00 && (word & 0x01) == 0x00 {
+                    run_len = 0x00;
+                }
 
-            let base_bit = w_idx << 0x06;
-            while word != 0x00 {
-                let pos = core::arch::x86_64::_tzcnt_u64(word) as usize;
-                let suffix = word >> pos;
-                let chunk = suffix.trailing_ones() as usize;
+                let base_bit = w_idx << 0x06;
+                while word != 0x00 {
+                    let pos = core::arch::x86_64::_tzcnt_u64(word) as usize;
+                    let suffix = word >> pos;
+                    let chunk = suffix.trailing_ones() as usize;
 
-                if run_len == 0x00 {
-                    run_start = base_bit + pos;
-                    run_len = chunk;
-                } else {
-                    let expected = run_start + run_len;
-                    let this_start = base_bit + pos;
-
-                    // is not contiguous!
-                    if this_start != expected {
-                        run_start = this_start;
+                    if run_len == 0x00 {
+                        run_start = base_bit + pos;
                         run_len = chunk;
                     } else {
-                        run_len += chunk;
-                    }
-                }
+                        let expected = run_start + run_len;
+                        let this_start = base_bit + pos;
 
-                if run_len >= n {
-                    let mut remaining = n;
-                    let mut bitpos = run_start;
-
-                    let first_wi = bitpos >> 0x06;
-                    let first_off = bitpos & 0x3F;
-                    let end_bit = run_start + n;
-                    let last_wi = (end_bit - 0x01) >> 0x06;
-                    let last_off = (end_bit - 0x01) & 0x3F;
-
-                    // entirely within one word
-                    if first_wi == last_wi {
-                        let take = n;
-                        let mask = ((!0x00u64) >> (0x40 - take)) << first_off;
-                        (*self.bmap_ptr.add(first_wi)).0 |= mask;
-                    } else {
-                        if first_off != 0x00 {
-                            let head_mask = (!0x00) << first_off;
-                            (*self.bmap_ptr.add(first_wi)).0 |= head_mask;
+                        // is not contiguous!
+                        if this_start != expected {
+                            run_start = this_start;
+                            run_len = chunk;
                         } else {
-                            (*self.bmap_ptr.add(first_wi)).0 = !0x00;
+                            run_len += chunk;
                         }
-
-                        if last_wi > first_wi + 0x01 {
-                            let mut wi = first_wi + 0x01;
-                            while wi < last_wi {
-                                (*self.bmap_ptr.add(wi)).0 = !0x00;
-                                wi += 0x01;
-                            }
-                        }
-
-                        let tail_mask = (!0x00) >> (0x3F - (last_off as u64));
-                        (*self.bmap_ptr.add(last_wi)).0 |= tail_mask;
                     }
 
-                    meta.free -= n as u64;
-                    meta.cw_idx = (run_start / 0x40) as u64;
-                    return Some(run_start);
+                    if run_len >= n {
+                        let mut remaining = n;
+                        let mut bitpos = run_start;
+
+                        let first_wi = bitpos >> 0x06;
+                        let first_off = bitpos & 0x3F;
+                        let end_bit = run_start + n;
+                        let last_wi = (end_bit - 0x01) >> 0x06;
+                        let last_off = (end_bit - 0x01) & 0x3F;
+
+                        // entirely within one word
+                        if first_wi == last_wi {
+                            let take = n;
+                            let mask = ((!0x00u64) >> (0x40 - take)) << first_off;
+                            (*self.bmap_ptr.add(first_wi)).0 |= mask;
+                        } else {
+                            if first_off != 0x00 {
+                                let head_mask = (!0x00) << first_off;
+                                (*self.bmap_ptr.add(first_wi)).0 |= head_mask;
+                            } else {
+                                (*self.bmap_ptr.add(first_wi)).0 = !0x00;
+                            }
+
+                            if last_wi > first_wi + 0x01 {
+                                let mut wi = first_wi + 0x01;
+                                while wi < last_wi {
+                                    (*self.bmap_ptr.add(wi)).0 = !0x00;
+                                    wi += 0x01;
+                                }
+                            }
+
+                            let tail_mask = (!0x00) >> (0x3F - (last_off as u64));
+                            (*self.bmap_ptr.add(last_wi)).0 |= tail_mask;
+                        }
+
+                        meta.free -= n as u64;
+                        meta.cw_idx = (run_start / 0x40) as u64;
+                        return Some(run_start);
+                    }
+
+                    let shift = pos + chunk;
+                    if shift >= 0x40 {
+                        break;
+                    }
+                    word >>= shift;
                 }
 
-                let shift = pos + chunk;
-                if shift >= 0x40 {
-                    break;
-                }
-                word >>= shift;
+                scanned += 0x01;
+                w_idx += 0x01;
+                w_idx -= (w_idx == nwords) as usize * nwords;
             }
-
-            scanned += 0x01;
-            w_idx += 0x01;
-            w_idx -= (w_idx == nwords) as usize * nwords;
         }
 
         None
@@ -578,8 +557,8 @@ impl Trail {
     ///  - Impl of SIMD
     #[allow(unsafe_op_in_unsafe_fn)]
     #[inline(always)]
-    unsafe fn free_n(&mut self, idx: usize, n: usize) {
-        let meta = &mut *self.meta_ptr;
+    fn free_n(&mut self, idx: usize, n: usize) {
+        let meta = unsafe { &mut *self.meta_ptr };
         let nwords = meta.nwords as usize;
 
         let first_wi = idx >> 0x06;
@@ -600,34 +579,36 @@ impl Trail {
             "Index calculation is out of range"
         );
 
-        // single word to operate on
-        if first_wi == last_wi {
-            let mask = ((!0x00) >> (0x40 - n)) << first_off;
-            (*self.bmap_ptr.add(first_wi)).0 &= !mask;
-            meta.free += n as u64;
-            return;
-        }
-
-        // At Head
-        if first_off != 0x00 {
-            let head_mask = (!0x00) << first_off;
-            (*self.bmap_ptr.add(first_wi)).0 &= !head_mask;
-        } else {
-            (*self.bmap_ptr.add(first_wi)).0 = 0x00;
-        }
-
-        // Middle words (if any)
-        if last_wi > first_wi + 0x01 {
-            let mut wi = first_wi + 0x01;
-            while wi < last_wi {
-                (*self.bmap_ptr.add(wi)).0 = 0x00;
-                wi += 0x01;
+        unsafe {
+            // single word to operate on
+            if first_wi == last_wi {
+                let mask = ((!0x00) >> (0x40 - n)) << first_off;
+                (*self.bmap_ptr.add(first_wi)).0 &= !mask;
+                meta.free += n as u64;
+                return;
             }
-        }
 
-        // At Tail
-        let tail_mask = (!0x00) >> (0x3F - (last_off as u64));
-        (*self.bmap_ptr.add(last_wi)).0 &= !tail_mask;
+            // At Head
+            if first_off != 0x00 {
+                let head_mask = (!0x00) << first_off;
+                (*self.bmap_ptr.add(first_wi)).0 &= !head_mask;
+            } else {
+                (*self.bmap_ptr.add(first_wi)).0 = 0x00;
+            }
+
+            // Middle words (if any)
+            if last_wi > first_wi + 0x01 {
+                let mut wi = first_wi + 0x01;
+                while wi < last_wi {
+                    (*self.bmap_ptr.add(wi)).0 = 0x00;
+                    wi += 0x01;
+                }
+            }
+
+            // At Tail
+            let tail_mask = (!0x00) >> (0x3F - (last_off as u64));
+            (*self.bmap_ptr.add(last_wi)).0 &= !tail_mask;
+        }
 
         meta.free += n as u64;
     }
@@ -636,7 +617,6 @@ impl Trail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     mod bmap {
         use super::*;
@@ -744,7 +724,6 @@ mod tests {
             let (cfg, _tmp) = TurboConfig::test_cfg("trail_new_works");
 
             let nwords = cfg.init_cap >> 0x06;
-            let init_len = META_SIZE + (nwords << 0x03);
             let t1 = unsafe { Trail::new(&cfg) }.expect("new trail");
 
             unsafe {

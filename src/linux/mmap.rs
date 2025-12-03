@@ -54,13 +54,7 @@ impl MMap {
     #[allow(unsafe_op_in_unsafe_fn)]
     pub(crate) unsafe fn write<T: Copy>(&self, off: usize, val: &T) {
         #[cfg(debug_assertions)]
-        {
-            let size = std::mem::size_of::<T>();
-            let align = std::mem::align_of::<T>();
-
-            debug_assert!(off + size <= self.len, "Offset must not exceed mmap size");
-            debug_assert_eq!(off % align, 0, "Detected unaligned access for type");
-        }
+        debug_assert_eq!(off % std::mem::align_of::<T>(), 0, "Detected unaligned access for type");
 
         let dst = (self.ptr as *mut u8).add(off) as *mut T;
         std::ptr::write(dst, *val);
@@ -69,13 +63,7 @@ impl MMap {
     #[allow(unsafe_op_in_unsafe_fn)]
     pub(crate) unsafe fn read<T>(&self, off: usize) -> T {
         #[cfg(debug_assertions)]
-        {
-            let size = std::mem::size_of::<T>();
-            let align = std::mem::align_of::<T>();
-
-            debug_assert!(off + size <= self.len, "Offset must not exceed mmap size");
-            debug_assert_eq!(off % align, 0, "Detected unaligned access for type");
-        }
+        debug_assert_eq!(off % std::mem::align_of::<T>(), 0, "Detected unaligned access for type");
 
         let src = (self.ptr as *const u8).add(off) as *const T;
         std::ptr::read(src)
@@ -84,13 +72,7 @@ impl MMap {
     #[allow(unsafe_op_in_unsafe_fn)]
     pub(crate) unsafe fn read_mut<T>(&self, off: usize) -> *mut T {
         #[cfg(debug_assertions)]
-        {
-            let size = std::mem::size_of::<T>();
-            let align = std::mem::align_of::<T>();
-
-            debug_assert!(off + size <= self.len, "Offset must not exceed mmap size");
-            debug_assert_eq!(off % align, 0, "Detected unaligned access for type");
-        }
+        debug_assert_eq!(off % std::mem::align_of::<T>(), 0, "Detected unaligned access for type");
 
         (self.ptr as *mut u8).add(off) as *mut T
     }
