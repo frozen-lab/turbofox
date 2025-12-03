@@ -58,7 +58,7 @@ const _: () = assert!(META_SIZE == 0x20, "META must be of 32 bytes!");
 
 const ITEMS_PER_ROW: usize = 0x10;
 
-#[repr(C)]
+#[repr(C, align(0x04))]
 struct Offsets {
     trail_idx: u32,
     vbuf_slots: u16,

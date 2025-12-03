@@ -51,7 +51,7 @@ const _: () = assert!(Meta::new(0x02).free == (0x02 * 0x40), "Must be correctly 
 // BMap
 //
 
-#[repr(C, align(0x20))]
+#[repr(C, align(0x08))]
 #[derive(Debug)]
 struct BMapPtr(u64);
 
