@@ -1,6 +1,7 @@
 use crate::{
     core::{TurboFile, TurboMMap},
     errors::{InternalError, InternalResult},
+    hasher::{Sign, EMPTY_SIGN, TOMBSTONE_SIGN},
     TurboConfig,
 };
 
@@ -49,17 +50,40 @@ impl Meta {
 
 const META_SIZE: usize = std::mem::size_of::<Meta>();
 
+#[derive(Debug)]
+struct MetaPtr(*mut Meta);
+
+impl MetaPtr {
+    #[inline]
+    const fn new(meta: *mut Meta) -> Self {
+        Self(meta)
+    }
+
+    #[inline]
+    const fn meta(&self) -> Meta {
+        unsafe { (*self.0) }
+    }
+
+    #[inline]
+    const fn meta_mut(&self) -> &mut Meta {
+        unsafe { &mut *self.0 }
+    }
+}
+
 // sanity checks
 const _: () = assert!(META_SIZE == 0x20, "META must be of 32 bytes!");
 
 //
-// Rows
+// Offsets
 //
 
-const ITEMS_PER_ROW: usize = 0x10;
+const BASE_KV_FLAG: u8 = 0x01;
+const LIST_FLAG: u8 = 0x02;
+
+const OFFSET_PADDING: u8 = 0x00;
 
 #[repr(C, align(0x04))]
-struct Offsets {
+pub(super) struct Offsets {
     trail_idx: u32,
     vbuf_slots: u16,
     klen: u16,
@@ -68,6 +92,25 @@ struct Offsets {
     _padd: u8,
 }
 
+impl Offsets {
+    pub(super) fn new(klen: u16, vlen: u16, vbuf_slots: u16, trail_idx: u32) -> Self {
+        Self {
+            klen,
+            vlen,
+            trail_idx,
+            vbuf_slots,
+            flag: BASE_KV_FLAG,
+            _padd: OFFSET_PADDING,
+        }
+    }
+}
+
+//
+// Rows
+//
+
+const ITEMS_PER_ROW: usize = 0x10;
+
 #[repr(C, align(0x20))]
 struct Row {
     signs: [u32; ITEMS_PER_ROW],
@@ -75,6 +118,36 @@ struct Row {
 }
 
 const ROW_SIZE: usize = std::mem::size_of::<Row>();
+
+#[derive(Debug)]
+struct RowPtr(*mut Row);
+
+impl RowPtr {
+    #[inline]
+    const fn new(rows_ptr: *mut Row, idx: usize) -> Self {
+        unsafe { Self(rows_ptr.add(idx)) }
+    }
+
+    #[inline]
+    fn sign(&self, idx: usize) -> Sign {
+        unsafe { *(*self.0).signs.get_unchecked(idx) }
+    }
+
+    #[inline]
+    fn sign_mut(&self, slot_idx: usize) -> &mut Sign {
+        unsafe { (*self.0).signs.get_unchecked_mut(slot_idx) }
+    }
+
+    #[inline]
+    fn offset(&self, idx: usize) -> &Offsets {
+        unsafe { &*(*self.0).offsets.get_unchecked(idx) }
+    }
+
+    #[inline]
+    fn offset_mut(&self, slot_idx: usize) -> &mut Offsets {
+        unsafe { (*self.0).offsets.get_unchecked_mut(slot_idx) }
+    }
+}
 
 // Sanity checks
 const _: () = assert!(ROW_SIZE == 0x100, "Row must be of 256 bytes");
@@ -90,15 +163,15 @@ pub(super) struct Mark {
     file: TurboFile,
     mmap: TurboMMap,
     cfg: TurboConfig,
-    rows_ptr: *mut Row,
-    meta_ptr: *mut Meta,
+    rows_ptr: RowPtr,
+    meta_ptr: MetaPtr,
 }
 
 impl Mark {
     /// Creates a new [Mark] file
     ///
     /// *NOTE* Returns an [IO] error if something goes wrong
-    pub(crate) fn new(cfg: &TurboConfig) -> InternalResult<Self> {
+    pub(super) fn new(cfg: &TurboConfig) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
         let n_items = cfg.init_cap as u64;
         let n_rows = n_items >> 0x04; // 16 items = 1 row
@@ -149,8 +222,8 @@ impl Mark {
             file,
             mmap,
             cfg: cfg.clone(),
-            meta_ptr,
-            rows_ptr,
+            rows_ptr: RowPtr::new(rows_ptr, 0x00),
+            meta_ptr: MetaPtr::new(meta_ptr),
         })
     }
 
@@ -202,12 +275,71 @@ impl Mark {
         Ok(Self {
             file,
             mmap,
-            meta_ptr,
-            rows_ptr,
             cfg: cfg.clone(),
+            meta_ptr: MetaPtr::new(meta_ptr),
+            rows_ptr: RowPtr::new(rows_ptr, 0x00),
         })
     }
+
+    /// Insert or update a new entry in [Mark]
+    pub(super) fn set(&mut self, sign: Sign, ofs: Offsets, upsert: bool) -> InternalResult<Option<()>> {
+        let meta = self.meta_ptr.meta_mut();
+
+        // NOTE: This only works if `num_items` is power of 2!
+        // This always satisfies as `num_items` is aligned with `init_cap`
+        let mut idx = (sign as u64) & (meta.num_items - 0x01);
+
+        // sanity check
+        debug_assert_eq!(
+            meta.num_items, self.cfg.init_cap as u64,
+            "NUM_ITEMS must be aligned with INIT_CAP"
+        );
+
+        // TODO: Grow and rehash [Row]'s
+        if meta.free == 0x00 {
+            return Err(InternalError::Misc("Mark is full".into()));
+        }
+
+        // open-address lookup
+        for _ in 0x00..meta.num_items {
+            let row_idx = (idx >> 0x04) as usize; // /16
+            let slot_idx = (idx & 0x0F) as usize; // %16
+
+            let row_ptr = RowPtr::new(self.rows_ptr.0, row_idx);
+            let sign_ptr = row_ptr.sign_mut(slot_idx);
+            let ofs_ptr = row_ptr.offset_mut(slot_idx);
+
+            // update existing entry
+            if *sign_ptr == sign {
+                if upsert {
+                    *ofs_ptr = ofs;
+                    return Ok(Some(()));
+                }
+
+                return Ok(None);
+            }
+
+            // insert new entry
+            if *sign_ptr == EMPTY_SIGN || *sign_ptr == TOMBSTONE_SIGN {
+                *sign_ptr = sign;
+                *ofs_ptr = ofs;
+                meta.free -= 0x01;
+                return Ok(Some(()));
+            }
+
+            idx = (idx + 0x01) & (meta.num_items - 0x01);
+        }
+
+        // NOTE: This is an unreachable scenerio
+
+        let err = InternalError::Misc("Mark is full and unable to grow".into());
+        self.cfg
+            .logger
+            .error(format!("(Mark) [set] Failed to grow mark: {err}"));
+        Err(err)
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,54 +354,45 @@ mod tests {
 
             let n_rows = cfg.init_cap >> 0x04;
             let m1 = unsafe { Mark::new(&cfg) }.expect("new mark");
+            let meta = m1.meta_ptr.meta();
 
-            unsafe {
-                let meta = *m1.meta_ptr;
+            assert!(m1.file.fd() >= 0x00, "File fd must be valid");
+            assert!(m1.mmap.len() > 0x00, "Mmap must be non zero");
 
-                assert!(m1.file.fd() >= 0x00, "File fd must be valid");
-                assert!(m1.mmap.len() > 0x00, "Mmap must be non zero");
+            assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
+            assert_eq!(meta.version, VERSION, "Correct file VERSION");
+            assert_eq!(meta.num_rows, n_rows as u64);
+            assert_eq!(meta.num_items, cfg.init_cap as u64);
 
-                assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
-                assert_eq!(meta.version, VERSION, "Correct file VERSION");
-                assert_eq!(meta.num_rows, n_rows as u64);
-                assert_eq!(meta.num_items, cfg.init_cap as u64);
-
-                assert!(!m1.meta_ptr.is_null());
-                assert!(!m1.rows_ptr.is_null());
-            }
+            assert!(!m1.meta_ptr.0.is_null());
+            assert!(!m1.rows_ptr.0.is_null());
         }
 
         #[test]
         fn test_open_works() {
             let (cfg, _tmp) = TurboConfig::test_cfg("mark_open_works");
+            let m0 = Mark::new(&cfg).expect("new mark");
 
-            unsafe {
-                let m0 = Mark::new(&cfg).expect("new mark");
+            (m0.meta_ptr.meta_mut()).num_rows = 0x01;
+            (m0.meta_ptr.meta_mut()).num_items = 0x10;
+            (m0.meta_ptr.meta_mut()).free = 0x0A;
 
-                (*m0.meta_ptr).num_rows = 0x01;
-                (*m0.meta_ptr).num_items = 0x10;
-                (*m0.meta_ptr).free = 0x0A;
-
-                drop(m0);
-            }
+            drop(m0);
 
             let m1 = unsafe { Mark::open(&cfg) }.expect("open existing");
+            let meta = m1.meta_ptr.meta();
 
-            unsafe {
-                let meta = (*m1.meta_ptr);
+            assert!(m1.file.fd() >= 0x00, "File fd must be valid");
+            assert!(m1.mmap.len() > 0x00, "Mmap must be non zero");
 
-                assert!(m1.file.fd() >= 0x00, "File fd must be valid");
-                assert!(m1.mmap.len() > 0x00, "Mmap must be non zero");
+            assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
+            assert_eq!(meta.version, VERSION, "Correct file VERSION");
+            assert_eq!(meta.num_items, 0x10);
+            assert_eq!(meta.num_rows, 0x01);
+            assert_eq!(meta.free, 0x0A);
 
-                assert_eq!(meta.magic, MAGIC, "Correct file MAGIC");
-                assert_eq!(meta.version, VERSION, "Correct file VERSION");
-                assert_eq!(meta.num_items, 0x10);
-                assert_eq!(meta.num_rows, 0x01);
-                assert_eq!(meta.free, 0x0A);
-
-                assert!(!m1.meta_ptr.is_null());
-                assert!(!m1.rows_ptr.is_null());
-            }
+            assert!(!m1.meta_ptr.0.is_null());
+            assert!(!m1.rows_ptr.0.is_null());
         }
 
         #[test]

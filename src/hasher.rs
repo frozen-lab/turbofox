@@ -1,10 +1,13 @@
-/// Used as a tombstone state for a signature for deleated entries in [Bucket]
+/// Used as a tombstone state for a signature for deleated entries in [Mark]
 pub(crate) const TOMBSTONE_SIGN: u32 = 1u32;
 
-/// Used as a default state for a signature for entry in [Bucket]
+/// Used as a default state for a signature for entry in [Mark]
 pub(crate) const EMPTY_SIGN: u32 = 0u32;
 
-// WARN: [Patra] is zeroed on init, i.e. the sign space contains `0u32` values
+/// Represents hashed value
+pub(crate) type Sign = u32;
+
+// WARN: [Mark] is zeroed on init, i.e. the sign space contains `0u32` values
 // by default, which is treated as empty slot! So the value of [EMPTY_SIGN] must
 // always be `0u32`, otherwise the lookup process will fail!
 const _: () = assert!(EMPTY_SIGN == 0u32);
@@ -18,14 +21,14 @@ const REPLACEMENT: u32 = 0x6052_c9b7;
 pub(crate) struct TurboHash;
 
 impl TurboHash {
-    pub fn new(buf: &[u8]) -> u32 {
+    pub fn new(buf: &[u8]) -> Sign {
         let mut h = XxHash32::oneshot(buf);
         Self::from_hash(&mut h)
     }
 
     /// Replaces any reserved signature values with a magic constant [REPLACEMENT]
     #[inline(always)]
-    fn from_hash(hash: &mut u32) -> u32 {
+    fn from_hash(hash: &mut Sign) -> Sign {
         let is_tomb = (*hash == TOMBSTONE_SIGN) as u32;
         let is_empty = (*hash == EMPTY_SIGN) as u32;
 
@@ -314,9 +317,8 @@ mod tests {
 
     #[cfg(test)]
     mod turbo_hash {
-        use rand::{Rng, SeedableRng};
-
         use super::*;
+        use rand::{Rng, SeedableRng};
 
         #[test]
         fn sanity_check() {
