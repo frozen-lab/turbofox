@@ -83,6 +83,7 @@ const LIST_FLAG: u8 = 0x02;
 const OFFSET_PADDING: u8 = 0x00;
 
 #[repr(C, align(0x04))]
+#[derive(Debug, Clone)]
 pub(super) struct Offsets {
     trail_idx: u32,
     vbuf_slots: u16,
@@ -301,33 +302,45 @@ impl Mark {
         }
 
         // open-address lookup
-        for _ in 0x00..meta.num_items {
-            let row_idx = (idx >> 0x04) as usize; // /16
-            let slot_idx = (idx & 0x0F) as usize; // %16
 
+        let mut rows_left = meta.num_rows;
+        let mut row_idx = (idx >> 0x04) as usize; // /16
+        let mut slot_idx = (idx & 0x0F) as usize; // %16
+
+        while rows_left > 0x00 {
             let row_ptr = RowPtr::new(self.rows_ptr.0, row_idx);
-            let sign_ptr = row_ptr.sign_mut(slot_idx);
-            let ofs_ptr = row_ptr.offset_mut(slot_idx);
 
-            // update existing entry
-            if *sign_ptr == sign {
-                if upsert {
-                    *ofs_ptr = ofs;
-                    return Ok(Some(()));
+            for i in slot_idx..ITEMS_PER_ROW {
+                let sign_ptr = row_ptr.sign_mut(i);
+                let ofs_ptr = row_ptr.offset_mut(i);
+
+                // update existing entry
+                if *sign_ptr == sign {
+                    if upsert {
+                        *ofs_ptr = ofs;
+                        return Ok(Some(()));
+                    }
+
+                    return Ok(None);
                 }
 
-                return Ok(None);
+                // insert new entry
+                if *sign_ptr == EMPTY_SIGN || *sign_ptr == TOMBSTONE_SIGN {
+                    *sign_ptr = sign;
+                    *ofs_ptr = ofs;
+                    meta.free -= 0x01;
+                    return Ok(Some(()));
+                }
             }
 
-            // insert new entry
-            if *sign_ptr == EMPTY_SIGN || *sign_ptr == TOMBSTONE_SIGN {
-                *sign_ptr = sign;
-                *ofs_ptr = ofs;
-                meta.free -= 0x01;
-                return Ok(Some(()));
-            }
+            rows_left -= 0x01;
+            slot_idx = 0x00;
+            row_idx += 0x01;
 
-            idx = (idx + 0x01) & (meta.num_items - 0x01);
+            // idx wrap
+            if row_idx >= meta.get_num_rows() {
+                row_idx = 0x00;
+            }
         }
 
         // NOTE: This is an unreachable scenerio
@@ -337,6 +350,111 @@ impl Mark {
             .logger
             .error(format!("(Mark) [set] Failed to grow mark: {err}"));
         Err(err)
+    }
+
+    /// Fetch [Offsets] for an existing entry from [Mark]
+    pub(super) fn get(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
+        let meta = self.meta_ptr.meta();
+
+        // NOTE: This only works if `num_items` is power of 2!
+        // This always satisfies as `num_items` is aligned with `init_cap`
+        let mut idx = (sign as u64) & (meta.num_items - 0x01);
+
+        // sanity check
+        debug_assert_eq!(
+            meta.num_items, self.cfg.init_cap as u64,
+            "NUM_ITEMS must be aligned with INIT_CAP"
+        );
+
+        // open-address lookup
+
+        let mut rows_left = meta.num_rows;
+        let mut row_idx = (idx >> 0x04) as usize; // /16
+        let mut slot_idx = (idx & 0x0F) as usize; // %16
+
+        while rows_left > 0x00 {
+            let row_ptr = RowPtr::new(self.rows_ptr.0, row_idx);
+
+            for i in slot_idx..ITEMS_PER_ROW {
+                let sign_ptr = row_ptr.sign(i);
+                let ofs_ptr = row_ptr.offset(i);
+
+                // found existing entry
+                if sign_ptr == sign {
+                    return Ok(Some(ofs_ptr.clone()));
+                }
+
+                // entry not found
+                if sign_ptr == EMPTY_SIGN {
+                    return Ok(None);
+                }
+            }
+
+            rows_left -= 0x01;
+            slot_idx = 0x00;
+            row_idx += 0x01;
+
+            // idx wrap
+            if row_idx >= meta.get_num_rows() {
+                row_idx = 0x00;
+            }
+        }
+
+        Ok(None)
+    }
+    /// Delete [Sign] & [Offsets] for an existing entry from [Mark]
+    pub(super) fn del(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
+        let meta = self.meta_ptr.meta_mut();
+
+        // NOTE: This only works if `num_items` is power of 2!
+        // This always satisfies as `num_items` is aligned with `init_cap`
+        let mut idx = (sign as u64) & (meta.num_items - 0x01);
+
+        // sanity check
+        debug_assert_eq!(
+            meta.num_items, self.cfg.init_cap as u64,
+            "NUM_ITEMS must be aligned with INIT_CAP"
+        );
+
+        // open-address lookup
+
+        let mut rows_left = meta.num_rows;
+        let mut row_idx = (idx >> 0x04) as usize; // /16
+        let mut slot_idx = (idx & 0x0F) as usize; // %16
+
+        while rows_left > 0x00 {
+            let row_ptr = RowPtr::new(self.rows_ptr.0, row_idx);
+
+            for i in slot_idx..ITEMS_PER_ROW {
+                let sign_ptr = row_ptr.sign_mut(i);
+                let ofs_ptr = row_ptr.offset_mut(i);
+
+                // del existing entry
+                //
+                // NOTE: We just set the [Sign] to a tombstone! We don't need to update the offset
+                // as it'll automatically will get overwritten when new [Sign] is inserted
+                if *sign_ptr == sign {
+                    *sign_ptr = TOMBSTONE_SIGN;
+                    return Ok(Some(ofs_ptr.clone()));
+                }
+
+                // no entry found
+                if *sign_ptr == EMPTY_SIGN {
+                    return Ok(None);
+                }
+            }
+
+            rows_left -= 0x01;
+            slot_idx = 0x00;
+            row_idx += 0x01;
+
+            // idx wrap
+            if row_idx >= meta.get_num_rows() {
+                row_idx = 0x00;
+            }
+        }
+
+        Ok(None)
     }
 }
 
