@@ -688,4 +688,129 @@ mod tests {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("Re-Set Permission");
         }
     }
+
+    mod mark_ops {
+        use super::*;
+        use crate::hasher::TurboHash;
+
+        #[inline]
+        fn mk_sign(i: u8) -> Sign {
+            TurboHash::new(&[i])
+        }
+
+        #[inline]
+        fn mk_ofs(i: u32) -> Offsets {
+            Offsets::new(0x04, 0x08, 0x01, i)
+        }
+
+        #[test]
+        fn test_set_get_del_flow() {
+            let (cfg, _tmp) = TurboConfig::test_cfg("mark_set_get_del");
+            let mut mark = Mark::new(&cfg).expect("new mark");
+
+            // validate set ops
+            for i in 0x00..0x20 {
+                let sign = mk_sign(i);
+                let ofs = mk_ofs(i as u32);
+
+                let r = mark.set(sign, ofs.clone(), false);
+                assert!(r.is_ok(), "set should succeed");
+                assert!(r.expect("set ops").is_some(), "set = inserted");
+            }
+
+            // validate get ops
+            for i in 0x00..0x20 {
+                let sign = mk_sign(i);
+                let ofs = mk_ofs(i as u32);
+                let got = mark.get(sign).expect("get ok");
+
+                assert!(got.is_some(), "must exist");
+                assert_eq!(got.expect("is some").trail_idx, ofs.trail_idx);
+            }
+
+            // validate del ops (half)
+            for i in 0x00..0x10 {
+                let sign = mk_sign(i);
+                let del = mark.del(sign).expect("del ok");
+                assert!(del.is_some(), "delete must return old value");
+                assert_eq!(del.expect("del ok").trail_idx, i as u32);
+            }
+
+            // validate del ops are None (on half)
+            for i in 0x00..0x10 {
+                let sign = mk_sign(i);
+                let got = mark.get(sign).expect("get ok");
+                assert!(got.is_none(), "deleted entry should not exist");
+            }
+
+            // validate non-deleted works correctly
+            for i in 0x10..0x20 {
+                let sign = mk_sign(i);
+                let got = mark.get(sign).expect("get ok");
+                assert!(got.is_some(), "existing entry lost after deletes");
+                assert_eq!(got.expect("is some").trail_idx, i as u32);
+            }
+        }
+
+        #[test]
+        fn test_set_update_with_upsert() {
+            let (cfg, _tmp) = TurboConfig::test_cfg("mark_set_update");
+            let mut mark = Mark::new(&cfg).expect("new mark");
+
+            let sign = mk_sign(0x01);
+            let ofs0 = mk_ofs(0x0A);
+            let ofs1 = mk_ofs(0x63);
+
+            // insert
+            let r1 = mark.set(sign, ofs0.clone(), false);
+            assert!(r1.expect("set ok").is_some());
+
+            // update (upsert = true)
+            let r2 = mark.set(sign, ofs1.clone(), true);
+            assert!(r2.expect("set ok").is_some());
+
+            // verify updated
+            let got = mark.get(sign).expect("get ok").unwrap();
+            assert_eq!(got.trail_idx, ofs1.trail_idx);
+        }
+
+        #[test]
+        fn test_set_fails_when_full() {
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_full");
+            cfg = cfg.init_cap(0x80).expect("init cap"); // small cap
+
+            let mut mark = Mark::new(&cfg).expect("new mark");
+
+            // Fill until free <= free_trsh
+            loop {
+                let sign = mk_sign(rand::random());
+                let ofs = mk_ofs(1);
+
+                match mark.set(sign, ofs.clone(), false) {
+                    Ok(Some(())) => continue,
+                    Ok(None) => continue,
+                    Err(InternalError::MarkIsFull) => break,
+                    Err(e) => panic!("Unexpected error: {:?}", e),
+                }
+            }
+
+            // Now set must always fail
+            let sign = mk_sign(0x41);
+            let ofs = mk_ofs(0x3A);
+
+            let r = mark.set(sign, ofs, false);
+            assert!(r.is_err(), "set must fail in full state");
+            assert!(matches!(r.unwrap_err(), InternalError::MarkIsFull));
+        }
+
+        #[test]
+        fn test_del_on_nonexistent_returns_none() {
+            let (cfg, _tmp) = TurboConfig::test_cfg("mark_del_nonexistent");
+            let mut mark = Mark::new(&cfg).expect("new mark");
+
+            let sign = mk_sign(0x41);
+            let r = mark.del(sign).expect("del ok");
+            assert!(r.is_none(), "deleting non-existing must return None");
+        }
+    }
 }
