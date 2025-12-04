@@ -373,6 +373,7 @@ impl Mark {
     }
 
     /// Insert or update a new entry in [Mark]
+    #[inline(always)]
     pub(super) fn set(&mut self, sign: Sign, ofs: Offsets, upsert: bool) -> InternalResult<Option<()>> {
         let meta = self.meta_ptr.meta_mut();
         let mut idx = (sign as u64) & (meta.num_items - 0x01); // NOTE: only works when `num_items` is power of 2
@@ -384,7 +385,7 @@ impl Mark {
         );
 
         // not enough space left
-        if meta.free as u64 <= self.free_trsh {
+        if self.free_trsh > meta.free as u64 {
             return Err(InternalError::MarkIsFull);
         }
 
@@ -447,6 +448,7 @@ impl Mark {
     }
 
     /// Fetch [Offsets] for an existing entry from [Mark]
+    #[inline(always)]
     pub(super) fn get(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
         let meta = self.meta_ptr.meta();
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
@@ -489,6 +491,7 @@ impl Mark {
     }
 
     /// Delete [Sign] & [Offsets] for an existing entry from [Mark]
+    #[inline(always)]
     pub(super) fn del(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
         let meta = self.meta_ptr.meta_mut();
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
@@ -1001,6 +1004,71 @@ mod tests {
             let got = mark.get(sign_new).unwrap();
             assert!(got.is_some(), "new entry must exist");
             assert_eq!(got.expect("is ok").trail_idx, ofs_new.trail_idx);
+        }
+    }
+
+    mod bench {
+        use super::*;
+        use std::time::Instant;
+
+        #[ignore]
+        #[test]
+        fn bench_mark_set() {
+            const INIT_CAP: usize = 0x80_000; // 524288 entries
+            const ROUNDS: usize = 0x14;
+
+            let threshold = Mark::calc_threshold(INIT_CAP as u64);
+            let entries_per_iter = INIT_CAP - (threshold as usize);
+
+            // STEP1: warmup (set + del)
+            let niters = 0x10 * ITEMS_PER_ROW;
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_replacement_flow");
+            cfg = cfg.init_cap(INIT_CAP).expect("init cap");
+            let mut mark = Mark::new(&cfg).expect("new mark");
+            for i in 0x00..niters {
+                let kbuf = i.to_le_bytes();
+                let sign = TurboHash::new(&kbuf);
+                let ofs = mk_ofs(i as u32);
+                mark.set(sign, ofs, false).expect("set is ok");
+            }
+
+            // STEP2: benches
+
+            let mut results = Vec::with_capacity(ROUNDS);
+            for _ in 0x00..ROUNDS {
+                let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_replacement_flow");
+                cfg = cfg.init_cap(INIT_CAP).expect("init cap");
+                let mut mark = Mark::new(&cfg).expect("new mark");
+                let mut signs = Vec::with_capacity(entries_per_iter);
+                let mut ofs = Vec::with_capacity(entries_per_iter);
+
+                // gen inputs
+                for i in 0..entries_per_iter {
+                    signs.push(TurboHash::new(&i.to_le_bytes()));
+                    ofs.push(mk_ofs(i as u32));
+                }
+
+                // bench
+
+                let start = Instant::now();
+                for i in 0..entries_per_iter {
+                    std::hint::black_box(mark.set(signs[i], ofs[i].clone(), false).expect("set is okay"));
+                }
+                let elapsed = start.elapsed();
+
+                results.push(elapsed.as_nanos() as f64 / entries_per_iter as f64);
+            }
+
+            // STEP3: Compute results
+
+            let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
+            cfg.logger.info(format!("SET: {:.3} ns/op", avg));
+
+            #[cfg(not(debug_assertions))]
+            {
+                let threshold = 0x40 as f64;
+                assert!(avg <= threshold, "set ops are too slow: {avg} ns/op");
+            }
         }
     }
 }
