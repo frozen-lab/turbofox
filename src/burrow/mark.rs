@@ -375,14 +375,11 @@ impl Mark {
     /// Insert or update a new entry in [Mark]
     pub(super) fn set(&mut self, sign: Sign, ofs: Offsets, upsert: bool) -> InternalResult<Option<()>> {
         let meta = self.meta_ptr.meta_mut();
-
-        // NOTE: This only works if `num_items` is power of 2!
-        // This always satisfies as `num_items` is aligned with `init_cap`
-        let mut idx = (sign as u64) & (meta.num_items - 0x01);
+        let mut idx = (sign as u64) & (meta.num_items - 0x01); // NOTE: only works when `num_items` is power of 2
 
         // sanity check
-        debug_assert_eq!(
-            meta.num_items, self.cfg.init_cap as u64,
+        debug_assert!(
+            meta.num_items % self.cfg.init_cap as u64 == 0x00,
             "NUM_ITEMS must be aligned with INIT_CAP"
         );
 
@@ -415,10 +412,17 @@ impl Mark {
                 }
 
                 // insert new entry
-                if *sign_ptr == EMPTY_SIGN || *sign_ptr == TOMBSTONE_SIGN {
+                if *sign_ptr == EMPTY_SIGN {
                     *sign_ptr = sign;
                     *ofs_ptr = ofs;
                     meta.free -= 0x01;
+                    return Ok(Some(()));
+                }
+
+                // reuse deleted slot
+                if *sign_ptr == TOMBSTONE_SIGN {
+                    *sign_ptr = sign;
+                    *ofs_ptr = ofs;
                     return Ok(Some(()));
                 }
             }
@@ -590,6 +594,17 @@ impl Iterator for MarkIter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hasher::TurboHash;
+
+    #[inline]
+    fn mk_sign(i: u8) -> Sign {
+        TurboHash::new(&[i])
+    }
+
+    #[inline]
+    fn mk_ofs(i: u32) -> Offsets {
+        Offsets::new(0x04, 0x08, 0x01, i)
+    }
 
     mod mark {
         use super::*;
@@ -689,19 +704,8 @@ mod tests {
         }
     }
 
-    mod mark_ops {
+    mod ops {
         use super::*;
-        use crate::hasher::TurboHash;
-
-        #[inline]
-        fn mk_sign(i: u8) -> Sign {
-            TurboHash::new(&[i])
-        }
-
-        #[inline]
-        fn mk_ofs(i: u32) -> Offsets {
-            Offsets::new(0x04, 0x08, 0x01, i)
-        }
 
         #[test]
         fn test_set_get_del_flow() {
@@ -811,6 +815,137 @@ mod tests {
             let sign = mk_sign(0x41);
             let r = mark.del(sign).expect("del ok");
             assert!(r.is_none(), "deleting non-existing must return None");
+        }
+    }
+
+    mod rehash {
+        use super::*;
+
+        #[test]
+        fn test_rehash_grows_capacity() {
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_basic");
+            cfg = cfg.init_cap(0x80).expect("new cap");
+
+            let mark = Mark::new(&cfg).expect("new Mark");
+            let old_meta = mark.meta_ptr.meta();
+
+            let new_mark = mark.new_with_rehash().expect("rehash ok");
+            let new_meta = new_mark.meta_ptr.meta();
+
+            assert_eq!(new_meta.num_items, old_meta.num_items * GROWTH_FACTOR);
+            assert_eq!(new_meta.num_rows, old_meta.num_rows * GROWTH_FACTOR);
+
+            // free should be all cap, as no inserts are done!
+            assert_eq!(new_meta.free, new_meta.num_items as u32);
+        }
+
+        #[test]
+        fn test_rehash_preserves_entries() {
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_preserve");
+            cfg = cfg.init_cap(0x80).expect("new cap");
+
+            let mut mark = Mark::new(&cfg).expect("new");
+
+            for i in 0x00..0x3A {
+                let sign = mk_sign(i);
+                let ofs = mk_ofs(i as u32);
+                assert!(mark.set(sign, ofs.clone(), false).expect("set ok").is_some());
+            }
+
+            let mut new_mark = mark.new_with_rehash().expect("rehash ok");
+
+            // All entries must exists after rehash
+            for i in 0x00..0x3A {
+                let sign = mk_sign(i);
+                let got = new_mark.get(sign).expect("get ok");
+                assert!(got.is_some());
+                assert_eq!(got.expect("is ok").trail_idx, i as u32);
+            }
+        }
+
+        #[test]
+        fn test_rehash_skips_tombstones() {
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_tombstones");
+            cfg = cfg.init_cap(0x80).expect("new cap");
+
+            let mut mark = Mark::new(&cfg).expect("new");
+
+            // initial inserts
+            for i in 0x00..0x2E {
+                let sign = mk_sign(i);
+                let ofs = mk_ofs(i as u32);
+                mark.set(sign, ofs.clone(), false).unwrap();
+            }
+
+            // del half (creates tombstones)
+            for i in 0x00..0x0F {
+                let sign = mk_sign(i);
+                assert!(mark.del(sign).expect("is ok").is_some());
+            }
+
+            let mut new_mark = mark.new_with_rehash().expect("rehash ok");
+
+            // Deleted ones must NOT reappear
+            for i in 0x00..0x0F {
+                let sign = mk_sign(i);
+                assert!(new_mark.get(sign).expect("is ok").is_none());
+            }
+
+            // all others must exists
+            for i in 0x0F..0x2E {
+                let sign = mk_sign(i);
+                let got = new_mark.get(sign).unwrap();
+                assert!(got.is_some());
+                assert_eq!(got.expect("is ok").trail_idx, i as u32);
+            }
+        }
+
+        #[test]
+        fn test_rehash_no_duplicates() {
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_no_duplicates");
+            cfg = cfg.init_cap(0x80).expect("new cap");
+
+            let mut mark = Mark::new(&cfg).expect("new");
+            let old_meta = mark.meta_ptr.meta();
+
+            for i in 0x00..0x28 {
+                let sign = mk_sign(i);
+                let ofs = mk_ofs(i as u32);
+                mark.set(sign, ofs.clone(), false).expect("is ok");
+            }
+
+            let new_mark = mark.new_with_rehash().expect("rehash ok");
+            let new_meta = new_mark.meta_ptr.meta();
+
+            let mut count = 0x00;
+            for (sign, _) in new_mark.iter() {
+                count += 0x01;
+            }
+
+            assert_eq!(count, 0x28, "rehash must not duplicate entries");
+            assert_eq!(new_meta.free as u64, new_meta.num_items - 0x28);
+        }
+
+        #[test]
+        fn test_rehash_iter_stability() {
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_iter");
+            cfg = cfg.init_cap(0x80).expect("new cap");
+
+            let mut mark = Mark::new(&cfg).expect("new mark");
+            for i in 0x00..0x20 {
+                mark.set(mk_sign(i), mk_ofs(i as u32), false).expect("is ok");
+            }
+
+            let mut seen = [false; 0x20];
+            let new_mark = mark.new_with_rehash().expect("rehash ok");
+            for (sign, ofs) in new_mark.iter() {
+                let idx = ofs.trail_idx as usize;
+                seen[idx] = true;
+
+                assert!(idx < 0x20);
+            }
+
+            assert!(seen.iter().all(|x| *x), "all entries must be present exactly once");
         }
     }
 }
