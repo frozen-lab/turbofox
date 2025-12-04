@@ -947,5 +947,60 @@ mod tests {
 
             assert!(seen.iter().all(|x| *x), "all entries must be present exactly once");
         }
+
+        #[test]
+        fn test_rehash_replacement_flow() {
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_replacement_flow");
+            cfg = cfg.init_cap(0x80).expect("init cap");
+
+            let mut mark = Mark::new(&cfg).expect("new mark");
+
+            // fill up entier rows
+            loop {
+                let sign = mk_sign(rand::random());
+                let ofs = mk_ofs(rand::random::<u32>() & 0xFF);
+
+                match mark.set(sign, ofs.clone(), false) {
+                    Ok(Some(())) => continue,
+                    Ok(None) => continue,
+                    Err(InternalError::MarkIsFull) => break,
+                    Err(e) => panic!("Unexpected error: {e:?}"),
+                }
+            }
+
+            // Simulate grow + replace
+            let mark_old_meta = mark.meta_ptr.meta();
+            let new_mark = mark.new_with_rehash().expect("rehash ok");
+
+            // Replace new w/ old
+            mark = new_mark;
+            let new_meta = mark.meta_ptr.meta();
+
+            // validations (mostly sanity checks)
+
+            assert_eq!(new_meta.num_items, mark_old_meta.num_items * GROWTH_FACTOR);
+            assert_eq!(new_meta.num_rows, mark_old_meta.num_rows * GROWTH_FACTOR);
+
+            // old entries exists
+            let mut count = 0usize;
+            for (sign, ofs) in mark.iter() {
+                assert!(mark.get(sign).expect("is ok").is_some());
+                count += 0x01;
+            }
+
+            assert!(count > 0x00, "rehash must preserve all old entries");
+
+            // set works (cap has grown)
+            let sign_new = mk_sign(0xF1);
+            let ofs_new = mk_ofs(0xAB);
+
+            let res = mark.set(sign_new, ofs_new.clone(), false);
+            assert!(res.is_ok(), "post-rehash insert must succeed");
+            assert!(res.expect("is ok").is_some(), "post-rehash insert must be inserted");
+
+            let got = mark.get(sign_new).unwrap();
+            assert!(got.is_some(), "new entry must exist");
+            assert_eq!(got.expect("is ok").trail_idx, ofs_new.trail_idx);
+        }
     }
 }
