@@ -1,4 +1,5 @@
 use crate::{
+    burrow::GROWTH_FACTOR,
     core::{TurboFile, TurboMMap},
     errors::{InternalError, InternalResult},
     hasher::{Sign, EMPTY_SIGN, TOMBSTONE_SIGN},
@@ -8,6 +9,7 @@ use crate::{
 const VERSION: u32 = 0x01;
 const MAGIC: [u8; 0x04] = *b"mrk1";
 const PATH: &'static str = "mark";
+const REHASH_PATH: &'static str = "mark_hash";
 
 //
 // Meta
@@ -50,7 +52,7 @@ impl Meta {
 
 const META_SIZE: usize = std::mem::size_of::<Meta>();
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct MetaPtr(*mut Meta);
 
 impl MetaPtr {
@@ -120,13 +122,18 @@ struct Row {
 
 const ROW_SIZE: usize = std::mem::size_of::<Row>();
 
-#[derive(Debug)]
-struct RowPtr(*mut Row);
+#[derive(Debug, Clone, Copy)]
+struct RowsPtr(*mut Row);
 
-impl RowPtr {
+impl RowsPtr {
     #[inline]
-    const fn new(rows_ptr: *mut Row, idx: usize) -> Self {
-        unsafe { Self(rows_ptr.add(idx)) }
+    const fn new(rows_ptr: *mut Row) -> Self {
+        Self(rows_ptr)
+    }
+
+    #[inline]
+    const fn row(&self, idx: usize) -> Self {
+        unsafe { Self(self.0.add(idx)) }
     }
 
     #[inline]
@@ -164,8 +171,9 @@ pub(super) struct Mark {
     file: TurboFile,
     mmap: TurboMMap,
     cfg: TurboConfig,
-    rows_ptr: RowPtr,
+    rows_ptr: RowsPtr,
     meta_ptr: MetaPtr,
+    free_trsh: u64,
 }
 
 impl Mark {
@@ -223,8 +231,9 @@ impl Mark {
             file,
             mmap,
             cfg: cfg.clone(),
-            rows_ptr: RowPtr::new(rows_ptr, 0x00),
             meta_ptr: MetaPtr::new(meta_ptr),
+            rows_ptr: RowsPtr::new(rows_ptr),
+            free_trsh: Self::calc_threshold(n_items),
         })
     }
 
@@ -262,13 +271,13 @@ impl Mark {
         // sanity check
         debug_assert_eq!(mmap.len(), file_len, "MMap len must be same as file len");
 
+        let meta = MetaPtr::new(meta_ptr).meta();
+
         // metadata validations
         //
         // NOTE/TODO: In future, we need to support the old file versions, if any!
-        unsafe {
-            if (*meta_ptr).magic != MAGIC || (*meta_ptr).version != VERSION {
-                cfg.logger.warn("(Mark) [open] File has invalid VERSION or MAGIC");
-            }
+        if meta.magic != MAGIC || meta.version != VERSION {
+            cfg.logger.error("(Mark) [open] File has invalid VERSION or MAGIC");
         }
 
         cfg.logger.debug("(Mark) [open] open is successful");
@@ -278,8 +287,89 @@ impl Mark {
             mmap,
             cfg: cfg.clone(),
             meta_ptr: MetaPtr::new(meta_ptr),
-            rows_ptr: RowPtr::new(rows_ptr, 0x00),
+            rows_ptr: RowsPtr::new(rows_ptr),
+            free_trsh: Self::calc_threshold(meta.num_items),
         })
+    }
+
+    pub(super) fn new_with_rehash(&self) -> InternalResult<Self> {
+        let path = self.cfg.dirpath.join(REHASH_PATH);
+
+        // clear up older version
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| {
+                self.cfg
+                    .logger
+                    .error(format!("(Mark) [rehash] Failed to delete older rehash TurboFile"));
+                e
+            })?;
+        }
+
+        let meta = self.meta_ptr.meta();
+
+        let new_nitems = meta.num_items * GROWTH_FACTOR;
+        let new_nrows = meta.num_rows * GROWTH_FACTOR;
+        let new_file_len = META_SIZE + (ROW_SIZE * new_nrows as usize);
+
+        // sanity check
+        debug_assert!(
+            new_nrows * ITEMS_PER_ROW as u64 == new_nitems,
+            "Incorrect row size calculations"
+        );
+
+        // new file
+        let file = TurboFile::new(&self.cfg, REHASH_PATH)?;
+        file.zero_extend(new_file_len, true)?;
+
+        let mmap = TurboMMap::new(&self.cfg, REHASH_PATH, &file, new_file_len).map_err(|e| {
+            // NOTE: Close + Delete the created file, so new init could work w/o any issues
+            //
+            // HACK: We ignore error from `close` and `del` as we are already in errored state, and primary
+            // error is more imp then this!
+
+            // NOTE: We can only delete the file, if file fd is released or closed, e.g. on windows
+            if file.close().is_ok() {
+                let _ = file.del();
+            }
+
+            e
+        })?;
+
+        // sanity check
+        debug_assert_eq!(mmap.len(), new_file_len, "MMap len must be same as file len");
+
+        let meta = Meta::new(new_nrows, new_nitems);
+        mmap.write(0x00, &meta);
+
+        // NOTE: we use `ms_sync` here to make sure metadata is persisted before
+        // any other updates are conducted on the mmap,
+        //
+        // HACK: we can afford this syscall here, as init does not come under the fast path
+        mmap.msync()?;
+
+        let meta_ptr = MetaPtr::new(mmap.read_mut::<Meta>(0x00));
+        let rows_ptr = RowsPtr::new(mmap.read_mut::<Row>(META_SIZE));
+
+        self.cfg.logger.debug("(Mark) [rehash] Created new Mark for rehash");
+        let mut new_mark = Self {
+            file,
+            mmap,
+            cfg: self.cfg.clone(),
+            rows_ptr,
+            meta_ptr,
+            free_trsh: Self::calc_threshold(new_nitems),
+        };
+
+        // iter & re-hash
+        let mut mark_iter = self.iter();
+        while let Some((sign, ofs)) = mark_iter.next() {
+            new_mark.set(sign, ofs, false)?;
+        }
+
+        // persist the new [Mark]
+        new_mark.mmap.msync()?;
+
+        Ok(new_mark)
     }
 
     /// Insert or update a new entry in [Mark]
@@ -296,19 +386,19 @@ impl Mark {
             "NUM_ITEMS must be aligned with INIT_CAP"
         );
 
-        // TODO: Grow and rehash [Row]'s
-        if meta.free == 0x00 {
-            return Err(InternalError::Misc("Mark is full".into()));
+        // not enough space left
+        if meta.free as u64 <= self.free_trsh {
+            return Err(InternalError::MarkIsFull);
         }
 
-        // open-address lookup
+        // lookup
 
         let mut rows_left = meta.num_rows;
         let mut row_idx = (idx >> 0x04) as usize; // /16
         let mut slot_idx = (idx & 0x0F) as usize; // %16
 
         while rows_left > 0x00 {
-            let row_ptr = RowPtr::new(self.rows_ptr.0, row_idx);
+            let row_ptr = self.rows_ptr.row(row_idx);
 
             for i in slot_idx..ITEMS_PER_ROW {
                 let sign_ptr = row_ptr.sign_mut(i);
@@ -355,25 +445,16 @@ impl Mark {
     /// Fetch [Offsets] for an existing entry from [Mark]
     pub(super) fn get(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
         let meta = self.meta_ptr.meta();
-
-        // NOTE: This only works if `num_items` is power of 2!
-        // This always satisfies as `num_items` is aligned with `init_cap`
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
 
-        // sanity check
-        debug_assert_eq!(
-            meta.num_items, self.cfg.init_cap as u64,
-            "NUM_ITEMS must be aligned with INIT_CAP"
-        );
-
-        // open-address lookup
+        // lookup
 
         let mut rows_left = meta.num_rows;
         let mut row_idx = (idx >> 0x04) as usize; // /16
         let mut slot_idx = (idx & 0x0F) as usize; // %16
 
         while rows_left > 0x00 {
-            let row_ptr = RowPtr::new(self.rows_ptr.0, row_idx);
+            let row_ptr = self.rows_ptr.row(row_idx);
 
             for i in slot_idx..ITEMS_PER_ROW {
                 let sign_ptr = row_ptr.sign(i);
@@ -402,28 +483,20 @@ impl Mark {
 
         Ok(None)
     }
+
     /// Delete [Sign] & [Offsets] for an existing entry from [Mark]
     pub(super) fn del(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
         let meta = self.meta_ptr.meta_mut();
-
-        // NOTE: This only works if `num_items` is power of 2!
-        // This always satisfies as `num_items` is aligned with `init_cap`
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
 
-        // sanity check
-        debug_assert_eq!(
-            meta.num_items, self.cfg.init_cap as u64,
-            "NUM_ITEMS must be aligned with INIT_CAP"
-        );
-
-        // open-address lookup
+        // lookup
 
         let mut rows_left = meta.num_rows;
         let mut row_idx = (idx >> 0x04) as usize; // /16
         let mut slot_idx = (idx & 0x0F) as usize; // %16
 
         while rows_left > 0x00 {
-            let row_ptr = RowPtr::new(self.rows_ptr.0, row_idx);
+            let row_ptr = self.rows_ptr.row(row_idx);
 
             for i in slot_idx..ITEMS_PER_ROW {
                 let sign_ptr = row_ptr.sign_mut(i);
@@ -455,6 +528,62 @@ impl Mark {
         }
 
         Ok(None)
+    }
+
+    #[inline]
+    pub(super) fn iter(&self) -> MarkIter {
+        MarkIter {
+            rows_ptr: self.rows_ptr,
+            meta_ptr: self.meta_ptr,
+            rows_idx: 0x00,
+            slot_idx: 0x00,
+            rows_left: self.meta_ptr.meta().num_rows as usize,
+        }
+    }
+
+    /// Calculate the threshold of *free* w/ `current_cap`
+    ///
+    /// The threshold is set at *6.25%* of the capacity to avoid frequent collisions
+    #[inline]
+    const fn calc_threshold(current_cap: u64) -> u64 {
+        current_cap >> 0x04
+    }
+}
+
+pub(super) struct MarkIter {
+    rows_ptr: RowsPtr,
+    meta_ptr: MetaPtr,
+    rows_idx: usize,
+    slot_idx: usize,
+    rows_left: usize,
+}
+
+impl Iterator for MarkIter {
+    type Item = (Sign, Offsets);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.rows_left > 0x00 {
+            let row = self.rows_ptr.row(self.rows_idx);
+
+            while self.slot_idx < ITEMS_PER_ROW {
+                let sign = row.sign(self.slot_idx);
+                let ofs = row.offset(self.slot_idx);
+                self.slot_idx += 0x01;
+
+                // empty slot
+                if sign == EMPTY_SIGN || sign == TOMBSTONE_SIGN {
+                    continue;
+                }
+
+                return Some((sign, ofs.clone()));
+            }
+
+            self.slot_idx = 0x00;
+            self.rows_idx += 0x01;
+            self.rows_left -= 0x01;
+        }
+
+        None
     }
 }
 

@@ -18,6 +18,7 @@ pkgs.mkShell {
   nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake ];
 
   shellHook = ''
+    export RUST_LOG=trace
     export RUST_BACKTRACE=1
     export CARGO_TERM_COLOR=always
   '';

@@ -5,6 +5,7 @@ pub enum TurboError {
     IO(String),
     Misc(String),
     InvalidConfig(String),
+    InvalidDb(String),
 }
 
 impl From<InternalError> for TurboError {
@@ -12,7 +13,8 @@ impl From<InternalError> for TurboError {
         match value {
             InternalError::IO(err) => TurboError::IO(err),
             InternalError::Misc(err) => TurboError::Misc(err),
-            InternalError::InvalidFile(err) => TurboError::IO(err),
+            InternalError::InvalidFile(err) => TurboError::InvalidDb(err),
+            _ => TurboError::Misc("Unknown error occurred".into()),
         }
     }
 }
@@ -28,6 +30,7 @@ pub(crate) enum InternalError {
     IO(String),
     Misc(String),
     InvalidFile(String),
+    MarkIsFull,
 }
 
 impl From<std::io::Error> for InternalError {
@@ -42,6 +45,7 @@ impl std::fmt::Display for InternalError {
             InternalError::IO(msg) => write!(f, "I/O error: {}", msg),
             InternalError::Misc(msg) => write!(f, "Misc error: {}", msg),
             InternalError::InvalidFile(msg) => write!(f, "Invalid file: {}", msg),
+            InternalError::MarkIsFull => write!(f, "Mark is full!"),
         }
     }
 }
