@@ -38,39 +38,9 @@ impl Meta {
             _padd: [0x00; 0x04],
         }
     }
-
-    #[inline]
-    const fn incr_num_rows(&mut self, added_count: usize) {
-        self.num_rows += added_count as u64;
-    }
-
-    #[inline]
-    const fn get_num_rows(&self) -> usize {
-        self.num_rows as usize
-    }
 }
 
 const META_SIZE: usize = std::mem::size_of::<Meta>();
-
-#[derive(Debug, Clone, Copy)]
-struct MetaPtr(*mut Meta);
-
-impl MetaPtr {
-    #[inline]
-    const fn new(meta: *mut Meta) -> Self {
-        Self(meta)
-    }
-
-    #[inline]
-    const fn meta(&self) -> Meta {
-        unsafe { (*self.0) }
-    }
-
-    #[inline]
-    const fn meta_mut(&self) -> &mut Meta {
-        unsafe { &mut *self.0 }
-    }
-}
 
 // sanity checks
 const _: () = assert!(META_SIZE == 0x20, "META must be of 32 bytes!");
@@ -122,41 +92,6 @@ struct Row {
 
 const ROW_SIZE: usize = std::mem::size_of::<Row>();
 
-#[derive(Debug, Clone, Copy)]
-struct RowsPtr(*mut Row);
-
-impl RowsPtr {
-    #[inline]
-    const fn new(rows_ptr: *mut Row) -> Self {
-        Self(rows_ptr)
-    }
-
-    #[inline]
-    const fn row(&self, idx: usize) -> Self {
-        unsafe { Self(self.0.add(idx)) }
-    }
-
-    #[inline]
-    fn sign(&self, idx: usize) -> Sign {
-        unsafe { *(*self.0).signs.get_unchecked(idx) }
-    }
-
-    #[inline]
-    fn sign_mut(&self, slot_idx: usize) -> &mut Sign {
-        unsafe { (*self.0).signs.get_unchecked_mut(slot_idx) }
-    }
-
-    #[inline]
-    fn offset(&self, idx: usize) -> &Offsets {
-        unsafe { &*(*self.0).offsets.get_unchecked(idx) }
-    }
-
-    #[inline]
-    fn offset_mut(&self, slot_idx: usize) -> &mut Offsets {
-        unsafe { (*self.0).offsets.get_unchecked_mut(slot_idx) }
-    }
-}
-
 // Sanity checks
 const _: () = assert!(ROW_SIZE == 0x100, "Row must be of 256 bytes");
 const _: () = assert!(std::mem::size_of::<Offsets>() == 0x0C);
@@ -171,8 +106,8 @@ pub(super) struct Mark {
     file: TurboFile,
     mmap: TurboMMap,
     cfg: TurboConfig,
-    rows_ptr: RowsPtr,
-    meta_ptr: MetaPtr,
+    rows_ptr: *mut Row,
+    meta_ptr: *mut Meta,
     free_trsh: u64,
 }
 
@@ -231,8 +166,8 @@ impl Mark {
             file,
             mmap,
             cfg: cfg.clone(),
-            meta_ptr: MetaPtr::new(meta_ptr),
-            rows_ptr: RowsPtr::new(rows_ptr),
+            meta_ptr: meta_ptr,
+            rows_ptr: rows_ptr,
             free_trsh: Self::calc_threshold(n_items),
         })
     }
@@ -271,24 +206,26 @@ impl Mark {
         // sanity check
         debug_assert_eq!(mmap.len(), file_len, "MMap len must be same as file len");
 
-        let meta = MetaPtr::new(meta_ptr).meta();
-
         // metadata validations
         //
         // NOTE/TODO: In future, we need to support the old file versions, if any!
-        if meta.magic != MAGIC || meta.version != VERSION {
-            cfg.logger.error("(Mark) [open] File has invalid VERSION or MAGIC");
+        unsafe {
+            if (*meta_ptr).magic != MAGIC || (*meta_ptr).version != VERSION {
+                cfg.logger.error("(Mark) [open] File has invalid VERSION or MAGIC");
+            }
         }
 
         cfg.logger.debug("(Mark) [open] open is successful");
+
+        let free_trsh = unsafe { Self::calc_threshold((*meta_ptr).num_items) };
 
         Ok(Self {
             file,
             mmap,
             cfg: cfg.clone(),
-            meta_ptr: MetaPtr::new(meta_ptr),
-            rows_ptr: RowsPtr::new(rows_ptr),
-            free_trsh: Self::calc_threshold(meta.num_items),
+            meta_ptr: meta_ptr,
+            rows_ptr: rows_ptr,
+            free_trsh,
         })
     }
 
@@ -305,7 +242,7 @@ impl Mark {
             })?;
         }
 
-        let meta = self.meta_ptr.meta();
+        let meta = unsafe { *self.meta_ptr };
 
         let new_nitems = meta.num_items * GROWTH_FACTOR;
         let new_nrows = meta.num_rows * GROWTH_FACTOR;
@@ -347,8 +284,8 @@ impl Mark {
         // HACK: we can afford this syscall here, as init does not come under the fast path
         mmap.msync()?;
 
-        let meta_ptr = MetaPtr::new(mmap.read_mut::<Meta>(0x00));
-        let rows_ptr = RowsPtr::new(mmap.read_mut::<Row>(META_SIZE));
+        let meta_ptr = mmap.read_mut::<Meta>(0x00);
+        let rows_ptr = mmap.read_mut::<Row>(META_SIZE);
 
         self.cfg.logger.debug("(Mark) [rehash] Created new Mark for rehash");
         let mut new_mark = Self {
@@ -375,7 +312,7 @@ impl Mark {
     /// Insert or update a new entry in [Mark]
     #[inline(always)]
     pub(super) fn set(&mut self, sign: Sign, ofs: Offsets, upsert: bool) -> InternalResult<Option<()>> {
-        let meta = self.meta_ptr.meta_mut();
+        let meta = unsafe { &mut *self.meta_ptr };
         let mut idx = (sign as u64) & (meta.num_items - 0x01); // NOTE: only works when `num_items` is power of 2
 
         // sanity check
@@ -396,32 +333,26 @@ impl Mark {
         let mut slot_idx = (idx & 0x0F) as usize; // %16
 
         while rows_left > 0x00 {
-            let row_ptr = self.rows_ptr.row(row_idx);
+            let row = unsafe { self.rows_ptr.add(row_idx) };
 
             for i in slot_idx..ITEMS_PER_ROW {
-                let sign_ptr = row_ptr.sign_mut(i);
-                let ofs_ptr = row_ptr.offset_mut(i);
+                let sign_ptr = unsafe { (*row).signs.get_unchecked_mut(i) };
+                let ofs_ptr = unsafe { (*row).offsets.get_unchecked_mut(i) };
+                let s = *sign_ptr;
 
-                // update existing entry
-                if *sign_ptr == sign {
+                // update existing
+                if s == sign {
                     if upsert {
                         *ofs_ptr = ofs;
                         return Ok(Some(()));
                     }
 
+                    // NOTE: we have't inserted the item
                     return Ok(None);
                 }
 
-                // insert new entry
-                if *sign_ptr == EMPTY_SIGN {
-                    *sign_ptr = sign;
-                    *ofs_ptr = ofs;
-                    meta.free -= 0x01;
-                    return Ok(Some(()));
-                }
-
-                // reuse deleted slot
-                if *sign_ptr == TOMBSTONE_SIGN {
+                if s <= TOMBSTONE_SIGN {
+                    meta.free -= (s == EMPTY_SIGN) as u32;
                     *sign_ptr = sign;
                     *ofs_ptr = ofs;
                     return Ok(Some(()));
@@ -433,7 +364,7 @@ impl Mark {
             row_idx += 0x01;
 
             // idx wrap
-            if row_idx >= meta.get_num_rows() {
+            if row_idx >= meta.num_rows as usize {
                 row_idx = 0x00;
             }
         }
@@ -450,7 +381,7 @@ impl Mark {
     /// Fetch [Offsets] for an existing entry from [Mark]
     #[inline(always)]
     pub(super) fn get(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
-        let meta = self.meta_ptr.meta();
+        let meta = unsafe { &*self.meta_ptr };
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
 
         // lookup
@@ -460,21 +391,21 @@ impl Mark {
         let mut slot_idx = (idx & 0x0F) as usize; // %16
 
         while rows_left > 0x00 {
-            let row_ptr = self.rows_ptr.row(row_idx);
+            let row = unsafe { self.rows_ptr.add(row_idx) };
 
             for i in slot_idx..ITEMS_PER_ROW {
-                let sign_ptr = row_ptr.sign(i);
-                let ofs_ptr = row_ptr.offset(i);
+                let sign_ptr = unsafe { (*row).signs.get_unchecked(i) };
+                let ofs_ptr = unsafe { (*row).offsets.get_unchecked(i) };
 
-                // found existing entry
-                if sign_ptr == sign {
+                let s = *sign_ptr;
+                if s == sign {
                     return Ok(Some(ofs_ptr.clone()));
                 }
-
-                // entry not found
-                if sign_ptr == EMPTY_SIGN {
+                if s == EMPTY_SIGN {
                     return Ok(None);
                 }
+
+                // we continue probing on tombstone
             }
 
             rows_left -= 0x01;
@@ -482,7 +413,7 @@ impl Mark {
             row_idx += 0x01;
 
             // idx wrap
-            if row_idx >= meta.get_num_rows() {
+            if row_idx >= meta.num_rows as usize {
                 row_idx = 0x00;
             }
         }
@@ -493,7 +424,7 @@ impl Mark {
     /// Delete [Sign] & [Offsets] for an existing entry from [Mark]
     #[inline(always)]
     pub(super) fn del(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
-        let meta = self.meta_ptr.meta_mut();
+        let meta = unsafe { &mut *self.meta_ptr };
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
 
         // lookup
@@ -503,25 +434,27 @@ impl Mark {
         let mut slot_idx = (idx & 0x0F) as usize; // %16
 
         while rows_left > 0x00 {
-            let row_ptr = self.rows_ptr.row(row_idx);
+            let row = unsafe { self.rows_ptr.add(row_idx) };
 
             for i in slot_idx..ITEMS_PER_ROW {
-                let sign_ptr = row_ptr.sign_mut(i);
-                let ofs_ptr = row_ptr.offset_mut(i);
+                let sign_ptr = unsafe { (*row).signs.get_unchecked_mut(i) };
+                let ofs_ptr = unsafe { (*row).offsets.get_unchecked_mut(i) };
 
                 // del existing entry
                 //
                 // NOTE: We just set the [Sign] to a tombstone! We don't need to update the offset
                 // as it'll automatically will get overwritten when new [Sign] is inserted
-                if *sign_ptr == sign {
+
+                let s = *sign_ptr;
+                if s == sign {
                     *sign_ptr = TOMBSTONE_SIGN;
                     return Ok(Some(ofs_ptr.clone()));
                 }
-
-                // no entry found
-                if *sign_ptr == EMPTY_SIGN {
+                if s == EMPTY_SIGN {
                     return Ok(None);
                 }
+
+                // we continue probing on tombstone
             }
 
             rows_left -= 0x01;
@@ -529,7 +462,7 @@ impl Mark {
             row_idx += 0x01;
 
             // idx wrap
-            if row_idx >= meta.get_num_rows() {
+            if row_idx >= meta.num_rows as usize {
                 row_idx = 0x00;
             }
         }
@@ -539,12 +472,14 @@ impl Mark {
 
     #[inline]
     pub(super) fn iter(&self) -> MarkIter {
+        let rows_left = unsafe { (*self.meta_ptr).num_rows } as usize;
+
         MarkIter {
+            rows_left,
             rows_ptr: self.rows_ptr,
             meta_ptr: self.meta_ptr,
             rows_idx: 0x00,
             slot_idx: 0x00,
-            rows_left: self.meta_ptr.meta().num_rows as usize,
         }
     }
 
@@ -558,8 +493,8 @@ impl Mark {
 }
 
 pub(super) struct MarkIter {
-    rows_ptr: RowsPtr,
-    meta_ptr: MetaPtr,
+    rows_ptr: *mut Row,
+    meta_ptr: *mut Meta,
     rows_idx: usize,
     slot_idx: usize,
     rows_left: usize,
@@ -570,19 +505,20 @@ impl Iterator for MarkIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.rows_left > 0x00 {
-            let row = self.rows_ptr.row(self.rows_idx);
+            let row = unsafe { self.rows_ptr.add(self.rows_idx) };
 
             while self.slot_idx < ITEMS_PER_ROW {
-                let sign = row.sign(self.slot_idx);
-                let ofs = row.offset(self.slot_idx);
+                let sign_ptr = unsafe { (*row).signs.get_unchecked(self.slot_idx) };
+                let ofs_ptr = unsafe { (*row).offsets.get_unchecked(self.slot_idx) };
+
+                let sign = *sign_ptr;
                 self.slot_idx += 0x01;
 
-                // empty slot
-                if sign == EMPTY_SIGN || sign == TOMBSTONE_SIGN {
+                if sign <= TOMBSTONE_SIGN {
                     continue;
                 }
 
-                return Some((sign, ofs.clone()));
+                return Some((sign, ofs_ptr.clone()));
             }
 
             self.slot_idx = 0x00;
@@ -619,7 +555,7 @@ mod tests {
 
             let n_rows = cfg.init_cap >> 0x04;
             let m1 = unsafe { Mark::new(&cfg) }.expect("new mark");
-            let meta = m1.meta_ptr.meta();
+            let meta = unsafe { *m1.meta_ptr };
 
             assert!(m1.file.fd() >= 0x00, "File fd must be valid");
             assert!(m1.mmap.len() > 0x00, "Mmap must be non zero");
@@ -629,8 +565,8 @@ mod tests {
             assert_eq!(meta.num_rows, n_rows as u64);
             assert_eq!(meta.num_items, cfg.init_cap as u64);
 
-            assert!(!m1.meta_ptr.0.is_null());
-            assert!(!m1.rows_ptr.0.is_null());
+            assert!(!m1.meta_ptr.is_null());
+            assert!(!m1.rows_ptr.is_null());
         }
 
         #[test]
@@ -638,14 +574,16 @@ mod tests {
             let (cfg, _tmp) = TurboConfig::test_cfg("mark_open_works");
             let m0 = Mark::new(&cfg).expect("new mark");
 
-            (m0.meta_ptr.meta_mut()).num_rows = 0x01;
-            (m0.meta_ptr.meta_mut()).num_items = 0x10;
-            (m0.meta_ptr.meta_mut()).free = 0x0A;
+            unsafe {
+                (*m0.meta_ptr).num_rows = 0x01;
+                (*m0.meta_ptr).num_items = 0x10;
+                (*m0.meta_ptr).free = 0x0A;
+            }
 
             drop(m0);
 
             let m1 = unsafe { Mark::open(&cfg) }.expect("open existing");
-            let meta = m1.meta_ptr.meta();
+            let meta = unsafe { *m1.meta_ptr };
 
             assert!(m1.file.fd() >= 0x00, "File fd must be valid");
             assert!(m1.mmap.len() > 0x00, "Mmap must be non zero");
@@ -656,8 +594,8 @@ mod tests {
             assert_eq!(meta.num_rows, 0x01);
             assert_eq!(meta.free, 0x0A);
 
-            assert!(!m1.meta_ptr.0.is_null());
-            assert!(!m1.rows_ptr.0.is_null());
+            assert!(!m1.meta_ptr.is_null());
+            assert!(!m1.rows_ptr.is_null());
         }
 
         #[test]
@@ -830,10 +768,10 @@ mod tests {
             cfg = cfg.init_cap(0x80).expect("new cap");
 
             let mark = Mark::new(&cfg).expect("new Mark");
-            let old_meta = mark.meta_ptr.meta();
+            let old_meta = unsafe { *mark.meta_ptr };
 
             let new_mark = mark.new_with_rehash().expect("rehash ok");
-            let new_meta = new_mark.meta_ptr.meta();
+            let new_meta = unsafe { *new_mark.meta_ptr };
 
             assert_eq!(new_meta.num_items, old_meta.num_items * GROWTH_FACTOR);
             assert_eq!(new_meta.num_rows, old_meta.num_rows * GROWTH_FACTOR);
@@ -909,7 +847,7 @@ mod tests {
             cfg = cfg.init_cap(0x80).expect("new cap");
 
             let mut mark = Mark::new(&cfg).expect("new");
-            let old_meta = mark.meta_ptr.meta();
+            let old_meta = unsafe { *mark.meta_ptr };
 
             for i in 0x00..0x28 {
                 let sign = mk_sign(i);
@@ -918,7 +856,7 @@ mod tests {
             }
 
             let new_mark = mark.new_with_rehash().expect("rehash ok");
-            let new_meta = new_mark.meta_ptr.meta();
+            let new_meta = unsafe { *new_mark.meta_ptr };
 
             let mut count = 0x00;
             for (sign, _) in new_mark.iter() {
@@ -972,12 +910,12 @@ mod tests {
             }
 
             // Simulate grow + replace
-            let mark_old_meta = mark.meta_ptr.meta();
+            let mark_old_meta = unsafe { *mark.meta_ptr };
             let new_mark = mark.new_with_rehash().expect("rehash ok");
 
             // Replace new w/ old
             mark = new_mark;
-            let new_meta = mark.meta_ptr.meta();
+            let new_meta = unsafe { *mark.meta_ptr };
 
             // validations (mostly sanity checks)
 
