@@ -1008,5 +1008,66 @@ mod tests {
                 assert!(avg <= threshold, "set ops are too slow: {avg} ns/op");
             }
         }
+
+        #[ignore]
+        #[test]
+        fn bench_mark_get() {
+            const INIT_CAP: usize = 0x80_000; // 524288 entries
+            const ROUNDS: usize = 0x14;
+
+            let threshold = Mark::calc_threshold(INIT_CAP as u64);
+            let entries_per_iter = INIT_CAP - (threshold as usize);
+
+            let (mut cfg, _tmp) = TurboConfig::test_cfg("mark_rehash_replacement_flow");
+            cfg = cfg.init_cap(INIT_CAP).expect("init cap");
+            let mut mark = Mark::new(&cfg).expect("new mark");
+
+            // STEP1: fill up (insert till 75% cap)
+            let niters = (ITEMS_PER_ROW * 0x03) >> 0x02;
+            for i in 0x00..niters {
+                let kbuf = i.to_le_bytes();
+                let sign = TurboHash::new(&kbuf);
+                let ofs = mk_ofs(i as u32);
+                mark.set(sign, ofs, false).expect("set is ok");
+            }
+
+            // STEP2: warmup
+            let niters = (ITEMS_PER_ROW * 0x03) >> 0x02;
+            for i in 0x00..niters {
+                let sign = TurboHash::new(&i.to_le_bytes());
+                assert!(mark.get(sign).expect("get is ok").is_some());
+            }
+
+            // STEP3: benches
+
+            let mut results = Vec::with_capacity(ROUNDS);
+            for _ in 0x00..ROUNDS {
+                // gen inputs
+                let mut signs = Vec::with_capacity(entries_per_iter);
+                for i in 0..entries_per_iter {
+                    signs.push(TurboHash::new(&i.to_le_bytes()));
+                }
+
+                // bench
+                let start = Instant::now();
+                for i in 0..entries_per_iter {
+                    std::hint::black_box(mark.get(signs[i]).expect("get is okay"));
+                }
+                let elapsed = start.elapsed();
+
+                results.push(elapsed.as_nanos() as f64 / entries_per_iter as f64);
+            }
+
+            // STEP3: Compute results
+
+            let avg: f64 = results.iter().sum::<f64>() / results.len() as f64;
+            cfg.logger.info(format!("GET: {:.3} ns/op", avg));
+
+            #[cfg(not(debug_assertions))]
+            {
+                let threshold = 0x10 as f64;
+                assert!(avg <= threshold, "get ops are too slow: {avg} ns/op");
+            }
+        }
     }
 }
