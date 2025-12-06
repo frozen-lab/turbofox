@@ -722,6 +722,17 @@ mod tests {
     use crate::linux::File;
     use tempfile::TempDir;
 
+    unsafe fn stop_cq_poller(io_ring: &mut IOUring) -> bool {
+        if let Some(tx) = io_ring.cq_poll_tx.take() {
+            io_ring.cq_poll_shutdown_flag.store(true, Ordering::Release);
+            tx.thread().unpark();
+            let _ = tx.join();
+            true
+        } else {
+            false
+        }
+    }
+
     fn create_iouring() -> (IOUring, File, TempDir, std::path::PathBuf) {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("temp_io_uring");
@@ -803,6 +814,102 @@ mod tests {
                 assert_eq!(expected_buf, buf);
             }
         }
+
+        #[test]
+        fn test_pool_reclaim_after_many_writes() {
+            let (io_ring, _file, _tmp, _path) = create_iouring();
+            let pool = io_ring.buf_pool.clone();
+            let payload = vec![0xAAu8; 512];
+
+            // Fill SQ many times; pool must recycle continuously
+            for _ in 0..256 {
+                unsafe {
+                    io_ring.write(&payload, 0).expect("write ok");
+                }
+            }
+
+            // pool must eventually become fully free again
+            let start = std::time::Instant::now();
+            while start.elapsed().as_millis() < 1500 {
+                if pool.alloc(NUM_BUFFER_PAGE).is_some() {
+                    // restore
+                    pool.free_range(BufRange::new(0, NUM_BUFFER_PAGE));
+                    return;
+                }
+                std::thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+
+            panic!("Pool did not reclaim all buffers — CQ thread stalled or frees missing");
+        }
+
+        #[test]
+        fn test_write_then_fsync_ordering() {
+            let (mut io_ring, _file, _tmp, _path) = create_iouring();
+
+            unsafe {
+                stop_cq_poller(&mut io_ring);
+            }
+
+            let payload = vec![1u8; DEFAULT_PAGE_SIZE / 2];
+            unsafe {
+                io_ring.write(&payload, 0).unwrap();
+            }
+
+            let start = std::time::Instant::now();
+            unsafe {
+                let tailp = io_ring.cq_tail_ptr();
+                let headp = io_ring.cq_head_ptr();
+                let mask = io_ring.cq_mask();
+                let cqes = io_ring.cqes_ptr();
+
+                while start.elapsed().as_millis() < 2000 {
+                    let head = core::ptr::read_volatile(headp);
+                    let tail = core::ptr::read_volatile(tailp);
+
+                    if tail.wrapping_sub(head) >= 2 {
+                        let c0 = core::ptr::read_volatile(cqes.add((head & mask) as usize));
+                        let c1 = core::ptr::read_volatile(cqes.add(((head + 1) & mask) as usize));
+
+                        assert_ne!(c0.user_data, IOURING_FYSNC_USER_DATA, "first must be WRITE");
+                        assert_eq!(c1.user_data, IOURING_FYSNC_USER_DATA, "second must be FSYNC");
+
+                        // mark consumed
+                        core::ptr::write_volatile(headp, head + 2);
+                        return;
+                    }
+
+                    std::thread::park_timeout(std::time::Duration::from_millis(1));
+                }
+            }
+
+            panic!("Did not observe WRITE→FSYNC completion order");
+        }
+
+        #[test]
+        fn test_sq_ring_wraparound() {
+            let (io_ring, _file, _tmp, _path) = create_iouring();
+            let payload = vec![3u8; 512];
+
+            // Force many writes so SQ tail wraps (depth=64, 300 writes ≈ 4 wraps)
+            for _ in 0..300 {
+                unsafe {
+                    io_ring.write(&payload, 0).unwrap();
+                }
+            }
+
+            // If SQ array was corrupted, CQ thread eventually stalls or pool is not reclaimed
+            let pool = io_ring.buf_pool.clone();
+            let start = std::time::Instant::now();
+            while start.elapsed().as_millis() < 1500 {
+                if pool.alloc(NUM_BUFFER_PAGE).is_some() {
+                    pool.free_range(BufRange::new(0, NUM_BUFFER_PAGE));
+                    return;
+                }
+                std::thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+
+            panic!("SQ wrap-around caused ring corruption — pool did not fully reclaim");
+        }
     }
 
     mod buf_pool {
@@ -845,6 +952,57 @@ mod tests {
             let pool = BufPool::new(4);
             let _ = pool.alloc(4).unwrap();
             assert!(pool.alloc(1).is_none(), "no space left");
+        }
+
+        #[test]
+        fn test_bufpool_deep_coalesce() {
+            let p = BufPool::new(16);
+
+            let a = p.alloc(3).unwrap(); // 0..3
+            let b = p.alloc(4).unwrap(); // 3..7
+            let c = p.alloc(2).unwrap(); // 7..9
+            let d = p.alloc(3).unwrap(); // 9..12
+
+            p.free_range(c);
+            p.free_range(a);
+            p.free_range(d);
+            p.free_range(b);
+
+            let r = p.alloc(12).expect("must coalesce into 0..12");
+            assert_eq!(r.start, 0);
+            assert_eq!(r.len, 12);
+        }
+
+        #[test]
+        fn test_bufpool_multithreaded_stress() {
+            use rand::Rng;
+            use std::sync::Arc;
+
+            let p = Arc::new(BufPool::new(128));
+
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let p = p.clone();
+                    std::thread::spawn(move || {
+                        let mut rng = rand::rng();
+
+                        for _ in 0..500 {
+                            let n = rng.random_range(1..=4);
+                            if let Some(r) = p.alloc(n) {
+                                p.free_range(r);
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for t in threads {
+                t.join().unwrap();
+            }
+
+            // full pool must be intact
+            let r = p.alloc(128);
+            assert!(r.is_some(), "pool must remain fully coherent after stress");
         }
     }
 }
