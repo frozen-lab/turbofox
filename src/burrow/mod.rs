@@ -15,6 +15,6 @@ const _: () = assert!(
     "Default page size must be power of 2"
 );
 const _: () = assert!(
-    (1024 * GROWTH_FACTOR) & ((1024 * GROWTH_FACTOR) - 0x01) == 0x00,
+    (0x400 * GROWTH_FACTOR) & ((0x400 * GROWTH_FACTOR) - 0x01) == 0x00,
     "GROWTH_FACTOR must preserve power of 2 nature of values"
 );

@@ -5,6 +5,9 @@ mod mmap;
 mod file;
 
 #[cfg(target_os = "linux")]
+mod iouring;
+
+#[cfg(target_os = "linux")]
 pub(crate) use mmap::MMap;
 
 #[cfg(target_os = "linux")]
