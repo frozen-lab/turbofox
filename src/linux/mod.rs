@@ -12,3 +12,6 @@ pub(crate) use mmap::MMap;
 
 #[cfg(target_os = "linux")]
 pub(crate) use file::File;
+
+#[cfg(target_os = "linux")]
+pub(crate) use iouring::IOUring;

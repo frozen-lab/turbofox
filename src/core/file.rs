@@ -66,6 +66,16 @@ impl TurboFile {
         Ok(())
     }
 
+    pub(crate) fn pread(&self, buf: &mut [u8], off: usize) -> InternalResult<()> {
+        #[cfg(target_os = "linux")]
+        unsafe { self.pread_linux(buf, off) }?;
+
+        #[cfg(not(target_os = "linux"))]
+        unimplemented!();
+
+        Ok(())
+    }
+
     pub(crate) fn len(&self) -> InternalResult<usize> {
         #[cfg(target_os = "linux")]
         let len = unsafe { self.file_len_linux() }?;
@@ -187,6 +197,20 @@ impl TurboFile {
                     let _ = Self::_del(&path, &self.cfg, self.target);
                 }
 
+                e
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn pread_linux(&self, buf: &mut [u8], off: usize) -> InternalResult<()> {
+        self.file
+            .pread(buf, off as i64)
+            .inspect(|_| self.cfg.logger.trace(format!("({}) [pread] PRead done", self.target)))
+            .map_err(|e| {
+                self.cfg
+                    .logger
+                    .error(format!("({}) [pread] Failed to pread from TurboFile: {e}", self.target));
                 e
             })
     }
@@ -415,5 +439,49 @@ mod tests {
         assert!(file.close().is_err());
 
         // NOTE: Expect drop to fail
+    }
+
+    #[test]
+    fn test_pread_full_read() {
+        let (cfg, _dir) = TurboConfig::test_cfg("pread_full");
+        let path = _dir.path().join("TurboFile");
+
+        // write 16 bytes
+        std::fs::write(&path, b"ABCDEFGHIJKLMNOP").expect("write to file");
+
+        let file = TurboFile::open(&cfg, "TurboFile").expect("open works");
+        let mut buf = [0u8; 0x10];
+        file.pread(&mut buf, 0x00).expect("pread full");
+
+        assert_eq!(&buf, b"ABCDEFGHIJKLMNOP");
+    }
+
+    #[test]
+    fn test_pread_partial_read() {
+        let (cfg, _dir) = TurboConfig::test_cfg("pread_partial");
+        let path = _dir.path().join("TurboFile");
+
+        // write 16 bytes
+        std::fs::write(&path, b"ABCDEFGHIJKLMNOP").expect("write to file");
+
+        let file = TurboFile::open(&cfg, "TurboFile").expect("open works");
+        let mut buf = [0u8; 0x04];
+        file.pread(&mut buf, 0x0A).expect("pread partial");
+
+        assert_eq!(&buf, b"KLMN");
+    }
+
+    #[test]
+    fn test_pread_fails_on_closed_file() {
+        let (cfg, _dir) = TurboConfig::test_cfg("pread_fail_closed");
+        let file = TurboFile::new(&cfg, "TurboFile").expect("new file");
+
+        // close underlying fd
+        assert!(file.close().is_ok());
+
+        let mut buf = [0u8; 0x04];
+        let res = file.pread(&mut buf, 0x00);
+
+        assert!(res.is_err(), "pread must fail on closed file");
     }
 }

@@ -1,8 +1,8 @@
 use crate::errors::{InternalError, InternalResult};
 use libc::{
-    close, fstat, fsync, ftruncate, getegid, geteuid, off_t, open, stat, sync_file_range, O_CLOEXEC, O_CREAT,
-    O_NOATIME, O_RDWR, O_TRUNC, SYNC_FILE_RANGE_WAIT_AFTER, SYNC_FILE_RANGE_WAIT_BEFORE, S_IRGRP, S_IROTH, S_IRUSR,
-    S_IWGRP, S_IWOTH, S_IWUSR,
+    c_void, close, fstat, fsync, ftruncate, getegid, geteuid, off_t, open, pread, stat, sync_file_range, O_CLOEXEC,
+    O_CREAT, O_NOATIME, O_RDWR, O_TRUNC, SYNC_FILE_RANGE_WAIT_AFTER, SYNC_FILE_RANGE_WAIT_BEFORE, S_IRGRP, S_IROTH,
+    S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR,
 };
 use std::{ffi::CString, os::unix::ffi::OsStrExt, path::Path};
 
@@ -77,6 +77,26 @@ impl File {
         if ftruncate(self.0, new_len as off_t) != 0 {
             return Err(Self::_last_os_error());
         }
+
+        Ok(())
+    }
+
+    /// read exact length from [File] at given offset
+    #[allow(unsafe_op_in_unsafe_fn)]
+    pub(crate) unsafe fn pread(&self, buf: &mut [u8], off: i64) -> InternalResult<()> {
+        let ptr = buf.as_mut_ptr() as *mut c_void;
+        let len = buf.len();
+
+        let ret = pread(self.fd(), ptr, len, off);
+        if ret < 0x00 {
+            return Err(Self::_last_os_error());
+        }
+
+        // sanity check
+        debug_assert!(
+            (ret as usize) == len,
+            "Read length does not match the length of the buffer"
+        );
 
         Ok(())
     }
@@ -368,6 +388,7 @@ mod tests {
             file.zero_extend(0x80).expect("Zero-extend the file");
             let l2 = file.len().expect("Read file length");
             assert_eq!(l2, 0x80, "Should read correct file len after zero-extend");
+            file.close().expect("Close file");
         }
     }
 
@@ -394,6 +415,42 @@ mod tests {
             let st = File::fetch_stats(file.0).expect("Read file stats");
 
             assert!(File::validate_permission(&st), "File must have read/write permission");
+            file.close().expect("Close file");
+        }
+    }
+
+    #[test]
+    fn test_pread_full_read() {
+        let (_dir, path) = tmp_file();
+
+        unsafe {
+            // write 16 bytes
+            std::fs::write(&path, b"ABCDEFGHIJKLMNOP").unwrap();
+            let file = File::open(&path).unwrap();
+
+            let mut buf = [0u8; 0x10];
+            file.pread(&mut buf, 0x00).expect("pread full");
+
+            assert_eq!(&buf, b"ABCDEFGHIJKLMNOP");
+            file.close().expect("Close file");
+        }
+    }
+
+    #[test]
+    fn test_pread_partial_read() {
+        let (_dir, path) = tmp_file();
+
+        unsafe {
+            // 16 bytes file
+            std::fs::write(&path, b"ABCDEFGHIJKLMNOP").unwrap();
+            let file = File::open(&path).unwrap();
+
+            let mut buf = [0u8; 0x04];
+            file.pread(&mut buf, 0x0A).expect("pread partial");
+
+            // bytes starting at offset 10
+            assert_eq!(&buf, b"KLMN");
+            file.close().expect("Close file");
         }
     }
 }
