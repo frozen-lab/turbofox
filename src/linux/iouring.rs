@@ -715,3 +715,136 @@ impl Drop for IOUring {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linux::File;
+    use tempfile::TempDir;
+
+    fn create_iouring() -> (IOUring, File, TempDir, std::path::PathBuf) {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("temp_io_uring");
+
+        let file = unsafe { File::new(&path).expect("new file") };
+        unsafe { file.zero_extend(NUM_BUFFER_PAGE * DEFAULT_PAGE_SIZE) }.expect("zero extend file");
+        let io_ring = unsafe { IOUring::new(file.fd()).expect("Failed to init") };
+
+        (io_ring, file, tmp, path)
+    }
+
+    mod iouring {
+        use super::*;
+
+        #[test]
+        fn test_iouring_init() {
+            let (io_ring, _file, _tmp, _) = create_iouring();
+
+            assert!(io_ring.ring_fd >= 0, "Ring fd must be non-negative");
+            assert!(io_ring.file_fd >= 0, "File fd must be non-negative");
+
+            assert!(io_ring.params.sq_off.array != 0, "SQE's offset must be set by kernel");
+            assert!(io_ring.params.cq_off.cqes != 0, "CQE's offset must be set by kernel");
+
+            assert!(!io_ring.rings.sq_ptr.is_null(), "SQ pointer must be valid");
+            assert!(!io_ring.rings.cq_ptr.is_null(), "CQ pointer must be valid");
+            assert!(!io_ring.rings.sqes_ptr.is_null(), "SQEs pointer must be valid");
+            assert!(!io_ring.buf_base_ptr.is_null(), "Base buf ptr must not be null");
+
+            assert_eq!(
+                io_ring.iovecs.len(),
+                NUM_BUFFER_PAGE,
+                "IOVEC lane must match with constant"
+            );
+            assert!(
+                io_ring.buf_base_ptr != std::ptr::null_mut(),
+                "Base buf ptr must not be 0"
+            );
+        }
+
+        #[test]
+        fn test_write_and_fsync() {
+            let offset: u64 = 0;
+            let dummy_data = "Dummy Data to write w/ fsync".as_bytes();
+            let (mut io_ring, mut file, _tmp, path) = create_iouring();
+
+            unsafe { io_ring.write(&dummy_data, offset) };
+            std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
+
+            let data = std::fs::read(&path).expect("read from file");
+            let buf = data[0..dummy_data.len()].to_vec();
+            assert_eq!(dummy_data, &buf);
+        }
+
+        #[test]
+        fn test_manual_queue_exhaustion() {
+            let n = 0x64;
+            let file_len = n * NUM_BUFFER_PAGE;
+            let (mut io_ring, mut file, _tmp, path) = create_iouring();
+
+            // Must extend file before random-offset writes
+            unsafe { file.zero_extend(n * DEFAULT_PAGE_SIZE) }.expect("extend file");
+
+            for i in 0x00..n {
+                let dummy_data = vec![i as u8; DEFAULT_PAGE_SIZE];
+                unsafe { io_ring.write(&dummy_data, (DEFAULT_PAGE_SIZE * i) as u64) };
+            }
+
+            // manual sleep so writes could be finished
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // validate written data
+            let written = std::fs::read(&path).expect("read from file");
+            for i in 0..n {
+                let st_idx = i * DEFAULT_PAGE_SIZE;
+                let expected_buf = vec![i as u8; DEFAULT_PAGE_SIZE];
+                let buf: Vec<u8> = written[st_idx..(st_idx + DEFAULT_PAGE_SIZE)].to_vec();
+
+                assert_eq!(expected_buf, buf);
+            }
+        }
+    }
+
+    mod buf_pool {
+        use super::*;
+
+        #[test]
+        fn test_alloc_single_page() {
+            let pool = BufPool::new(NUM_BUFFER_PAGE);
+            let r = pool.alloc(1).expect("must alloc");
+            assert_eq!(r.start, 0);
+            assert_eq!(r.len, 1);
+        }
+
+        #[test]
+        fn test_alloc_free_coalesce() {
+            let pool = BufPool::new(8);
+
+            // allocate 3 pages
+            let a = pool.alloc(3).unwrap();
+            assert_eq!(a.start, 0);
+            assert_eq!(a.len, 3);
+
+            // allocate 2 pages
+            let b = pool.alloc(2).unwrap();
+            assert_eq!(b.start, 3);
+            assert_eq!(b.len, 2);
+
+            // free both -> must coalesce to a single (0..5)
+            pool.free_range(a);
+            pool.free_range(b);
+
+            // next allocation of 5 contiguous must succeed
+            let c = pool.alloc(5).unwrap();
+            assert_eq!(c.start, 0);
+            assert_eq!(c.len, 5);
+        }
+
+        #[test]
+        fn test_alloc_fail() {
+            let pool = BufPool::new(4);
+            let _ = pool.alloc(4).unwrap();
+            assert!(pool.alloc(1).is_none(), "no space left");
+        }
+    }
+}
