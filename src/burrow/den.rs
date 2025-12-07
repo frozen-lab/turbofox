@@ -5,7 +5,7 @@ use crate::{
     TurboConfig,
 };
 
-const PATH: &'static str = "den";
+pub(super) const PATH: &'static str = "den";
 
 #[derive(Debug)]
 pub(super) struct Den {

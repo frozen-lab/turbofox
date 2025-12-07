@@ -8,8 +8,9 @@ use crate::{
 
 const VERSION: u32 = 0x01;
 const MAGIC: [u8; 0x04] = *b"mrk1";
-const PATH: &'static str = "mark";
-const REHASH_PATH: &'static str = "mark_hash";
+
+pub(super) const PATH: &'static str = "mark";
+pub(super) const REHASH_PATH: &'static str = "mark_hash";
 
 //
 // Meta

@@ -7,7 +7,8 @@ use crate::{
 
 const VERSION: u32 = 0x01;
 const MAGIC: [u8; 0x04] = *b"trl1";
-const PATH: &'static str = "trail";
+
+pub(super) const PATH: &'static str = "trail";
 
 // sanity check
 const _: () = assert!(
