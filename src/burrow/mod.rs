@@ -71,6 +71,12 @@ impl Burrow {
                         })?;
                 }
             }
+
+            return Ok(Self {
+                den: den::Den::new(&cfg)?,
+                mark: mark::Mark::new(&cfg)?,
+                trail: trail::Trail::new(&cfg)?,
+            });
         }
 
         cfg.logger.debug("(Burrow) [new] Burrow init (existing)");
@@ -156,5 +162,113 @@ impl Burrow {
 
         let den = den::Den::open(&cfg)?;
         Ok(Some(den))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn touch<P: AsRef<Path>>(p: P) {
+        fs::write(p, &[0u8]).expect("write works");
+    }
+
+    mod init {
+        use super::*;
+
+        #[test]
+        fn test_init_works() {
+            let (cfg, dir) = TurboConfig::test_cfg("Burrow");
+
+            // Fresh dir
+            let burrow = Burrow::new(&cfg);
+            assert!(burrow.is_ok());
+
+            for file in FILE_PATHS {
+                let p = dir.path().join(file);
+                if file != mark::REHASH_PATH {
+                    assert!(p.exists(), "Expected {file} to be created");
+                }
+            }
+        }
+
+        #[test]
+        fn test_partial_init_correctly_cleans_directory() {
+            let (cfg, dir) = TurboConfig::test_cfg("Burrow");
+
+            mark::Mark::new(&cfg).expect("mark creation");
+            assert!(dir.path().join(mark::PATH).exists());
+
+            // must now cleanup and re-init due to missing files
+            let _ = Burrow::new(&cfg).expect("new Burrow");
+
+            assert!(dir.path().join(mark::PATH).exists());
+            assert!(dir.path().join(den::PATH).exists());
+            assert!(dir.path().join(trail::PATH).exists());
+            assert!(!dir.path().join(mark::REHASH_PATH).exists());
+        }
+
+        #[test]
+        fn test_rehash_file_is_deleted_when_mark_exists() {
+            let (cfg, dir) = TurboConfig::test_cfg("Burrow");
+
+            let mark = mark::Mark::new(&cfg).expect("mark creation");
+            let _rehash = mark.new_with_rehash().expect("rehash creation");
+            assert!(dir.path().join(mark::REHASH_PATH).exists());
+
+            // now it should delete rehash because mark exists
+            let _ = Burrow::new(&cfg).expect("new Burrow");
+            assert!(!dir.path().join(mark::REHASH_PATH).exists());
+        }
+
+        #[test]
+        fn test_rehash_is_promoted_when_mark_missing() {
+            let (cfg, dir) = TurboConfig::test_cfg("Burrow");
+
+            let mark = mark::Mark::new(&cfg).expect("mark creation");
+            let _rehash = mark.new_with_rehash().expect("rehash creation");
+
+            std::fs::remove_file(dir.path().join(mark::PATH)).unwrap();
+            assert!(!dir.path().join(mark::PATH).exists());
+            assert!(dir.path().join(mark::REHASH_PATH).exists());
+
+            let _ = Burrow::new(&cfg).expect("new Burrow");
+            assert!(dir.path().join(mark::PATH).exists());
+            assert!(!dir.path().join(mark::REHASH_PATH).exists());
+        }
+
+        #[test]
+        fn test_new_works_on_valid_dir() {
+            let (cfg, dir) = TurboConfig::test_cfg("Burrow");
+
+            mark::Mark::new(&cfg).expect("mark creation");
+            den::Den::new(&cfg).expect("den creation");
+            trail::Trail::new(&cfg).expect("trail creation");
+
+            let _ = Burrow::new(&cfg).expect("new Burrow");
+
+            // Must not delete anything
+            assert!(dir.path().join(mark::PATH).exists());
+            assert!(dir.path().join(den::PATH).exists());
+            assert!(dir.path().join(trail::PATH).exists());
+        }
+
+        #[test]
+        fn test_new_ignores_unrelated_files() {
+            let (cfg, dir) = TurboConfig::test_cfg("Burrow");
+
+            // random files
+            touch(dir.path().join("junk.bin"));
+            assert!(dir.path().join("junk.bin").exists());
+
+            // Missing Mark/Den/Trail => cleanup + rebuild
+            let _ = Burrow::new(&cfg).expect("new Burrow");
+
+            // junk file must not be touched
+            assert!(dir.path().join("junk.bin").exists());
+        }
     }
 }
