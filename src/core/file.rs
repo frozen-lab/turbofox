@@ -11,6 +11,9 @@ pub(crate) struct TurboFile {
 
     #[cfg(not(target_os = "linux"))]
     file: (),
+
+    #[cfg(target_os = "linux")]
+    asyncio: crate::linux::IOUring,
 }
 
 impl TurboFile {
@@ -19,6 +22,9 @@ impl TurboFile {
 
         #[cfg(target_os = "linux")]
         let file = unsafe { Self::new_linux(cfg, &path, target) }?;
+
+        #[cfg(target_os = "linux")]
+        let asyncio = unsafe { Self::new_iouring_linux(&file, cfg, target) }?;
 
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
@@ -30,6 +36,7 @@ impl TurboFile {
             target,
             cfg: cfg.clone(),
             file,
+            asyncio,
         })
     }
 
@@ -38,6 +45,9 @@ impl TurboFile {
 
         #[cfg(target_os = "linux")]
         let file = unsafe { Self::open_linux(cfg, &path, target) }?;
+
+        #[cfg(target_os = "linux")]
+        let asyncio = unsafe { Self::new_iouring_linux(&file, cfg, target) }?;
 
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
@@ -49,6 +59,7 @@ impl TurboFile {
             target,
             cfg: cfg.clone(),
             file,
+            asyncio,
         })
     }
 
@@ -69,6 +80,16 @@ impl TurboFile {
     pub(crate) fn pread(&self, buf: &mut [u8], off: usize) -> InternalResult<()> {
         #[cfg(target_os = "linux")]
         unsafe { self.pread_linux(buf, off) }?;
+
+        #[cfg(not(target_os = "linux"))]
+        unimplemented!();
+
+        Ok(())
+    }
+
+    pub(crate) fn async_write(&self, buf: &[u8], off: usize) -> InternalResult<()> {
+        #[cfg(target_os = "linux")]
+        unsafe { self.async_write_linux(buf, off) }?;
 
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
@@ -150,6 +171,23 @@ impl TurboFile {
 
     #[cfg(target_os = "linux")]
     #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn new_iouring_linux(
+        file: &crate::linux::File,
+        cfg: &TurboConfig,
+        target: &'static str,
+    ) -> InternalResult<crate::linux::IOUring> {
+        crate::linux::IOUring::new(file.fd())
+            .inspect(|_| cfg.logger.trace(format!("({target}) [new_iouring] IOUring init")))
+            .map_err(|e| {
+                cfg.logger
+                    .error(format!("({target}) [new_iouring] Failed to init IOUring: {e}"));
+
+                e
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn open_linux(
         cfg: &TurboConfig,
         path: &PathBuf,
@@ -211,6 +249,25 @@ impl TurboFile {
                 self.cfg
                     .logger
                     .error(format!("({}) [pread] Failed to pread from TurboFile: {e}", self.target));
+                e
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn async_write_linux(&self, buf: &[u8], off: usize) -> InternalResult<()> {
+        self.asyncio
+            .write(buf, off as u64)
+            .inspect(|_| {
+                self.cfg
+                    .logger
+                    .trace(format!("({}) [async_write] Async Write done", self.target))
+            })
+            .map_err(|e| {
+                self.cfg.logger.error(format!(
+                    "({}) [async_write] Failed to async write from TurboFile: {e}",
+                    self.target
+                ));
                 e
             })
     }
@@ -483,5 +540,23 @@ mod tests {
         let res = file.pread(&mut buf, 0x00);
 
         assert!(res.is_err(), "pread must fail on closed file");
+    }
+
+    #[test]
+    fn test_async_write_and_pread_cycle_works() {
+        let (cfg, _dir) = TurboConfig::test_cfg("pread_partial");
+        let path = _dir.path().join("TurboFile");
+        let file = TurboFile::new(&cfg, "TurboFile").expect("open works");
+
+        let mut wbuf = vec![0u8; crate::burrow::DEFAULT_PAGE_SIZE];
+        wbuf[0..0x10].swap_with_slice(&mut b"ABCDEFGHIJKLMNOP".to_vec());
+
+        file.async_write(&wbuf, 0x00).expect("async write works");
+        std::thread::sleep(std::time::Duration::from_micros(0x0A));
+
+        let mut rbuf = vec![0u8; crate::burrow::DEFAULT_PAGE_SIZE];
+        file.pread(&mut rbuf, 0x00).expect("pread works");
+
+        assert_eq!(&wbuf, &rbuf);
     }
 }

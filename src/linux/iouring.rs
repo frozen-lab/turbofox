@@ -141,6 +141,7 @@ struct RingPtrs {
     sqes_ptr: *mut c_void,
 }
 
+#[derive(Debug)]
 pub(crate) struct IOUring {
     ring_fd: i32,
     file_fd: i32,
