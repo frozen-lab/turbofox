@@ -58,11 +58,11 @@ const OFFSET_PADDING: u8 = 0x00;
 #[repr(C, align(0x04))]
 #[derive(Debug, Clone)]
 pub(super) struct Offsets {
-    trail_idx: u32,
-    vbuf_slots: u16,
-    klen: u16,
-    vlen: u16,
-    flag: u8,
+    pub(super) trail_idx: u32,
+    pub(super) vbuf_slots: u16,
+    pub(super) klen: u16,
+    pub(super) vlen: u16,
+    pub(super) flag: u8,
     _padd: u8,
 }
 
@@ -393,7 +393,7 @@ impl Mark {
     /// ## TODO's
     ///  - Impl of SIMD
     #[inline(always)]
-    pub(super) fn get(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
+    pub(super) fn get(&self, sign: Sign) -> InternalResult<Option<Offsets>> {
         let meta = unsafe { &*self.meta_ptr };
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
 
@@ -442,7 +442,7 @@ impl Mark {
     /// ## TODO's
     ///  - Impl of SIMD
     #[inline(always)]
-    pub(super) fn del(&mut self, sign: Sign) -> InternalResult<Option<Offsets>> {
+    pub(super) fn del(&self, sign: Sign) -> InternalResult<Option<Offsets>> {
         let meta = unsafe { &mut *self.meta_ptr };
         let mut idx = (sign as u64) & (meta.num_items - 0x01);
 

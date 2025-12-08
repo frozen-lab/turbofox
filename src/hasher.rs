@@ -6,6 +6,7 @@ pub(crate) const EMPTY_SIGN: u32 = 0u32;
 
 /// Represents hashed value
 pub(crate) type Sign = u32;
+pub(crate) const SIGN_SIZE: usize = std::mem::size_of::<Sign>();
 
 // WARN: [Mark] is zeroed on init, i.e. the sign space contains `0u32` values
 // by default, which is treated as empty slot! So the value of [EMPTY_SIGN] must

@@ -295,6 +295,12 @@ impl Trail {
         self.free_n(idx, n);
     }
 
+    /// Get current capacity of the Trail
+    #[inline]
+    pub(super) fn current_cap(&self) -> usize {
+        unsafe { ((*self.meta_ptr).nwords << 6) as usize }
+    }
+
     /// Lookup one slot in the [BitMap]
     ///
     /// ## Perf

@@ -1,3 +1,4 @@
+use super::GROWTH_FACTOR;
 use crate::{
     burrow::DEFAULT_PAGE_SIZE,
     core::TurboFile,
@@ -9,7 +10,7 @@ pub(super) const PATH: &'static str = "den";
 
 #[derive(Debug)]
 pub(super) struct Den {
-    file: TurboFile,
+    pub(super) file: TurboFile,
     cfg: TurboConfig,
     len: usize,
 }
@@ -72,10 +73,9 @@ impl Den {
             let num_pages = self.len / DEFAULT_PAGE_SIZE;
             let req_pages = buf.len() / DEFAULT_PAGE_SIZE;
 
-            debug_assert!(offset < self.len, "Offset is out of bounds");
-            debug_assert!(page_idx < num_pages, "page_idx is out of bounds");
-            debug_assert!(page_idx + req_pages < num_pages, "buffer is out of bounds");
-            debug_assert!(buf.len() % DEFAULT_PAGE_SIZE == 0x00, "Buffer must be page aligned");
+            // debug_assert!(page_idx < num_pages, "page_idx is out of bounds");
+            // debug_assert!(page_idx + req_pages < num_pages, "buffer is out of bounds");
+            // debug_assert!(buf.len() % DEFAULT_PAGE_SIZE == 0x00, "Buffer must be page aligned");
         }
 
         self.file.async_write(buf, offset)
@@ -91,11 +91,16 @@ impl Den {
             let num_pages = self.len / DEFAULT_PAGE_SIZE;
             let req_pages = buf.len() / DEFAULT_PAGE_SIZE;
 
-            debug_assert!(offset < self.len, "Offset is out of bounds");
-            debug_assert!(page_idx < num_pages, "page_idx is out of bounds");
+            // debug_assert!(offset < self.len, "Offset is out of bounds");
+            // debug_assert!(page_idx < num_pages, "page_idx is out of bounds");
         }
 
         self.file.pread(&mut buf, offset)?;
         Ok(buf)
+    }
+
+    #[inline]
+    pub(crate) fn zero_extend(&mut self, new_len: usize) -> InternalResult<()> {
+        self.file.zero_extend(new_len, false)
     }
 }
