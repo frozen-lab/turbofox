@@ -1,5 +1,12 @@
 mod core;
 
+#[allow(unused)]
+mod error;
+
+#[cfg(target_os = "linux")]
+#[allow(unused)]
+mod linux;
+
 #[derive(Debug)]
 pub struct TurboFox;
 
