@@ -1,4 +1,4 @@
-/// Hint for branch predictor that likely is mostly `true`
+/// Hint for branch predictor that given branch condition is *likely* to be `true`
 #[inline(always)]
 pub(crate) fn likely(b: bool) -> bool {
     if !b {
@@ -7,7 +7,7 @@ pub(crate) fn likely(b: bool) -> bool {
     b
 }
 
-/// Hint for branch predictor that unlikely is mostly `true`
+/// Hint for branch predictor that given branch condition is *unlikely* to be `true`
 #[inline(always)]
 pub(crate) fn unlikely(b: bool) -> bool {
     if b {

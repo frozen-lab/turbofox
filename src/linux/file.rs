@@ -12,7 +12,7 @@ use std::{ffi::CString, os::unix::ffi::OsStrExt, path::Path};
 pub(crate) struct File(i32);
 
 impl File {
-    /// Create a new `[file]` at given `path`
+    /// Creates a new `[File]` at given `Path`
     pub(crate) unsafe fn new(path: &Path) -> InternalResult<Self> {
         let cpath = Self::path_to_cstring(path)?;
 
@@ -24,7 +24,7 @@ impl File {
         Ok(Self(fd))
     }
 
-    /// Open a new `[file]` at given `path`
+    /// Opens an existing `[File]` at given `Path`
     pub(crate) unsafe fn open(path: &Path) -> InternalResult<Self> {
         let cpath = Self::path_to_cstring(path)?;
 
@@ -36,19 +36,19 @@ impl File {
         Ok(Self(fd))
     }
 
-    /// Get file descriptor (fd) of `[file]`
+    /// Gets file descriptor (fd) of `[File]`
     #[inline]
     pub(crate) fn fd(&self) -> i32 {
         self.0
     }
 
-    /// Fetch current length for `[file]`
+    /// Fetches current length for `[File]`
     pub(crate) unsafe fn len(&self) -> InternalResult<usize> {
         let st = self.fstat()?;
         Ok(st.st_size as usize)
     }
 
-    /// Flushes dirty pages to disk for persistence of `[file]`
+    /// Flushes dirty pages to disk for persistence of `[File]`
     pub(crate) unsafe fn fsync(&self) -> InternalResult<()> {
         let res = fsync(self.fd());
         if unlikely(res != 0) {
@@ -58,9 +58,9 @@ impl File {
         Ok(())
     }
 
-    /// Zero extend length for `[file]`
+    /// truncates or extends length for `[File]` w/ zero bytes
     ///
-    /// **WARN:** If `len` is smaller then the current length of the `[file]`,
+    /// **WARN:** If `len` is smaller then the current length of the `[File]`,
     /// file length will be reduced!
     pub(crate) unsafe fn ftruncate(&self, len: usize) -> InternalResult<()> {
         let res = ftruncate(self.fd(), len as off_t);
@@ -71,7 +71,7 @@ impl File {
         Ok(())
     }
 
-    /// Closes the opened `[file]` via fd
+    /// Closes the `[File]` via fd
     pub(crate) unsafe fn close(&self) -> InternalResult<()> {
         let res = close(self.fd());
         if unlikely(res != 0) {
@@ -81,7 +81,7 @@ impl File {
         Ok(())
     }
 
-    /// Syscall to fetch `[stat]` (i.e. Metadata) for `[File]`
+    /// Fetches `[stat]` (i.e. Metadata) via syscall for `[File]`
     unsafe fn fstat(&self) -> InternalResult<stat> {
         let mut st = std::mem::zeroed::<stat>();
         let res = fstat(self.fd(), &mut st);
