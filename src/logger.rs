@@ -2,12 +2,14 @@ use log::{Level, Record};
 
 pub(crate) enum LogCtx {
     Cfg,
+    InvDb,
 }
 
 impl LogCtx {
     fn to_str(&self) -> String {
         match self {
             Self::Cfg => "CFG".into(),
+            Self::InvDb => "INVDB".into(),
         }
     }
 }

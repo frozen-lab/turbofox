@@ -1,11 +1,21 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::unwrap_used)]
+
+mod cfg;
 mod core;
-
-#[allow(unused)]
 mod error;
-
-#[cfg(target_os = "linux")]
-#[allow(unused)]
+mod file;
 mod linux;
+
+#[allow(unused)]
+mod logger;
+
+#[allow(unused)]
+mod engine;
+
+pub use cfg::{TurboConfig, TurboConfigBuilder};
+pub use error::{TurboError, TurboResult};
+pub use logger::TurboLogLevel;
 
 #[derive(Debug)]
 pub struct TurboFox;

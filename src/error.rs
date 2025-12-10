@@ -5,6 +5,7 @@ pub enum TurboError {
     IO(String),
     InvalidPath(String),
     InvalidConfig(String),
+    InvalidDbState(String),
     PermissionDenied(String),
 }
 
@@ -14,6 +15,7 @@ impl From<InternalError> for TurboError {
             InternalError::IO(e) => Self::IO(e),
             InternalError::InvalidPath(e) => Self::InvalidPath(e),
             InternalError::InvalidConfig(e) => Self::InvalidConfig(e),
+            InternalError::InvalidDbState(e) => Self::InvalidDbState(e),
             InternalError::PermissionDenied(e) => Self::PermissionDenied(e),
         }
     }
@@ -26,6 +28,7 @@ pub(crate) enum InternalError {
     IO(String),
     InvalidPath(String),
     InvalidConfig(String),
+    InvalidDbState(String),
     PermissionDenied(String),
 }
 
@@ -41,6 +44,7 @@ impl std::fmt::Display for InternalError {
             Self::IO(msg) => write!(f, "{msg}"),
             Self::InvalidPath(msg) => write!(f, "{msg}"),
             Self::InvalidConfig(msg) => write!(f, "{msg}"),
+            Self::InvalidDbState(msg) => write!(f, "{msg}"),
             Self::PermissionDenied(msg) => write!(f, "{msg}"),
         }
     }

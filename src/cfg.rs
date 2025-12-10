@@ -5,13 +5,15 @@ use crate::{
     TurboResult,
 };
 use std::{
-    fmt::format,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-pub(crate) const DEFAULT_INIT_CAP: usize = 0x400;
-pub(crate) const DEFAULT_PAGE_SIZE: usize = 0x40;
+const DEFAULT_INIT_CAP: usize = 0x400;
+const DEFAULT_PAGE_SIZE: usize = 0x40;
+
+// pub(crate) const CAP_GROWTH_FACTOR: usize = 2; // new_cap = current_cap * 2
+pub(crate) const PAGE_MULT_FACTOR: usize = 4; // total_page_bufs = init_cap * 4
 
 /// Configurations for `[TurboFox]`
 ///
