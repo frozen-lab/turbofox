@@ -5,6 +5,9 @@ use std::path::Path;
 pub(crate) struct TurboFile {
     #[cfg(target_os = "linux")]
     file: crate::linux::File,
+
+    #[cfg(target_os = "linux")]
+    iouring: crate::linux::IOUring,
 }
 
 impl TurboFile {
@@ -13,7 +16,8 @@ impl TurboFile {
         #[cfg(target_os = "linux")]
         unsafe {
             let file = crate::linux::File::new(path)?;
-            return Ok(Self { file });
+            let iouring = crate::linux::IOUring::new(file.fd())?;
+            return Ok(Self { file, iouring });
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -25,7 +29,8 @@ impl TurboFile {
         #[cfg(target_os = "linux")]
         unsafe {
             let file = crate::linux::File::open(path)?;
-            return Ok(Self { file });
+            let iouring = crate::linux::IOUring::new(file.fd())?;
+            return Ok(Self { file, iouring });
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -83,7 +88,6 @@ impl TurboFile {
     ///
     /// **WARN:** We must only use this for cleanup of incorrectly initialized `[TurboFile]`'s.
     /// As this will end up cleaning all the data from disk, which may result in data loss!
-    #[allow(unused)]
     pub(crate) fn delete(&self, path: &Path) -> InternalResult<()> {
         // sanity check
         if unlikely(!path.exists()) {
@@ -91,5 +95,11 @@ impl TurboFile {
         }
 
         std::fs::remove_file(path).map_err(|e| e.into())
+    }
+
+    /// Close and then Delete `[TurboFile]` from disk
+    pub(crate) fn close_delete(&self, path: &Path) -> InternalResult<()> {
+        self.close()?;
+        self.delete(path)
     }
 }

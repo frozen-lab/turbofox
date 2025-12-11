@@ -1,6 +1,9 @@
 use super::MMap;
-use crate::error::{InternalError, InternalResult};
-use libc::{c_int, c_uint, c_ulong, off_t, syscall, SYS_io_uring_register, SYS_io_uring_setup};
+use crate::{
+    core::unlikely,
+    error::{InternalError, InternalResult},
+};
+use libc::{c_int, c_uint, c_ulong, close, off_t, syscall, SYS_io_uring_register, SYS_io_uring_setup};
 
 const IOURING_FEAT_SINGLE_MMAP: u32 = 0x01;
 
@@ -134,8 +137,13 @@ struct RingPtrs {
 
 impl RingPtrs {
     unsafe fn munmap(&self) -> InternalResult<()> {
+        let sq_base = self.sq_ptr.ptr();
+        let cq_base = self.cq_ptr.ptr();
+
         self.sq_ptr.m_unmap()?;
-        self.cq_ptr.m_unmap()?;
+        if sq_base != cq_base {
+            self.cq_ptr.m_unmap()?;
+        }
         self.sqes_ptr.m_unmap()
     }
 }
@@ -155,6 +163,7 @@ impl IOUring {
             // As we are already in an errored state, we must ignore this error
             // as the preceeding error is more important
             let _ = rings.munmap();
+            let _ = Self::close(ring_fd);
             e
         })?;
 
@@ -173,6 +182,16 @@ impl IOUring {
             rings,
             params,
         })
+    }
+
+    /// Closes the `[File]` via fd
+    pub(crate) unsafe fn close(ring_fd: i32) -> InternalResult<()> {
+        let res = close(ring_fd);
+        if unlikely(res != 0) {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        Ok(())
     }
 
     unsafe fn iouring_init(params: &mut IOUringParams) -> InternalResult<i32> {

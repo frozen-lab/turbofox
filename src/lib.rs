@@ -6,8 +6,6 @@ mod core;
 mod error;
 mod file;
 mod linux;
-
-#[allow(unused)]
 mod logger;
 
 #[allow(unused)]

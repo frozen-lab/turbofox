@@ -7,6 +7,7 @@ pub enum TurboError {
     InvalidConfig(String),
     InvalidDbState(String),
     PermissionDenied(String),
+    UnsupportedVersion(String),
 }
 
 impl From<InternalError> for TurboError {
@@ -17,6 +18,7 @@ impl From<InternalError> for TurboError {
             InternalError::InvalidConfig(e) => Self::InvalidConfig(e),
             InternalError::InvalidDbState(e) => Self::InvalidDbState(e),
             InternalError::PermissionDenied(e) => Self::PermissionDenied(e),
+            InternalError::UnsupportedVersion(e) => Self::UnsupportedVersion(e),
         }
     }
 }
@@ -30,6 +32,7 @@ pub(crate) enum InternalError {
     InvalidConfig(String),
     InvalidDbState(String),
     PermissionDenied(String),
+    UnsupportedVersion(String),
 }
 
 impl From<std::io::Error> for InternalError {
@@ -46,6 +49,7 @@ impl std::fmt::Display for InternalError {
             Self::InvalidConfig(msg) => write!(f, "{msg}"),
             Self::InvalidDbState(msg) => write!(f, "{msg}"),
             Self::PermissionDenied(msg) => write!(f, "{msg}"),
+            Self::UnsupportedVersion(msg) => write!(f, "{msg}"),
         }
     }
 }

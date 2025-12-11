@@ -3,13 +3,15 @@ use log::{Level, Record};
 pub(crate) enum LogCtx {
     Cfg,
     InvDb,
+    Cache,
 }
 
 impl LogCtx {
     fn to_str(&self) -> String {
         match self {
-            Self::Cfg => "CFG".into(),
-            Self::InvDb => "INVDB".into(),
+            Self::Cfg => "CFGC".into(),
+            Self::InvDb => "INDB".into(),
+            Self::Cache => "CCHE".into(),
         }
     }
 }
