@@ -284,7 +284,6 @@ impl IOUring {
     pub(crate) unsafe fn read(&self, off: u64, len: usize) -> InternalResult<Arc<Vec<u8>>> {
         let buf = Arc::new(vec![0u8; len]);
         let state = Arc::new((Mutex::new(None), Condvar::new()));
-
         let pending = Box::new(PendingRead {
             iov: iovec {
                 iov_base: buf.as_ptr() as *mut c_void,
@@ -297,6 +296,9 @@ impl IOUring {
         let pending_ptr = Box::into_raw(pending) as u64;
         let (tail, idx) = self.next_sqe_index();
 
+        //
+        // prep for readv
+        //
         let sqe = (self.rings.sqes_ptr.ptr_mut() as *mut IOUringSQE).add(idx as usize);
         std::ptr::write_bytes(sqe as *mut u8, 0, IOURING_SQE_SIZE);
 
@@ -307,6 +309,9 @@ impl IOUring {
         (*sqe).off = SQEOffUnion { off };
         (*sqe).user_data = (pending_ptr & TAG_MASK) | TAG_READ;
 
+        //
+        // push into SQE
+        //
         let sq_array = self.sq_array_ptr();
         let mask = self.sq_mask();
         std::ptr::write_volatile(sq_array.add((tail & mask) as usize), idx);
@@ -314,24 +319,39 @@ impl IOUring {
         std::sync::atomic::fence(Ordering::Release);
         std::ptr::write_volatile(self.sq_tail_ptr(), tail + 1);
 
+        //
+        // io_uring submit
+        //
         if syscall(SYS_io_uring_enter, self.ring_fd, 1, 0, 0, std::ptr::null::<sigset_t>()) < 0 {
             let _ = Box::from_raw(pending_ptr as *mut PendingRead);
             return Self::last_os_error();
         }
 
-        // ---- BLOCK HERE ----
+        //
+        // wait for completion
+        //
         let (lock, cv) = &*state;
-        let mut guard = lock.lock().unwrap();
+        let mut guard = match lock.lock() {
+            Ok(g) => g,
+            Err(e) => return Err(e.into()),
+        };
+
         while guard.is_none() {
-            guard = cv.wait(guard).unwrap();
+            guard = match cv.wait(guard) {
+                Ok(g) => g,
+                Err(e) => return Err(e.into()),
+            };
         }
 
-        let res = guard.take().unwrap();
-        if res < 0 {
-            return Err(std::io::Error::from_raw_os_error(-res).into());
+        if let Some(res) = guard.take() {
+            if res < 0 {
+                return Err(std::io::Error::from_raw_os_error(-res).into());
+            }
+
+            return Ok(buf);
         }
 
-        Ok(buf)
+        Err(InternalError::IO("IOUring error! Unable to read from DB".into()))
     }
 
     unsafe fn spawn_cq_poller_tx(params: &IOUringParams, rings: &RingPtrs) -> (JoinHandle<()>, Arc<AtomicBool>) {
@@ -397,11 +417,22 @@ impl IOUring {
                             let pending = Box::from_raw(ptr as *mut PendingRead);
                             let (lock, cv) = &*pending.state;
 
-                            if let Ok(mut guard) = lock.lock() {
-                                *guard = Some(cqe.res);
-                                cv.notify_one();
-                            } else {
-                                eprintln!("ERROR: Unable to obtain lock on PendingRead");
+                            // we try to obtain lock few times, before giving up
+                            for _ in 0..0x0A {
+                                match lock.try_lock() {
+                                    Ok(mut guard) => {
+                                        *guard = Some(cqe.res);
+                                        cv.notify_one();
+                                    }
+                                    Err(std::sync::TryLockError::WouldBlock) => {
+                                        // wait a bit to be able to try again
+                                        std::thread::sleep(std::time::Duration::from_micros(0x0A));
+                                    }
+                                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                                        eprintln!("ERROR: PendingRead lock poisoned");
+                                        break;
+                                    }
+                                }
                             }
                         }
                         _ => unreachable!("Invalid tag"),

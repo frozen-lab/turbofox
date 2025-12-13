@@ -4,6 +4,7 @@ pub type TurboResult<T> = Result<T, TurboError>;
 pub enum TurboError {
     IO(String),
     InvalidPath(String),
+    LockPoisoned(String),
     InvalidConfig(String),
     InvalidDbState(String),
     PermissionDenied(String),
@@ -15,6 +16,7 @@ impl From<InternalError> for TurboError {
         match err {
             InternalError::IO(e) => Self::IO(e),
             InternalError::InvalidPath(e) => Self::InvalidPath(e),
+            InternalError::LockPoisoned(e) => Self::LockPoisoned(e),
             InternalError::InvalidConfig(e) => Self::InvalidConfig(e),
             InternalError::InvalidDbState(e) => Self::InvalidDbState(e),
             InternalError::PermissionDenied(e) => Self::PermissionDenied(e),
@@ -29,6 +31,7 @@ pub(crate) type InternalResult<T> = Result<T, InternalError>;
 pub(crate) enum InternalError {
     IO(String),
     InvalidPath(String),
+    LockPoisoned(String),
     InvalidConfig(String),
     InvalidDbState(String),
     PermissionDenied(String),
@@ -41,11 +44,18 @@ impl From<std::io::Error> for InternalError {
     }
 }
 
+impl<T> From<std::sync::PoisonError<T>> for InternalError {
+    fn from(e: std::sync::PoisonError<T>) -> Self {
+        InternalError::LockPoisoned(e.to_string())
+    }
+}
+
 impl std::fmt::Display for InternalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IO(msg) => write!(f, "{msg}"),
             Self::InvalidPath(msg) => write!(f, "{msg}"),
+            Self::LockPoisoned(msg) => write!(f, "{msg}"),
             Self::InvalidConfig(msg) => write!(f, "{msg}"),
             Self::InvalidDbState(msg) => write!(f, "{msg}"),
             Self::PermissionDenied(msg) => write!(f, "{msg}"),
