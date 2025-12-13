@@ -94,6 +94,14 @@ impl Cache {
             cfg: cfg.clone(),
         })
     }
+
+    pub(super) fn write(&self) -> InternalResult<()> {
+        self.file.write()
+    }
+
+    pub(super) fn read(&self) -> InternalResult<()> {
+        self.file.read()
+    }
 }
 
 impl Drop for Cache {

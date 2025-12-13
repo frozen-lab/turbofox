@@ -102,4 +102,14 @@ impl TurboFile {
         self.close()?;
         self.delete(path)
     }
+
+    pub(crate) fn write(&self) -> InternalResult<()> {
+        unsafe { self.iouring.write(&[0, 1, 2], 0) }?;
+        Ok(())
+    }
+
+    pub(crate) fn read(&self) -> InternalResult<()> {
+        unsafe { self.iouring.read(0, 128) }?;
+        Ok(())
+    }
 }
