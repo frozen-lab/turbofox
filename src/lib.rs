@@ -5,8 +5,10 @@ mod cfg;
 mod core;
 mod error;
 mod file;
-mod linux;
 mod logger;
+
+#[allow(unused)]
+mod linux;
 
 #[allow(unused)]
 mod engine;

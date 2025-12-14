@@ -20,7 +20,7 @@ impl Cache {
         let n_pages = cfg.init_cap * PAGE_MULT_FACTOR;
         let file_len = n_pages * cfg.page_size;
 
-        let file = TurboFile::new(&path).map_err(|e| {
+        let mut file = TurboFile::new(&path).map_err(|e| {
             cfg.logger
                 .error(LogCtx::Cache, format!("Failed to create file due to err: {e}"));
             e

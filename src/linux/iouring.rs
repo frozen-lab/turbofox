@@ -28,7 +28,7 @@ pub(crate) struct IOUring {
     file_fd: i32,
     rings: RingPtrs,
     params: IOUringParams,
-    cq_poll_tx: JoinHandle<()>,
+    cq_poll_tx: Option<JoinHandle<()>>,
     cq_poll_shutdown_flag: Arc<AtomicBool>,
 }
 
@@ -201,7 +201,7 @@ impl IOUring {
             file_fd,
             rings,
             params,
-            cq_poll_tx,
+            cq_poll_tx: Some(cq_poll_tx),
             cq_poll_shutdown_flag,
         })
     }
@@ -281,7 +281,7 @@ impl IOUring {
         Ok(())
     }
 
-    pub(crate) unsafe fn read(&self, off: u64, len: usize) -> InternalResult<Arc<Vec<u8>>> {
+    pub(crate) unsafe fn read(&self, off: u64, len: usize) -> InternalResult<Vec<u8>> {
         let buf = Arc::new(vec![0u8; len]);
         let state = Arc::new((Mutex::new(None), Condvar::new()));
         let pending = Box::new(PendingRead {
@@ -348,10 +348,31 @@ impl IOUring {
                 return Err(std::io::Error::from_raw_os_error(-res).into());
             }
 
-            return Ok(buf);
+            return match Arc::try_unwrap(buf) {
+                Ok(v) => Ok(v),
+                Err(_) => Err(InternalError::InvalidDbState(
+                    "read buffer still has outstanding references".into(),
+                )),
+            };
         }
 
         Err(InternalError::IO("IOUring error! Unable to read from DB".into()))
+    }
+
+    pub(crate) unsafe fn drop(&mut self) {
+        // TODO:
+        // We must drain the CQ before dropping, otherwise there will be
+        // memory leaks for iovecs, which is horrible 🥹💀
+
+        // stop polling thread
+        if let Some(tx) = self.cq_poll_tx.take() {
+            self.cq_poll_shutdown_flag.store(true, Ordering::Release);
+            tx.thread().unpark();
+            let _ = tx.join();
+        }
+
+        let _ = self.rings.munmap();
+        let _ = Self::close(self.ring_fd);
     }
 
     unsafe fn spawn_cq_poller_tx(params: &IOUringParams, rings: &RingPtrs) -> (JoinHandle<()>, Arc<AtomicBool>) {
@@ -423,6 +444,7 @@ impl IOUring {
                                     Ok(mut guard) => {
                                         *guard = Some(cqe.res);
                                         cv.notify_one();
+                                        break;
                                     }
                                     Err(std::sync::TryLockError::WouldBlock) => {
                                         // wait a bit to be able to try again
@@ -437,9 +459,6 @@ impl IOUring {
                         }
                         _ => unreachable!("Invalid tag"),
                     }
-
-                    let pending_ptr = cqe.user_data as *mut PendingWrite;
-                    if !pending_ptr.is_null() {}
                 }
 
                 // advance CQ head
@@ -570,5 +589,56 @@ impl IOUring {
     #[inline]
     fn last_os_error<T>() -> InternalResult<T> {
         Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linux::File;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_init_works_correctly() {
+        unsafe {
+            let dir = TempDir::new().expect("new temp dir");
+            let path = dir.path().join("tmp.bin");
+
+            let file = File::new(&path).expect("new file");
+            let iouring = IOUring::new(file.fd()).expect("init works");
+
+            assert!(iouring.ring_fd >= 0, "Ring fd must be non-negative");
+            assert!(iouring.file_fd >= 0, "File fd must be non-negative");
+
+            assert!(iouring.params.sq_off.array != 0);
+            assert!(iouring.params.cq_off.cqes != 0);
+
+            assert!(!iouring.rings.sq_ptr.ptr().is_null());
+            assert!(!iouring.rings.cq_ptr.ptr().is_null());
+            assert!(!iouring.rings.sqes_ptr.ptr().is_null());
+
+            assert!(iouring.cq_poll_tx.is_some());
+            assert!(iouring.cq_poll_shutdown_flag.load(Ordering::Relaxed) == false);
+        }
+    }
+
+    #[test]
+    fn test_write_read_cycle() {
+        unsafe {
+            let dir = TempDir::new().expect("new temp dir");
+            let path = dir.path().join("tmp.bin");
+
+            let file = File::new(&path).expect("new file");
+            let iouring = IOUring::new(file.fd()).expect("init works");
+
+            let dummy_data = "Dummy Data to write w/ fsync".as_bytes();
+            assert!(iouring.write(dummy_data, 0).is_ok(), "Write should not fail");
+
+            std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
+
+            let buf = iouring.read(0, dummy_data.len());
+            assert!(buf.is_ok(), "Read should not fail");
+            assert_eq!(&buf.unwrap(), dummy_data);
+        }
     }
 }

@@ -74,9 +74,10 @@ impl TurboFile {
     }
 
     /// Closes the `[TurboFile]`
-    pub(crate) fn close(&self) -> InternalResult<()> {
+    pub(crate) fn close(&mut self) -> InternalResult<()> {
         #[cfg(target_os = "linux")]
         unsafe {
+            self.iouring.drop();
             return self.file.close();
         }
 
@@ -98,7 +99,7 @@ impl TurboFile {
     }
 
     /// Close and then Delete `[TurboFile]` from disk
-    pub(crate) fn close_delete(&self, path: &Path) -> InternalResult<()> {
+    pub(crate) fn close_delete(&mut self, path: &Path) -> InternalResult<()> {
         self.close()?;
         self.delete(path)
     }
