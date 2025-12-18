@@ -10,6 +10,28 @@ pub(crate) struct TurboFile {
     iouring: crate::linux::IOUring,
 }
 
+#[derive(Debug)]
+pub(crate) struct TurboBuf {
+    ptr: *mut u8,
+    idx: u16,
+}
+
+impl TurboBuf {
+    pub(crate) fn new(ptr: *mut u8, idx: u16) -> Self {
+        Self { ptr, idx }
+    }
+
+    #[inline]
+    pub(crate) const fn to_ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+
+    #[inline]
+    pub(crate) const fn idx(&self) -> u16 {
+        self.idx
+    }
+}
+
 impl TurboFile {
     /// Creates a new `[TurboFile]` at given `Path`
     pub(crate) fn new(path: &Path) -> InternalResult<Self> {
@@ -105,7 +127,16 @@ impl TurboFile {
     }
 
     pub(crate) fn write(&self) -> InternalResult<()> {
-        unsafe { self.iouring.write(&[0, 1, 2], 0) }?;
+        const BUFFER: [u8; 3] = [0, 1, 2];
+        unsafe {
+            self.iouring.write(
+                TurboBuf {
+                    ptr: BUFFER.as_ptr() as *mut u8,
+                    idx: 0,
+                },
+                0,
+            )
+        }?;
         Ok(())
     }
 

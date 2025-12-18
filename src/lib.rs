@@ -5,9 +5,11 @@ mod cfg;
 mod core;
 mod error;
 mod file;
+
+// #[allow(unused)]
 mod logger;
 
-#[allow(unused)]
+// #[allow(unused)]
 mod linux;
 
 #[allow(unused)]

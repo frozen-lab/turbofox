@@ -2,15 +2,26 @@ use log::{Level, Record};
 
 pub(crate) enum LogCtx {
     Cfg,
+    Iou,
     InvDb,
     Cache,
 }
 
 impl LogCtx {
-    fn to_str(&self) -> String {
+    fn to_ok(&self) -> String {
         match self {
-            Self::Cfg => "CFGC".into(),
-            Self::InvDb => "INDB".into(),
+            Self::Cfg => "CFGO".into(),
+            Self::Iou => "IOUO".into(),
+            Self::InvDb => "IDBO".into(),
+            Self::Cache => "CCHO".into(),
+        }
+    }
+
+    fn to_err(&self) -> String {
+        match self {
+            Self::Cfg => "CFGE".into(),
+            Self::Iou => "IOUE".into(),
+            Self::InvDb => "IDBE".into(),
             Self::Cache => "CCHE".into(),
         }
     }
@@ -39,22 +50,22 @@ const TARGET: &'static str = "TurboFox";
 impl Logger {
     #[inline]
     pub(crate) fn trace(&self, ctx: LogCtx, args: impl std::fmt::Display) {
-        self.log(Level::Trace, format_args!("({}){args}", ctx.to_str()));
+        self.log(Level::Trace, format_args!("({}){args}", ctx.to_ok()));
     }
 
     #[inline]
     pub(crate) fn info(&self, ctx: LogCtx, args: impl std::fmt::Display) {
-        self.log(Level::Info, format_args!("({}){args}", ctx.to_str()));
+        self.log(Level::Info, format_args!("({}){args}", ctx.to_ok()));
     }
 
     #[inline]
     pub(crate) fn warn(&self, ctx: LogCtx, args: impl std::fmt::Display) {
-        self.log(Level::Warn, format_args!("({}){args}", ctx.to_str()));
+        self.log(Level::Warn, format_args!("({}){args}", ctx.to_err()));
     }
 
     #[inline]
     pub(crate) fn error(&self, ctx: LogCtx, args: impl std::fmt::Display) {
-        self.log(Level::Error, format_args!("({}){args}", ctx.to_str()));
+        self.log(Level::Error, format_args!("({}){args}", ctx.to_err()));
     }
 
     #[inline]

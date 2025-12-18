@@ -2,10 +2,11 @@ use super::MMap;
 use crate::{
     core::unlikely,
     error::{InternalError, InternalResult},
+    file::TurboBuf,
 };
 use libc::{c_int, c_void, close, iovec, off_t, sigset_t, syscall, SYS_io_uring_enter, SYS_io_uring_setup};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc, Condvar, Mutex,
 };
 use std::thread::{self, JoinHandle};
@@ -28,6 +29,7 @@ pub(crate) struct IOUring {
     file_fd: i32,
     rings: RingPtrs,
     params: IOUringParams,
+    in_flight: Arc<AtomicU32>,
     cq_poll_tx: Option<JoinHandle<()>>,
     cq_poll_shutdown_flag: Arc<AtomicBool>,
 }
@@ -35,7 +37,7 @@ pub(crate) struct IOUring {
 #[repr(C)]
 struct PendingWrite {
     iov: iovec,
-    _buf: Arc<Vec<u8>>,
+    buf: Arc<TurboBuf>,
 }
 
 #[repr(C)]
@@ -194,15 +196,16 @@ impl IOUring {
             );
         }
 
-        let (cq_poll_tx, cq_poll_shutdown_flag) = Self::spawn_cq_poller_tx(&params, &rings);
+        let (cq_poll_tx, cq_poll_shutdown_flag, in_flight) = Self::spawn_cq_poller_tx(&params, &rings);
 
         Ok(Self {
             ring_fd,
             file_fd,
             rings,
             params,
-            cq_poll_tx: Some(cq_poll_tx),
+            in_flight,
             cq_poll_shutdown_flag,
+            cq_poll_tx: Some(cq_poll_tx),
         })
     }
 
@@ -216,14 +219,17 @@ impl IOUring {
         Ok(())
     }
 
-    pub(crate) unsafe fn write(&self, buf: &[u8], off: u64) -> InternalResult<()> {
-        let buf = Arc::new(buf.to_vec());
+    pub(crate) unsafe fn write(&self, buf: TurboBuf, off: u64) -> InternalResult<()> {
+        if unlikely(self.cq_poll_shutdown_flag.load(Ordering::Acquire)) {
+            return Err(InternalError::IO("IOUring shutting down".into()));
+        }
+
         let pending = Box::new(PendingWrite {
-            _buf: buf.clone(),
             iov: iovec {
-                iov_base: buf.as_ptr() as *mut c_void,
-                iov_len: buf.len(),
+                iov_base: buf.to_ptr() as *mut c_void,
+                iov_len: 3,
             },
+            buf: Arc::new(buf),
         });
 
         let pending_ptr = Box::into_raw(pending) as u64;
@@ -271,9 +277,9 @@ impl IOUring {
         //
         // io_uring submit
         //
+        self.in_flight.fetch_add(1, Ordering::Release);
         if syscall(SYS_io_uring_enter, self.ring_fd, 2, 0, 0, std::ptr::null::<sigset_t>()) < 0 {
-            // NOTE:
-            // If submission fails we restore ownership of iov to avoid leak
+            self.in_flight.fetch_sub(1, Ordering::Release);
             let _ = Box::from_raw(pending_ptr as *mut PendingWrite);
             return Self::last_os_error();
         }
@@ -282,6 +288,10 @@ impl IOUring {
     }
 
     pub(crate) unsafe fn read(&self, off: u64, len: usize) -> InternalResult<Vec<u8>> {
+        if unlikely(self.cq_poll_shutdown_flag.load(Ordering::Acquire)) {
+            return Err(InternalError::IO("IOUring shutting down".into()));
+        }
+
         let buf = Arc::new(vec![0u8; len]);
         let state = Arc::new((Mutex::new(None), Condvar::new()));
         let pending = Box::new(PendingRead {
@@ -322,7 +332,9 @@ impl IOUring {
         //
         // io_uring submit
         //
+        self.in_flight.fetch_add(1, Ordering::Release);
         if syscall(SYS_io_uring_enter, self.ring_fd, 1, 0, 0, std::ptr::null::<sigset_t>()) < 0 {
+            self.in_flight.fetch_sub(1, Ordering::Release);
             let _ = Box::from_raw(pending_ptr as *mut PendingRead);
             return Self::last_os_error();
         }
@@ -360,13 +372,10 @@ impl IOUring {
     }
 
     pub(crate) unsafe fn drop(&mut self) {
-        // TODO:
-        // We must drain the CQ before dropping, otherwise there will be
-        // memory leaks for iovecs, which is horrible 🥹💀
+        self.cq_poll_shutdown_flag.store(true, Ordering::Release);
 
         // stop polling thread
         if let Some(tx) = self.cq_poll_tx.take() {
-            self.cq_poll_shutdown_flag.store(true, Ordering::Release);
             tx.thread().unpark();
             let _ = tx.join();
         }
@@ -375,9 +384,15 @@ impl IOUring {
         let _ = Self::close(self.ring_fd);
     }
 
-    unsafe fn spawn_cq_poller_tx(params: &IOUringParams, rings: &RingPtrs) -> (JoinHandle<()>, Arc<AtomicBool>) {
+    unsafe fn spawn_cq_poller_tx(
+        params: &IOUringParams,
+        rings: &RingPtrs,
+    ) -> (JoinHandle<()>, Arc<AtomicBool>, Arc<AtomicU32>) {
         let shutdown = Arc::new(AtomicBool::new(false));
+        let in_flight = Arc::new(AtomicU32::new(0));
+
         let shutdown_clone = shutdown.clone();
+        let in_flight_clone = in_flight.clone();
 
         let cq_head_addr = rings.cq_ptr.ptr_mut().add(params.cq_off.head as usize) as usize;
         let cq_tail_addr = rings.cq_ptr.ptr_mut().add(params.cq_off.tail as usize) as usize;
@@ -395,7 +410,7 @@ impl IOUring {
 
                 if head == tail {
                     // check shutdown
-                    if shutdown_clone.load(Ordering::Acquire) {
+                    if shutdown_clone.load(Ordering::Acquire) && in_flight_clone.load(Ordering::Acquire) == 0 {
                         break;
                     }
 
@@ -409,7 +424,21 @@ impl IOUring {
                 let idx = head & cq_mask;
                 let cqe = core::ptr::read_volatile(cqes_ptr.add(idx as usize));
 
-                if cqe.user_data != IOURING_FYSNC_USER_DATA {
+                // NOTE:
+                // we decr `in_flight` ops for both READ and WRITE!
+                // For WRITE we free after `fsync` and for READ after `read` as there is no
+                // fsync for reads!
+
+                if cqe.user_data == IOURING_FYSNC_USER_DATA {
+                    if cqe.res < 0 {
+                        // NOTE:
+                        // this states fsync has failed, we must reschedule the fsync to ensure
+                        // durability of the data
+                        eprintln!("ERROR: fsync failed: {}", std::io::Error::from_raw_os_error(-cqe.res));
+                    }
+
+                    in_flight_clone.fetch_sub(1, Ordering::Release);
+                } else {
                     let tag = cqe.user_data & !TAG_MASK;
                     let ptr = (cqe.user_data & TAG_MASK) as *mut c_void;
 
@@ -421,13 +450,16 @@ impl IOUring {
                                 let err = std::io::Error::from_raw_os_error(-cqe.res);
                                 eprintln!("ERROR: {err} for cqe={:?}", cqe);
 
-                            // TODO:
-                            // this states the syscall failed, for durability, we either must retry (reschedule the write)
-                            // or esclate the error to the user!
+                                // TODO:
+                                // this states the syscall failed, for durability, we either must retry (reschedule the write)
+                                // or esclate the error to the user!
                             } else {
-                                if (cqe.res as usize) != pending._buf.len() {
+                                if cqe.res != 3 {
                                     eprintln!("ERROR: Partial write on cqe={:?}", cqe);
                                 }
+
+                                let idx_to_free = pending.buf.idx();
+                                println!("Freeup => {idx_to_free}");
 
                                 // TODO:
                                 // this states partial write, which is bad for accuracy, we must schedule the write
@@ -436,6 +468,8 @@ impl IOUring {
                         }
                         TAG_READ => {
                             let pending = Box::from_raw(ptr as *mut PendingRead);
+                            in_flight_clone.fetch_sub(1, Ordering::Release);
+
                             let (lock, cv) = &*pending.state;
 
                             // we try to obtain lock few times, before giving up
@@ -466,7 +500,7 @@ impl IOUring {
             }
         });
 
-        (handle, shutdown)
+        (handle, shutdown, in_flight)
     }
 
     unsafe fn iouring_init(params: &mut IOUringParams) -> InternalResult<i32> {
@@ -605,7 +639,7 @@ mod tests {
             let path = dir.path().join("tmp.bin");
 
             let file = File::new(&path).expect("new file");
-            let iouring = IOUring::new(file.fd()).expect("init works");
+            let mut iouring = IOUring::new(file.fd()).expect("init works");
 
             assert!(iouring.ring_fd >= 0, "Ring fd must be non-negative");
             assert!(iouring.file_fd >= 0, "File fd must be non-negative");
@@ -619,6 +653,8 @@ mod tests {
 
             assert!(iouring.cq_poll_tx.is_some());
             assert!(iouring.cq_poll_shutdown_flag.load(Ordering::Relaxed) == false);
+
+            iouring.drop();
         }
     }
 
@@ -629,16 +665,18 @@ mod tests {
             let path = dir.path().join("tmp.bin");
 
             let file = File::new(&path).expect("new file");
-            let iouring = IOUring::new(file.fd()).expect("init works");
+            let mut iouring = IOUring::new(file.fd()).expect("init works");
 
-            let dummy_data = "Dummy Data to write w/ fsync".as_bytes();
-            assert!(iouring.write(dummy_data, 0).is_ok(), "Write should not fail");
-
+            let dummy_data: Vec<u8> = vec![0, 1, 2];
+            let buf = TurboBuf::new(dummy_data.as_ptr() as *mut u8, 0);
+            assert!(iouring.write(buf, 0).is_ok(), "Write should not fail");
             std::thread::sleep(std::time::Duration::from_millis(1)); // manual sleep so write could be finished
 
             let buf = iouring.read(0, dummy_data.len());
             assert!(buf.is_ok(), "Read should not fail");
-            assert_eq!(&buf.unwrap(), dummy_data);
+            assert_eq!(buf.unwrap(), dummy_data);
+
+            iouring.drop();
         }
     }
 }
