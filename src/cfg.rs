@@ -1,326 +1,188 @@
 use crate::{
-    core::is_pow_of_2,
-    error::{InternalError, InternalResult},
-    logger::{LogCtx, Logger, TurboLogLevel},
-    TurboResult,
+    error::{TurboError, TurboResult},
+    logger::Logger,
+    utils::{is_pow_of_2, prep_directory, unlikely},
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 const DEFAULT_INIT_CAP: usize = 0x400;
-const DEFAULT_PAGE_SIZE: usize = 0x40;
+const DEFAULT_GROWTH_FACTOR: usize = 2;
 
-// pub(crate) const CAP_GROWTH_FACTOR: usize = 2; // new_cap = current_cap * 2
-pub(crate) const PAGE_MULT_FACTOR: usize = 4; // total_page_bufs = init_cap * 4
+pub(crate) const DEFAULT_BUF_SIZE: usize = 0x40;
+pub(crate) const MAX_KEY_SIZE: usize = 0x40;
 
-/// Configurations for `[TurboFox]`
+/// Logging verbosity levels for [TurboConfig]
 ///
-/// `TurboConfig` defines all the tuneable behaviour for the `[TurboFox]` database.
+/// Log levels are **ordered by verbosity**, where higher levels include
+/// all logs from lower levels
 ///
-/// ## Defaults
+/// ## Order
 ///
-/// - `init_cap`: *1024 entries*
-/// - `page_size`: *64 bytes*  
+/// ```txt
+/// ERROR < WARN < INFO < TRACE
+/// ```
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+pub enum TurboLogLevel {
+    /// Allows **only critical errors** to be logged
+    ERROR = 0x00,
+
+    /// Allows **warnings and errors** to be logged
+    WARN = 0x01,
+
+    /// Allows **informational messages, warnings and errors** to be logged
+    INFO = 0x02,
+
+    /// Allows **all events** to be logged
+    ///
+    /// ## NOTE
+    ///
+    /// This level emits logs for nearly every database action and is intended
+    /// **strictly for debugging and development**
+    ///
+    /// ## WARNING
+    ///
+    /// Using this level in production can _significantly impact performance and generate
+    /// large log volumes_
+    TRACE = 0x03,
+}
+
+/// Configurations for [TurboFox] database
+///
+/// `TurboConfig` defines all the tuneable behaviour for the `TurboFox`
+///
+/// ## Default Config
+///
 /// - `logging`: *disabled*
+/// - `init_cap`: *1024 entries*
+/// - `growth_factor`: *2x*
 ///
 /// ## Directory
 ///
-/// The directory at `dirpath` **is created if not already**. When it already exists, it is reused.
+/// The directory at provided `dirpath` **is created if not already**
 ///
-/// **⚠️ WARN:** The directory *must be empty* to avoid accidental damage of pre-existent files.
+/// In case it already exists, it is reused
 ///
-/// ## Example
-///
-/// ```
-/// use turbofox::{TurboConfig, TurboLogLevel};
-///
-/// let cfg = TurboConfig::new("/tmp/test_data/turbodb")
-///     .init_cap(0x400)
-///     .page_size(0x80)
-///     .log_level(TurboLogLevel::INFO)
-///     .enable_logging()
-///     .build()
-///     .expect("valid config for TurboFox");
-/// ```
+/// **⚠️ WARN:** The directory *must be empty* to avoid accidental damage of pre-existing files
 #[derive(Debug, Clone)]
 pub struct TurboConfig {
-    pub(crate) init_cap: usize,
-    pub(crate) page_size: usize,
-    pub(crate) logger: Arc<Logger>,
-    pub(crate) dirpath: Arc<PathBuf>,
+    dirpath: PathBuf,
+    logger: Logger,
+    init_cap: usize,
+    growth_factor: usize,
 }
+
+// sanity check
+const _: () = assert!(std::mem::size_of::<TurboConfig>() == 0x40);
 
 impl TurboConfig {
-    /// Build a new [`TurboConfig`] using the provided directory path.
+    /// Builds a new [TurboConfig] using provided `dirpath`
     ///
-    /// Returns a [`TurboConfigBuilder`] which exposes the builder API for config tuning.
+    /// ## Directory
     ///
-    /// ## Example
+    /// The directory at provided `dirpath` **is created if not already**
+    ///
+    /// In case it already exists, it is reused
+    ///
+    /// **⚠️ WARN:** The directory *must be empty* to avoid accidental damage of pre-existing files
+    ///
+    /// ## Default Config
+    ///
+    /// - `logging`: *disabled*
+    /// - `init_cap`: *1024 entries*
+    /// - `buf_size`: *64 bytes*
+    /// - `max_key_len`: *64 bytes*
+    /// - `growth_factor`: *2x*
+    ///
+    /// # Example
     ///
     /// ```
     /// use turbofox::TurboConfig;
     ///
-    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb").build().expect("valid config");
+    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb");
+    /// assert!(cfg.is_ok());
     /// ```
-    pub fn new<P: AsRef<Path>>(dirpath: P) -> TurboConfigBuilder {
-        TurboConfigBuilder {
+    pub fn new<P: AsRef<Path>>(dirpath: P) -> TurboResult<Self> {
+        let logger = Logger::default();
+        let dirpath = dirpath.as_ref().to_path_buf();
+
+        prep_directory(&dirpath, &logger)?;
+
+        Ok(Self {
+            logger,
+            dirpath,
+            growth_factor: DEFAULT_GROWTH_FACTOR,
             init_cap: DEFAULT_INIT_CAP,
-            page_size: DEFAULT_PAGE_SIZE,
-            dirpath: Arc::new(dirpath.as_ref().into()),
-            logger: Arc::new(Logger::default()),
-            error: None,
-        }
-    }
-}
-
-/// Builder for constructing a [`TurboConfig`].
-///
-/// ## Example
-///
-/// ```
-/// use turbofox::{TurboConfig, TurboLogLevel};
-///
-/// let cfg = TurboConfig::new("/tmp/test_data/turbodb")
-///     .init_cap(0x400)
-///     .page_size(0x80)
-///     .log_level(TurboLogLevel::INFO)
-///     .enable_logging()
-///     .build();
-/// assert!(cfg.is_ok());
-/// ```
-#[derive(Debug)]
-pub struct TurboConfigBuilder {
-    init_cap: usize,
-    page_size: usize,
-    dirpath: Arc<PathBuf>,
-    logger: Arc<Logger>,
-    error: Option<InternalError>,
-}
-
-impl TurboConfigBuilder {
-    fn push_err(&mut self, err: InternalError) {
-        if self.error.is_none() {
-            self.error = Some(err);
-        }
+        })
     }
 
-    /// Sets the initial capacity of entries for `[TurboFox]`
+    /// Configure _initial capacity_ for `TurboFox`
     ///
-    /// **WARN:** The capacity **must be a power of two**, as required by the storage layout.
+    /// This value represents the number of entries the database holds before any
+    /// growth is triggered
     ///
-    /// ### Choosing initial capacity
+    /// ## Constraints
     ///
-    /// - Use **128-1024 entries** for predominantly small datasets
-    /// - Use **1024-4096 entries** for larger datasets
+    /// - Must be **power of 2**
     ///
-    /// **NOTE:** Using appropriate initial capacity will reduce the need for growing and rehashing, hence
-    /// improving overall perf.
+    /// ## Tips
     ///
-    /// ### Errors
+    /// - For larger work loads, use higher `init_cap`, e.g. _8192_ to avoid growth and rehash cost
+    /// - For smaller work loads, use lower `init_cap`, e.g. _32_, to reduce memory usage
     ///
-    /// A non power of two capacity is recorded as a configuration error and will cause
-    /// [`build`](TurboConfigBuilder::build) to fail.
-    ///
-    /// ## Example
+    /// # Example
     ///
     /// ```
-    /// use turbofox::TurboConfig;
+    /// use turbofox::{TurboConfig, TurboError};
     ///
-    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb").init_cap(0x400).build();
-    /// assert!(cfg.is_ok());
+    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb/")?.init_cap(0x400)?;
+    /// # Ok::<(), TurboError>(())
     /// ```
-    pub fn init_cap(mut self, cap: usize) -> Self {
-        if !is_pow_of_2(cap) {
-            self.push_err(InternalError::InvalidConfig("init_cap must be power of 2".into()));
-        } else {
-            self.init_cap = cap;
+    pub fn init_cap(mut self, cap: usize) -> TurboResult<Self> {
+        if unlikely(cap == 0) {
+            return Err(TurboError::InvalidConfig("init_cap should never be zero".into()));
         }
 
-        self
-    }
-
-    /// Sets the on-disk page size used by `[TurboFox]` for storing key–value pairs.
-    ///
-    /// Each `key + value` pair is written into fixed size pages.
-    /// Larger `page_size` reduces fragmentation for large values but may waste space for small ones.
-    ///
-    /// **WARN:** The page size **must be a power of two**, as required by the storage layout.
-    ///
-    /// ### Choosing a page size
-    ///
-    /// - Use **64–128 bytes** for predominantly small keys/values  
-    /// - Use **256–1024 bytes** if values are typically larger  
-    ///
-    /// **NOTE:** Larger pages improve sequential IO throughput but will increase on-disk space overhead
-    ///
-    /// ### Errors
-    ///
-    /// A non power of two page size is recorded as a configuration error and will cause
-    /// [`build`](TurboConfigBuilder::build) to fail.
-    ///
-    /// ## Example
-    ///
-    /// ```
-    /// use turbofox::TurboConfig;
-    ///
-    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb").page_size(0x80).build();
-    /// assert!(cfg.is_ok());
-    /// ```
-    pub fn page_size(mut self, size: usize) -> Self {
-        if !is_pow_of_2(size) {
-            self.push_err(InternalError::InvalidConfig("page_size must be power of 2".into()));
-        } else {
-            self.page_size = size;
+        if !is_pow_of_2(cap as usize) {
+            return Err(TurboError::InvalidConfig("init_cap must be power of 2".into()));
         }
 
-        self
+        self.init_cap = cap;
+        Ok(self)
     }
 
-    /// Enables logging for `[TurboFox]`
+    /// Configure _logging visibility_ for `TurboFox`
     ///
     /// Default verbosity level is [`TurboLogLevel::Error`]
     ///
-    /// Use [`log_level`](TurboConfigBuilder::log_level) to control verbosity.
+    /// Use [log_level](TurboConfig::log_level) to control verbosity.
     ///
-    /// ## Example
+    /// # Example
     ///
     /// ```
-    /// use turbofox::TurboConfig;
+    /// use turbofox::{TurboConfig, TurboError};
     ///
-    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb").enable_logging().build();
-    /// assert!(cfg.is_ok());
+    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb/")?.logging(true);
+    /// # Ok::<(), TurboError>(())
     /// ```
-    pub fn enable_logging(mut self) -> Self {
-        Arc::make_mut(&mut self.logger).enable();
+    pub fn logging(mut self, enable: bool) -> Self {
+        self.logger.enable(enable);
         self
     }
 
-    /// Disables logging for `[TurboFox]`
+    /// Configure _logging verbosity level_ for `TurboFox`
     ///
-    /// **NOTE:** Logging is disabled by default. This method can be used to modify existing configs.
-    /// Which will help for copy/clone methods
+    /// Use `TurboLogLevel` to control verbosity.
     ///
-    /// ## Example
-    ///
-    /// ```
-    /// use turbofox::TurboConfig;
-    ///
-    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb").disable_logging().build();
-    /// assert!(cfg.is_ok());
-    /// ```
-    pub fn disable_logging(mut self) -> Self {
-        Arc::make_mut(&mut self.logger).disable();
-        self
-    }
-
-    /// Sets the `[TurboLogLevel]` for `[TurboFox]`
-    ///
-    /// ## Example
+    /// # Example
     ///
     /// ```
-    /// use turbofox::{TurboConfig, TurboLogLevel};
+    /// use turbofox::{TurboConfig, TurboError, TurboLogLevel};
     ///
-    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb")
-    ///     .enable_logging()
-    ///     .log_level(TurboLogLevel::INFO)
-    ///     .build();
-    /// assert!(cfg.is_ok());
+    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb/")?.log_level(TurboLogLevel::INFO);
+    /// # Ok::<(), TurboError>(())
     /// ```
     pub fn log_level(mut self, level: TurboLogLevel) -> Self {
-        Arc::make_mut(&mut self.logger).set_level(level);
+        self.logger.set_level(level);
         self
     }
-
-    /// Finilizes config and builds the `[TurboConfig]`
-    ///
-    /// ## Example
-    ///
-    /// ```
-    /// use turbofox::{TurboConfig, TurboLogLevel};
-    ///
-    /// let cfg = TurboConfig::new("/tmp/test_data/turbodb").build();
-    /// assert!(cfg.is_ok());
-    /// ```
-    pub fn build(self) -> TurboResult<TurboConfig> {
-        if let Some(err) = self.error {
-            return Err(err.into());
-        }
-        create_dir_if_missing(&self.dirpath, &self.logger)?;
-
-        Ok(TurboConfig {
-            init_cap: self.init_cap,
-            page_size: self.page_size,
-            dirpath: self.dirpath,
-            logger: self.logger,
-        })
-    }
-}
-
-fn create_dir_if_missing(dirpath: &PathBuf, logger: &Logger) -> InternalResult<()> {
-    if !dirpath.exists() {
-        std::fs::create_dir_all(&dirpath)
-            .inspect(|_| {
-                logger.info(LogCtx::Cfg, format!("Created new directory, path={:?}", dirpath));
-            })
-            .map_err(|e| {
-                logger.error(LogCtx::Cfg, format!("Failed to create new directory due to error: {e}"));
-                e
-            })?;
-    }
-
-    let metadata = std::fs::metadata(&dirpath).map_err(|e| {
-        logger.error(LogCtx::Cfg, format!("Failed to read metadata due to error: {e}"));
-        e
-    })?;
-
-    // NOTE: dirpath must be a valid directory
-    if !metadata.is_dir() {
-        let err = InternalError::InvalidPath(format!("Path({:?}) is not a valid directory", dirpath));
-        logger.error(LogCtx::Cfg, format!("TurboConfig contains invalid path: {err}"));
-        return Err(err);
-    }
-
-    // NOTE: We must have read permission to the directory
-    std::fs::read_dir(&dirpath).map_err(|_| {
-        let e = InternalError::PermissionDenied("Read permission denied for dirpath".into());
-        logger.error(LogCtx::Cfg, format!("Failed to read from directory due to error: {e}"));
-        e
-    })?;
-
-    // NOTE: we must have write permission to the directory
-    let test_file = dirpath.join(".turbofox_perm_test");
-    match std::fs::File::create(&test_file) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&test_file);
-        }
-        Err(_) => {
-            let e = InternalError::PermissionDenied("Write permission denied for dirpath".into());
-            logger.error(LogCtx::Cfg, format!("Failed to write to directory due to error: {e}"));
-            return Err(e);
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-#[allow(unused)]
-pub(crate) fn test_cfg(target: &'static str) -> (TurboConfig, tempfile::TempDir) {
-    let tempdir = tempfile::TempDir::new().expect("New temp directory");
-    let dirpath: Arc<PathBuf> = Arc::new(tempdir.path().into());
-    let logger: Arc<Logger> = Arc::new(crate::logger::test_logger(target));
-
-    // we create the dir, if not aleady created
-    create_dir_if_missing(&dirpath, &logger).expect("Should create a new dir");
-
-    let cfg = TurboConfig {
-        logger,
-        dirpath,
-        init_cap: DEFAULT_INIT_CAP,
-        page_size: DEFAULT_PAGE_SIZE,
-    };
-
-    (cfg, tempdir)
 }

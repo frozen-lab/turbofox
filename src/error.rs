@@ -6,7 +6,7 @@ pub enum TurboError {
     InvalidPath(String),
     LockPoisoned(String),
     InvalidConfig(String),
-    InvalidDbState(String),
+    InvalidState(String),
     PermissionDenied(String),
     UnsupportedVersion(String),
 }
@@ -18,7 +18,7 @@ impl From<InternalError> for TurboError {
             InternalError::InvalidPath(e) => Self::InvalidPath(e),
             InternalError::LockPoisoned(e) => Self::LockPoisoned(e),
             InternalError::InvalidConfig(e) => Self::InvalidConfig(e),
-            InternalError::InvalidDbState(e) => Self::InvalidDbState(e),
+            InternalError::InvalidState(e) => Self::InvalidState(e),
             InternalError::PermissionDenied(e) => Self::PermissionDenied(e),
             InternalError::UnsupportedVersion(e) => Self::UnsupportedVersion(e),
         }
@@ -33,7 +33,7 @@ pub(crate) enum InternalError {
     InvalidPath(String),
     LockPoisoned(String),
     InvalidConfig(String),
-    InvalidDbState(String),
+    InvalidState(String),
     PermissionDenied(String),
     UnsupportedVersion(String),
 }
@@ -57,7 +57,7 @@ impl std::fmt::Display for InternalError {
             Self::InvalidPath(msg) => write!(f, "{msg}"),
             Self::LockPoisoned(msg) => write!(f, "{msg}"),
             Self::InvalidConfig(msg) => write!(f, "{msg}"),
-            Self::InvalidDbState(msg) => write!(f, "{msg}"),
+            Self::InvalidState(msg) => write!(f, "{msg}"),
             Self::PermissionDenied(msg) => write!(f, "{msg}"),
             Self::UnsupportedVersion(msg) => write!(f, "{msg}"),
         }
