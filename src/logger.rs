@@ -3,31 +3,20 @@ use log::{Level, Record};
 
 const TARGET: &'static str = "TurboFox";
 
-#[inline]
-const fn from_level(level: Level) -> TurboLogLevel {
-    match level {
-        Level::Error => TurboLogLevel::ERROR,
-        Level::Warn => TurboLogLevel::WARN,
-        Level::Info => TurboLogLevel::INFO,
-        Level::Trace => TurboLogLevel::TRACE,
-        _ => unreachable!(),
-    }
-}
-
 pub(crate) enum LogCtx {
-    Cfg,
+    Dir,
 }
 
 impl LogCtx {
     fn to_ok(&self) -> String {
         match self {
-            Self::Cfg => "CFGO".into(),
+            Self::Dir => "DIRO".into(),
         }
     }
 
     fn to_err(&self) -> String {
         match self {
-            Self::Cfg => "CFGE".into(),
+            Self::Dir => "DIRE".into(),
         }
     }
 }
@@ -39,18 +28,16 @@ pub(crate) struct Logger {
     level: TurboLogLevel,
 }
 
-impl Default for Logger {
+impl Logger {
     #[inline]
-    fn default() -> Self {
+    pub(crate) const fn new(enabled: bool, level: TurboLogLevel) -> Self {
         Self {
-            enabled: false,
+            enabled,
             target: TARGET,
-            level: TurboLogLevel::ERROR,
+            level,
         }
     }
-}
 
-impl Logger {
     #[inline]
     pub(crate) fn trace(&self, ctx: LogCtx, args: impl std::fmt::Display) {
         // NOTE: As logging is turned off by default, and/or in prod env's trace
@@ -78,16 +65,6 @@ impl Logger {
         self.log(Level::Error, format_args!("({}) {args}", ctx.to_err()));
     }
 
-    #[inline]
-    pub(crate) const fn enable(&mut self, enable: bool) {
-        self.enabled = enable;
-    }
-
-    #[inline]
-    pub(crate) const fn set_level(&mut self, level: TurboLogLevel) {
-        self.level = level;
-    }
-
     #[inline(always)]
     fn log(&self, level: Level, args: std::fmt::Arguments) {
         // deny logging based on `[Level]`
@@ -97,6 +74,17 @@ impl Logger {
 
         let record = Record::builder().args(args).level(level).target(&self.target).build();
         log::logger().log(&record);
+    }
+}
+
+#[inline]
+const fn from_level(level: Level) -> TurboLogLevel {
+    match level {
+        Level::Error => TurboLogLevel::ERROR,
+        Level::Warn => TurboLogLevel::WARN,
+        Level::Info => TurboLogLevel::INFO,
+        Level::Trace => TurboLogLevel::TRACE,
+        _ => unreachable!(),
     }
 }
 

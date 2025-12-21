@@ -1,15 +1,3 @@
-/// Check if `x` is power of 2 or not
-#[inline]
-pub(crate) const fn is_pow_of_2(x: usize) -> bool {
-    (x & (x - 1)) == 0
-}
-
-#[test]
-fn test_correctness_of_is_pow_of_2() {
-    assert!(!is_pow_of_2(0x1C), "28 is not pow of 2");
-    assert!(is_pow_of_2(0x20), "32 is pow of 2");
-}
-
 /// empty function used as a placeholder to influence branch prediction
 #[cold]
 #[inline]
@@ -57,13 +45,13 @@ pub(crate) fn prep_directory(
         std::fs::create_dir_all(&dirpath)
             .inspect(|_| {
                 logger.info(
-                    LogCtx::Cfg,
+                    LogCtx::Dir,
                     format!("New directory for TurboFox at path=[{:?}]", dirpath),
                 );
             })
             .map_err(|e| {
                 logger.error(
-                    LogCtx::Cfg,
+                    LogCtx::Dir,
                     format!(
                         "Unable to create new directory for TurboFox at path=[{:?}] due to error: {e}",
                         dirpath
@@ -75,24 +63,21 @@ pub(crate) fn prep_directory(
 
     if !dirpath.is_dir() {
         logger.error(
-            LogCtx::Cfg,
+            LogCtx::Dir,
             format!(
                 "Failed to create/open directory for TurboFox as given Path=[{:?}] is not a directory",
                 dirpath
             ),
         );
 
-        return Err(InternalError::InvalidPath(format!(
-            "Path=[{:?}] is not a directory",
-            dirpath
-        )));
+        return Err(InternalError::IO(format!("Path=[{:?}] is not a directory", dirpath)));
     }
 
     // NOTE: We must have read permission to the directory
     std::fs::read_dir(&dirpath).map_err(|e| {
         let err = InternalError::PermissionDenied(format!("{e}"));
         logger.error(
-            LogCtx::Cfg,
+            LogCtx::Dir,
             format!("Failed to read from path=[{:?}] due to error: {err}", dirpath),
         );
         err
@@ -107,12 +92,14 @@ pub(crate) fn prep_directory(
         Err(e) => {
             let err = InternalError::PermissionDenied(format!("{e}"));
             logger.error(
-                LogCtx::Cfg,
+                LogCtx::Dir,
                 format!("Failed to write into path=[{:?}] due to error: {err}", dirpath),
             );
             return Err(err);
         }
     }
+
+    logger.trace(LogCtx::Dir, format!("Successful"));
 
     Ok(())
 }
@@ -172,7 +159,7 @@ mod test_prep_directory {
         match prep_directory(&invalid_dir.path().to_path_buf(), &logger) {
             Ok(_) => panic!("must throw error when path is a file"),
             Err(e) => match e {
-                InternalError::InvalidPath(_) => {}
+                InternalError::IO(_) => {}
                 _ => panic!("expected InvalidPath error"),
             },
         }
