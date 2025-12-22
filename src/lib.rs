@@ -3,6 +3,7 @@
 
 mod cfg;
 mod core;
+mod engine;
 mod error;
 mod logger;
 mod utils;

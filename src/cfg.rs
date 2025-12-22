@@ -1,4 +1,4 @@
-const DEFAULT_GROWTH_FACTOR: u32 = 2;
+const DEFAULT_GROWTH_FACTOR: u64 = 2;
 const DEFAULT_BUF_SIZE: TurboConfigValue = TurboConfigValue::N64;
 const DEFAULT_INIT_CAP: TurboConfigValue = TurboConfigValue::N128;
 const DEFAULT_MAX_KEY_LEN: TurboConfigValue = TurboConfigValue::N64;
@@ -112,7 +112,7 @@ pub struct TurboConfig {
     ///   ..Default::default()
     /// };
     /// ```
-    pub growth_factor: u32,
+    pub growth_factor: u64,
 
     /// Controls _logging verbosity level_ for [TurboFox]
     ///
@@ -226,7 +226,7 @@ pub enum TurboConfigValue {
 
 impl TurboConfigValue {
     #[inline]
-    pub(crate) const fn to_usize(&self) -> usize {
+    pub(crate) const fn to_u64(&self) -> u64 {
         match self {
             Self::N32 => 0x20,
             Self::N64 => 0x40,
