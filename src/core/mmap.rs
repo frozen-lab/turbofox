@@ -53,7 +53,7 @@ impl TurboMMap {
     }
 
     #[inline]
-    pub(crate) fn write<T: Copy>(&self, val: &T, off: usize) {
+    pub(crate) fn write<T: Clone>(&self, val: &T, off: usize) {
         #[cfg(target_os = "linux")]
         unsafe {
             self.mmap.write(off, val);
@@ -64,7 +64,7 @@ impl TurboMMap {
     }
 
     #[inline]
-    fn read<T>(&self, off: usize) -> *mut T {
+    pub(crate) fn read<T>(&self, off: usize) -> *mut T {
         #[cfg(target_os = "linux")]
         unsafe {
             self.mmap.read(off)
