@@ -1,29 +1,30 @@
 use crate::{
-    core::{TurboFile, TurboMMap},
+    core::{TurboFile, TurboMMap, TurboMMapView},
     error::InternalResult,
     logger::Logger,
     TurboConfig,
 };
 use std::path::PathBuf;
 
+const PATH: &'static str = "metadata";
+const META_SIZE: usize = std::mem::size_of::<InternalMeta>();
+
 const VERSION: u32 = 0;
 const MAGIC: [u8; 4] = *b"tbf0";
-const PATH: &'static str = "meta";
-const META_SIZE: usize = std::mem::size_of::<Meta>();
 
 #[derive(Debug, Clone)]
 #[repr(C)]
-pub(crate) struct Meta {
+pub(in crate::engine) struct InternalMeta {
     version: u32,
     magic: [u8; 4],
     _padd: [u8; 0x18],
-    pub(crate) num_bufs: u64,
-    pub(crate) capacity: u64,
-    pub(crate) buf_size: u64,
-    pub(crate) max_klen: u64,
+    pub(in crate::engine) num_bufs: u64,
+    pub(in crate::engine) capacity: u64,
+    pub(in crate::engine) buf_size: u64,
+    pub(in crate::engine) max_klen: u64,
 }
 
-impl Meta {
+impl InternalMeta {
     const fn new(cfg: &TurboConfig) -> Self {
         Self {
             magic: MAGIC,
@@ -39,51 +40,59 @@ impl Meta {
 
 const _: () = assert!(META_SIZE == 0x40);
 
-pub(crate) struct MetaFile {
+#[derive(Debug)]
+pub(in crate::engine) struct Metadata {
     file: TurboFile,
     mmap: TurboMMap,
+    view: TurboMMapView<InternalMeta>,
 }
 
-impl MetaFile {
+impl Metadata {
     #[inline]
-    pub(crate) fn exists(dirpath: &PathBuf) -> bool {
+    pub(in crate::engine) fn exists(dirpath: &PathBuf) -> bool {
         dirpath.join(PATH).exists()
     }
 
     #[inline]
-    pub(crate) fn new(dirpath: &PathBuf, cfg: &TurboConfig) -> InternalResult<Self> {
+    pub(in crate::engine) fn new(dirpath: &PathBuf, cfg: &TurboConfig) -> InternalResult<Self> {
         let path = dirpath.join(PATH);
+        let meta = InternalMeta::new(cfg);
 
         let file = TurboFile::new(&path)?;
         file.zero_extend(META_SIZE)?;
 
         let mmap = TurboMMap::new(file.fd(), META_SIZE, 0)?;
+        let view = mmap.view::<InternalMeta>(0);
 
-        let meta = Meta::new(cfg);
-        mmap.write(&meta, 0);
-
+        view.update(|m| *m = meta);
         mmap.flush()?;
 
-        Ok(Self { file, mmap })
+        Ok(Self { file, mmap, view })
     }
 
     #[inline]
-    pub(crate) fn open(dirpath: &PathBuf, cfg: &TurboConfig) -> InternalResult<Self> {
+    pub(in crate::engine) fn open(dirpath: &PathBuf, cfg: &TurboConfig) -> InternalResult<Self> {
         let path = dirpath.join(PATH);
 
         let file = TurboFile::open(&path)?;
         let mmap = TurboMMap::new(file.fd(), META_SIZE, 0)?;
+        let view = mmap.view::<InternalMeta>(0);
 
-        Ok(Self { file, mmap })
+        Ok(Self { file, mmap, view })
     }
 
     #[inline]
-    pub(crate) fn meta(&self) -> *mut Meta {
-        self.mmap.read::<Meta>(0)
-    }
-
-    #[inline]
-    pub(crate) fn flush(&self) -> InternalResult<()> {
+    pub(in crate::engine) fn flush(&self) -> InternalResult<()> {
         self.mmap.flush()
+    }
+
+    #[inline]
+    pub(in crate::engine) fn get(&self) -> &InternalMeta {
+        self.view.get()
+    }
+
+    #[inline]
+    pub(in crate::engine) fn update(&self, f: impl FnOnce(&mut InternalMeta)) {
+        self.view.update(f);
     }
 }

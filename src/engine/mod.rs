@@ -1,41 +1,48 @@
 use crate::{error::InternalResult, logger::Logger, TurboConfig};
-use meta::{Meta, MetaFile};
-use std::path::PathBuf;
+use cache::Cache;
+use meta::Metadata;
+use std::{path::PathBuf, sync::Arc};
 
 mod cache;
 mod meta;
 
 #[derive(Debug)]
-pub(crate) struct InternalConfig {
-    pub(crate) init_cap: u64,
-    pub(crate) growth_x: u64,
-    pub(crate) logger: Logger,
-    pub(crate) dirpath: PathBuf,
-    pub(crate) meta: *mut Meta,
+pub(in crate::engine) struct InternalConfig {
+    pub(in crate::engine) init_cap: u64,
+    pub(in crate::engine) growth_x: u64,
+    pub(in crate::engine) logger: Logger,
+    pub(in crate::engine) dirpath: PathBuf,
+    pub(in crate::engine) meta: Metadata,
 }
 
 pub(crate) struct Engine {
-    meta_file: MetaFile,
-    cfg: InternalConfig,
+    cfg: Arc<InternalConfig>,
+    cache: Cache,
 }
 
 impl Engine {
-    pub(crate) fn new(dirpath: PathBuf, cfg: &TurboConfig, logger: Logger) -> InternalResult<Self> {
-        let meta_exists = MetaFile::exists(&dirpath);
+    pub(crate) fn new(dirpath: PathBuf, turbo_cfg: &TurboConfig, logger: Logger) -> InternalResult<Self> {
+        let meta_exists = Metadata::exists(&dirpath);
         let meta_file = if meta_exists {
-            MetaFile::open(&dirpath, cfg)?
+            Metadata::open(&dirpath, turbo_cfg)?
         } else {
-            MetaFile::new(&dirpath, cfg)?
+            Metadata::new(&dirpath, turbo_cfg)?
         };
 
-        let cfg = InternalConfig {
-            init_cap: cfg.initial_capacity.to_u64(),
-            growth_x: cfg.growth_factor,
+        let cfg = Arc::new(InternalConfig {
             logger,
             dirpath,
-            meta: meta_file.meta(),
+            meta: meta_file,
+            growth_x: turbo_cfg.growth_factor,
+            init_cap: turbo_cfg.initial_capacity.to_u64(),
+        });
+
+        let cache = if Cache::exists(&cfg) {
+            Cache::open(cfg.clone())?
+        } else {
+            Cache::new(cfg.clone())?
         };
 
-        Ok(Self { meta_file, cfg })
+        Ok(Self { cfg, cache })
     }
 }

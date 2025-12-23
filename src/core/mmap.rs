@@ -1,4 +1,28 @@
 use crate::error::InternalResult;
+use std::marker::PhantomData;
+
+#[derive(Debug)]
+pub(crate) struct TurboMMapView<T> {
+    ptr: *mut T,
+    _pd: PhantomData<T>,
+}
+
+impl<T> TurboMMapView<T> {
+    #[inline]
+    const fn new(ptr: *mut T) -> Self {
+        Self { ptr, _pd: PhantomData }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self) -> &T {
+        unsafe { &*self.ptr }
+    }
+
+    #[inline]
+    pub(crate) fn update(&self, f: impl FnOnce(&mut T)) {
+        unsafe { f(&mut *self.ptr) }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct TurboMMap {
@@ -53,21 +77,11 @@ impl TurboMMap {
     }
 
     #[inline]
-    pub(crate) fn write<T: Clone>(&self, val: &T, off: usize) {
+    pub(crate) fn view<T>(&self, off: usize) -> TurboMMapView<T> {
         #[cfg(target_os = "linux")]
         unsafe {
-            self.mmap.write(off, val);
-        };
-
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!()
-    }
-
-    #[inline]
-    pub(crate) fn read<T>(&self, off: usize) -> *mut T {
-        #[cfg(target_os = "linux")]
-        unsafe {
-            self.mmap.read(off)
+            let ptr = self.mmap.read::<T>(off);
+            TurboMMapView::new(ptr)
         }
 
         #[cfg(not(target_os = "linux"))]

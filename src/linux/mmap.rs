@@ -1,7 +1,7 @@
 use crate::error::InternalResult;
 use libc::{c_void, mmap, msync, munmap, off_t, MAP_FAILED, MAP_SHARED, MS_ASYNC, MS_SYNC, PROT_READ, PROT_WRITE};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MMap {
     ptr: *mut c_void,
     len: usize,

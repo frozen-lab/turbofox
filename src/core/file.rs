@@ -1,5 +1,6 @@
 use crate::error::InternalResult;
 
+#[derive(Debug)]
 pub(crate) struct TurboFile {
     #[cfg(target_os = "linux")]
     file: crate::linux::File,
