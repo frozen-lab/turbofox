@@ -2,6 +2,7 @@ use crate::{error::InternalResult, logger::Logger, TurboConfig};
 use meta::{Meta, MetaFile};
 use std::path::PathBuf;
 
+mod cache;
 mod meta;
 
 #[derive(Debug)]

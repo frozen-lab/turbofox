@@ -2,7 +2,10 @@ use crate::{
     error::{InternalError, InternalResult},
     utils::unlikely,
 };
-use libc::{close, fstat, fsync, ftruncate, off_t, open, stat, O_CLOEXEC, O_CREAT, O_NOATIME, O_RDWR, O_TRUNC};
+use libc::{
+    c_void, close, fstat, fsync, ftruncate, off_t, open, pread, pwrite, size_t, stat, O_CLOEXEC, O_CREAT, O_NOATIME,
+    O_RDWR, O_TRUNC,
+};
 use std::{ffi::CString, os::unix::ffi::OsStrExt, path::Path};
 
 #[derive(Debug)]
@@ -85,6 +88,73 @@ impl File {
         }
 
         Ok(st)
+    }
+
+    /// Performs positional read on [File]
+    pub(crate) unsafe fn pread(&self, off: usize, buf_size: usize) -> InternalResult<Vec<u8>> {
+        let mut buf = vec![0u8; buf_size];
+        let mut done = 0usize;
+
+        let ptr = buf.as_mut_ptr() as *mut c_void;
+
+        while done < buf_size {
+            let res = pread(
+                self.fd(),
+                ptr.add(done),
+                (buf_size - done) as size_t,
+                (off + done) as i64,
+            );
+
+            if res == 0 {
+                return Err(InternalError::IO("unexpected EOF during pread".into()));
+            }
+
+            if res < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                return Err(err.into());
+            }
+
+            done += res as usize;
+        }
+
+        Ok(buf)
+    }
+
+    /// Performs positional write on [File]
+    pub(crate) unsafe fn pwrite(&self, off: usize, buf: &[u8]) -> InternalResult<()> {
+        let ptr = buf.as_ptr() as *mut c_void;
+        let count = buf.len() as size_t;
+
+        let mut done = 0usize;
+        while done < count {
+            let res = pwrite(
+                self.fd(),
+                ptr.add(done) as *const c_void,
+                (count - done) as size_t,
+                (off + done) as i64,
+            );
+
+            if res < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                return Err(err.into());
+            }
+
+            if res == 0 {
+                return Err(InternalError::IO("pwrite returned 0".into()));
+            }
+
+            done += res as usize;
+        }
+
+        Ok(())
     }
 
     /// Prepares kernel flags for syscall

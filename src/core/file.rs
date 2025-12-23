@@ -75,6 +75,28 @@ impl TurboFile {
         }
     }
 
+    #[inline]
+    pub(crate) fn read(&self, off: usize, buf_size: usize) -> InternalResult<Vec<u8>> {
+        #[cfg(not(target_os = "linux"))]
+        unimplemented!();
+
+        #[cfg(target_os = "linux")]
+        unsafe {
+            self.file.pread(off, buf_size)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn write(&self, off: usize, buf: &[u8]) -> InternalResult<()> {
+        #[cfg(not(target_os = "linux"))]
+        unimplemented!();
+
+        #[cfg(target_os = "linux")]
+        unsafe {
+            self.file.pwrite(off, buf)
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[inline]
     pub(crate) const fn fd(&self) -> i32 {
