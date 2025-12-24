@@ -1,12 +1,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
-#![allow(unused)]
 
 mod cfg;
 mod core;
-mod engine;
 mod error;
 mod logger;
 mod utils;
+
+#[allow(unused)]
+mod engine;
 
 #[cfg(target_os = "linux")]
 mod linux;

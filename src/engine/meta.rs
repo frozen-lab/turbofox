@@ -1,5 +1,5 @@
 use crate::{
-    core::{TurboFile, TurboMMap, TurboMMapView},
+    core::{TurboFile, TurboMMap},
     error::InternalResult,
     logger::Logger,
     TurboConfig,
@@ -61,11 +61,10 @@ impl Metadata {
         file.zero_extend(META_SIZE)?;
 
         let mmap = TurboMMap::new(file.fd(), META_SIZE, 0)?;
-        let view = mmap.view::<InternalMeta>(0);
+        let slf = Self { file, mmap };
 
-        view.update(|m| *m = meta);
-
-        Ok(Self { file, mmap })
+        slf.with_mut(|m| *m = meta);
+        Ok(slf)
     }
 
     #[inline]
@@ -80,12 +79,19 @@ impl Metadata {
 
     #[inline]
     pub fn with<R>(&self, f: impl FnOnce(&InternalMeta) -> R) -> R {
-        let view = self.mmap.view::<InternalMeta>(0);
-        f(view.get())
+        let view = self.mmap.read::<InternalMeta>(0);
+        f(view.read())
     }
 
     #[inline]
     pub fn with_mut(&self, f: impl FnOnce(&mut InternalMeta)) {
-        self.mmap.view::<InternalMeta>(0).update(|m| f(m))
+        self.mmap.write::<InternalMeta>(0).write(f);
+    }
+}
+
+impl Drop for Metadata {
+    fn drop(&mut self) {
+        let _ = self.mmap.unmap();
+        let _ = self.file.close();
     }
 }

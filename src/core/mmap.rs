@@ -1,4 +1,4 @@
-use crate::{error::InternalResult, linux::MMap};
+use crate::error::InternalResult;
 use std::{
     marker::PhantomData,
     sync::{
@@ -10,44 +10,6 @@ use std::{
 };
 
 #[derive(Debug)]
-pub(crate) struct TurboMMapView<'a, T> {
-    ptr: *mut T,
-    _pd: PhantomData<&'a T>,
-}
-
-impl<'a, T> TurboMMapView<'a, T> {
-    #[inline]
-    const fn new(ptr: *mut T) -> Self {
-        Self { ptr, _pd: PhantomData }
-    }
-
-    #[inline]
-    pub(crate) fn get(&self) -> &T {
-        unsafe { &*self.ptr }
-    }
-
-    #[inline]
-    pub(crate) fn update(&self, f: impl FnOnce(&mut T)) {
-        unsafe { f(&mut *self.ptr) }
-    }
-}
-
-#[derive(Debug)]
-struct FlushState {
-    write_epoch: AtomicU64,
-    stop_signal: AtomicBool,
-}
-
-impl Default for FlushState {
-    fn default() -> Self {
-        Self {
-            write_epoch: AtomicU64::new(0),
-            stop_signal: AtomicBool::new(false),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub(crate) struct TurboMMap {
     #[cfg(target_os = "linux")]
     mmap: Arc<crate::linux::MMap>,
@@ -56,18 +18,18 @@ pub(crate) struct TurboMMap {
     f_tx: Option<JoinHandle<()>>,
 }
 
+unsafe impl Send for TurboMMap {}
+unsafe impl Sync for TurboMMap {}
+
 impl TurboMMap {
+    #[cfg(target_os = "linux")]
     #[inline]
     pub(crate) fn new(fd: i32, len: usize, off: usize) -> InternalResult<Self> {
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!();
-
-        let mmap = Arc::new(unsafe { crate::linux::MMap::map(fd, len, off) }?);
+        let mmap = unsafe { Arc::new(crate::linux::MMap::map(fd, len, off)?) };
         let f_st = Arc::new(FlushState::default());
 
         let tx_mmap = mmap.clone();
         let tx_state = f_st.clone();
-
         let tx = Self::spawn_tx(tx_mmap, tx_state);
 
         Ok(Self {
@@ -77,6 +39,7 @@ impl TurboMMap {
         })
     }
 
+    #[allow(unused)]
     #[inline]
     pub(crate) fn len(&self) -> usize {
         #[cfg(target_os = "linux")]
@@ -86,25 +49,25 @@ impl TurboMMap {
         unimplemented!()
     }
 
-    #[inline]
-    pub(crate) fn view<'a, T>(&self, off: usize) -> TurboMMapView<'a, T> {
-        #[cfg(target_os = "linux")]
-        unsafe {
-            let ptr = self.mmap.read::<T>(off);
-            TurboMMapView::new(ptr)
-        }
-
+    pub(crate) fn write<'a, T>(&'a self, off: usize) -> TurboMMapWriter<'a, T> {
         #[cfg(not(target_os = "linux"))]
-        unimplemented!()
+        unimplemented!();
+
+        unsafe {
+            let ptr = self.mmap.get_mut::<T>(off);
+            TurboMMapWriter::new(ptr, &self.f_st)
+        }
     }
 
-    #[inline(always)]
-    pub(crate) fn mark_write(&self) {
-        self.f_st.write_epoch.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn read<'a, T>(&'a self, off: usize) -> TurboMMapReader<'a, T> {
+        #[cfg(not(target_os = "linux"))]
+        unimplemented!();
+
+        unsafe { TurboMMapReader::new(self.mmap.get::<T>(off)) }
     }
 
     #[inline]
-    pub(crate) fn unmap(mut self) -> InternalResult<()> {
+    pub(crate) fn unmap(&self) -> InternalResult<()> {
         #[cfg(not(target_os = "linux"))]
         unimplemented!();
 
@@ -112,27 +75,15 @@ impl TurboMMap {
         unsafe {
             self.f_st.stop_signal.store(true, Ordering::Release);
 
-            if let Some(tx) = self.f_tx.take() {
+            if let Some(tx) = self.f_tx.as_ref() {
                 tx.thread().unpark();
-                let _ = tx.join();
             }
 
             self.mmap.msync()?;
-            self.mmap.unmap();
+            self.mmap.unmap()?;
         }
 
         Ok(())
-    }
-
-    #[inline]
-    fn flush(&self) -> InternalResult<()> {
-        #[cfg(target_os = "linux")]
-        unsafe {
-            self.mmap.masync()
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        unimplemented!()
     }
 
     fn spawn_tx(tx_mmap: Arc<crate::linux::MMap>, tx_state: Arc<FlushState>) -> JoinHandle<()> {
@@ -159,5 +110,63 @@ impl TurboMMap {
                 last_seen = current;
             }
         })
+    }
+}
+
+#[derive(Debug)]
+struct FlushState {
+    write_epoch: AtomicU64,
+    stop_signal: AtomicBool,
+}
+
+impl Default for FlushState {
+    fn default() -> Self {
+        Self {
+            write_epoch: AtomicU64::new(0),
+            stop_signal: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TurboMMapWriter<'a, T> {
+    ptr: *mut T,
+    state: &'a FlushState,
+}
+
+impl<'a, T> TurboMMapWriter<'a, T> {
+    #[inline]
+    const fn new(ptr: *mut T, state: &'a FlushState) -> Self {
+        Self { ptr, state }
+    }
+
+    #[inline]
+    pub(crate) fn write(&self, f: impl FnOnce(&mut T)) {
+        unsafe { f(&mut *self.ptr) }
+    }
+}
+
+impl<'a, T> Drop for TurboMMapWriter<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.state.write_epoch.fetch_add(1, Ordering::Release);
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TurboMMapReader<'a, T> {
+    ptr: *const T,
+    _pd: PhantomData<&'a T>,
+}
+
+impl<'a, T> TurboMMapReader<'a, T> {
+    #[inline]
+    const fn new(ptr: *const T) -> Self {
+        Self { ptr, _pd: PhantomData }
+    }
+
+    #[inline]
+    pub(crate) fn read(&self) -> &T {
+        unsafe { &*self.ptr }
     }
 }

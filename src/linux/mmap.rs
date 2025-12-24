@@ -41,6 +41,7 @@ impl MMap {
     }
 
     /// Asynchronous flush for [MMap]
+    #[allow(unused)]
     #[inline]
     pub(crate) unsafe fn masync(&self) -> InternalResult<()> {
         if msync(self.ptr, self.len, MS_ASYNC) != 0 {
@@ -58,9 +59,9 @@ impl MMap {
         Ok(())
     }
 
-    /// Write to [MMap]
+    /// Get an immutable reference of [T] from [MMap]
     #[inline]
-    pub(crate) unsafe fn write<T: Clone>(&self, off: usize, val: &T) {
+    pub(crate) unsafe fn get<T>(&self, off: usize) -> *const T {
         #[cfg(test)]
         {
             let size = std::mem::size_of::<T>();
@@ -70,13 +71,12 @@ impl MMap {
             debug_assert!(off % align == 0, "Detected unaligned access for type");
         }
 
-        let dst = self.ptr_mut().add(off) as *mut T;
-        std::ptr::write(dst, val.clone());
+        self.ptr_mut().add(off) as *const T
     }
 
-    /// Read from `[MMap]`
+    /// Get an mutable reference of [T] from [MMap]
     #[inline]
-    pub(crate) unsafe fn read<T>(&self, off: usize) -> *mut T {
+    pub(crate) unsafe fn get_mut<T>(&self, off: usize) -> *mut T {
         #[cfg(test)]
         {
             let size = std::mem::size_of::<T>();
