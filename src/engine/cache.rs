@@ -18,8 +18,7 @@ impl Cache {
 
     pub(in crate::engine) fn new(cfg: Arc<InternalConfig>) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
-        let meta = cfg.meta.get();
-        let init_len = meta.buf_size * meta.num_bufs;
+        let init_len = cfg.meta.with(|meta| meta.buf_size * meta.num_bufs);
 
         let file = TurboFile::new(&path)?;
         file.zero_extend(init_len as usize)?;

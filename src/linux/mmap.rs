@@ -7,6 +7,9 @@ pub(crate) struct MMap {
     len: usize,
 }
 
+unsafe impl Send for MMap {}
+unsafe impl Sync for MMap {}
+
 impl MMap {
     /// Creates a new [MMap] instance w/ read + write permissions
     ///

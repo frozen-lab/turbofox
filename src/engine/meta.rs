@@ -44,7 +44,6 @@ const _: () = assert!(META_SIZE == 0x40);
 pub(in crate::engine) struct Metadata {
     file: TurboFile,
     mmap: TurboMMap,
-    view: TurboMMapView<InternalMeta>,
 }
 
 impl Metadata {
@@ -65,9 +64,8 @@ impl Metadata {
         let view = mmap.view::<InternalMeta>(0);
 
         view.update(|m| *m = meta);
-        mmap.flush()?;
 
-        Ok(Self { file, mmap, view })
+        Ok(Self { file, mmap })
     }
 
     #[inline]
@@ -76,23 +74,18 @@ impl Metadata {
 
         let file = TurboFile::open(&path)?;
         let mmap = TurboMMap::new(file.fd(), META_SIZE, 0)?;
-        let view = mmap.view::<InternalMeta>(0);
 
-        Ok(Self { file, mmap, view })
+        Ok(Self { file, mmap })
     }
 
     #[inline]
-    pub(in crate::engine) fn flush(&self) -> InternalResult<()> {
-        self.mmap.flush()
+    pub fn with<R>(&self, f: impl FnOnce(&InternalMeta) -> R) -> R {
+        let view = self.mmap.view::<InternalMeta>(0);
+        f(view.get())
     }
 
     #[inline]
-    pub(in crate::engine) fn get(&self) -> &InternalMeta {
-        self.view.get()
-    }
-
-    #[inline]
-    pub(in crate::engine) fn update(&self, f: impl FnOnce(&mut InternalMeta)) {
-        self.view.update(f);
+    pub fn with_mut(&self, f: impl FnOnce(&mut InternalMeta)) {
+        self.mmap.view::<InternalMeta>(0).update(|m| f(m))
     }
 }
