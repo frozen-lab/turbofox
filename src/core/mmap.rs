@@ -72,41 +72,32 @@ impl TurboMMap {
         unimplemented!();
 
         #[cfg(target_os = "linux")]
-        unsafe {
-            self.f_st.stop_signal.store(true, Ordering::Release);
-
-            if let Some(tx) = self.f_tx.as_ref() {
-                tx.thread().unpark();
-            }
-
-            self.mmap.msync()?;
-            self.mmap.unmap()?;
+        self.f_st.should_stop();
+        if let Some(tx) = self.f_tx.as_ref() {
+            tx.thread().unpark();
         }
 
-        Ok(())
+        unsafe { self.mmap.unmap() }
     }
 
     fn spawn_tx(tx_mmap: Arc<crate::linux::MMap>, tx_state: Arc<FlushState>) -> JoinHandle<()> {
         thread::spawn(move || {
             let mut last_seen = 0u64;
-
             loop {
-                if tx_state.stop_signal.load(Ordering::Acquire) {
+                if tx_state.get_signal() {
+                    let _ = unsafe { tx_mmap.masync() };
                     break;
                 }
 
                 // sleep (no busy spin)
                 thread::park_timeout(Duration::from_secs(1));
 
-                let current = tx_state.write_epoch.load(Ordering::Acquire);
+                let current = tx_state.load_epoch();
                 if current == last_seen {
                     continue;
                 }
 
-                unsafe {
-                    let _ = tx_mmap.masync();
-                }
-
+                let _ = unsafe { tx_mmap.masync() };
                 last_seen = current;
             }
         })
@@ -125,6 +116,28 @@ impl Default for FlushState {
             write_epoch: AtomicU64::new(0),
             stop_signal: AtomicBool::new(false),
         }
+    }
+}
+
+impl FlushState {
+    #[inline]
+    fn incr_epoch(&self) {
+        self.write_epoch.fetch_add(1, Ordering::Release);
+    }
+
+    #[inline]
+    fn should_stop(&self) {
+        self.stop_signal.store(true, Ordering::Release);
+    }
+
+    #[inline]
+    fn get_signal(&self) -> bool {
+        self.stop_signal.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn load_epoch(&self) -> u64 {
+        self.write_epoch.load(Ordering::Acquire)
     }
 }
 
@@ -149,7 +162,7 @@ impl<'a, T> TurboMMapWriter<'a, T> {
 impl<'a, T> Drop for TurboMMapWriter<'a, T> {
     #[inline]
     fn drop(&mut self) {
-        self.state.write_epoch.fetch_add(1, Ordering::Release);
+        self.state.incr_epoch();
     }
 }
 
