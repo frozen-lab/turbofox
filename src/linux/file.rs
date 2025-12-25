@@ -38,6 +38,16 @@ impl File {
     }
 
     /// Flushes dirty pages to disk for persistence of [File]
+    ///
+    /// ## `fsync` vs `fdatasync`
+    ///
+    /// We use `fdatasync()` instead of `fsync()` for persistence
+    ///
+    /// `fdatasync()` guarantees, all modified file data and any metadata required to
+    /// retrieve that data, like file size changes are flushed to stable storage
+    ///
+    /// This way we avoid non-essential metadata updates, such as access time (`atime`),
+    /// modification time (`mtime`), and other inode bookkeeping information!
     #[inline]
     pub(crate) unsafe fn sync(&self) -> InternalResult<()> {
         let res = fdatasync(self.fd() as c_int);

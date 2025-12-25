@@ -13,7 +13,15 @@ unsafe impl Sync for MMap {}
 impl MMap {
     /// Creates a new [MMap] instance w/ read + write permissions
     ///
-    /// w/ the use of `MAP_SHARED` flag, we offload the burden of sync/flush on the kernel
+    /// ## Persistence
+    ///
+    /// We use the `MAP_SHARED` flag, which ensures that all modifications to the
+    /// mapped memory are reflected in the underlying file and tracked by the kernel
+    ///
+    /// Use of `MAP_SHARED` does not provide durability guarantees by itself
+    ///
+    /// Explicit calls to `sync()` are required to establish durability boundaries
+    /// and ensure that modified pages are written to stable storage
     pub(crate) unsafe fn map(fd: i32, len: usize, off: usize) -> InternalResult<Self> {
         let ptr = mmap(
             std::ptr::null_mut(),
