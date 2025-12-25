@@ -131,6 +131,8 @@ impl TurboFile {
             let mut last_seen = 0u64;
             loop {
                 if state.get_signal() {
+                    // TODO:
+                    // Must not silently consume errors here!
                     let _ = unsafe { file.sync() };
                     break;
                 }
@@ -142,9 +144,11 @@ impl TurboFile {
                 if current == last_seen {
                     continue;
                 }
-
-                let _ = unsafe { file.sync() };
                 last_seen = current;
+
+                // TODO:
+                // Must not silently consume errors here!
+                let _ = unsafe { file.sync() };
             }
         })
     }

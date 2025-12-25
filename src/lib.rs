@@ -2,9 +2,13 @@
 
 mod cfg;
 mod core;
-mod error;
-mod logger;
 mod utils;
+
+#[allow(unused)]
+mod logger;
+
+#[allow(unused)]
+mod error;
 
 #[allow(unused)]
 mod engine;

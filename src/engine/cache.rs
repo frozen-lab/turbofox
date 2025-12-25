@@ -29,7 +29,36 @@ impl Cache {
     pub(in crate::engine) fn open(cfg: Arc<InternalConfig>) -> InternalResult<Self> {
         let path = cfg.dirpath.join(PATH);
         let file = TurboFile::new(&path)?;
+        let _len = file.len()?;
 
         Ok(Self { cfg, file })
+    }
+
+    #[inline]
+    pub(in crate::engine) fn flush(&self) -> InternalResult<()> {
+        self.file.flush()
+    }
+
+    pub(in crate::engine) fn extend(&self, new_len: usize) -> InternalResult<()> {
+        self.file.zero_extend(new_len)?;
+        self.flush()?;
+
+        Ok(())
+    }
+
+    pub(in crate::engine) fn write(&self, off: usize, buf: &[u8]) -> InternalResult<()> {
+        self.file.write(off, buf)?;
+        Ok(())
+    }
+
+    pub(in crate::engine) fn read(&self, off: usize, buf_size: usize) -> InternalResult<Vec<u8>> {
+        let bytes = self.file.read(off, buf_size)?;
+        Ok(bytes)
+    }
+}
+
+impl Drop for Cache {
+    fn drop(&mut self) {
+        let _ = self.file.close();
     }
 }

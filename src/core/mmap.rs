@@ -85,7 +85,9 @@ impl TurboMMap {
             let mut last_seen = 0u64;
             loop {
                 if tx_state.get_signal() {
-                    let _ = unsafe { tx_mmap.masync() };
+                    // TODO:
+                    // Must not silently consume errors here!
+                    let _ = unsafe { tx_mmap.msync() };
                     break;
                 }
 
@@ -96,9 +98,11 @@ impl TurboMMap {
                 if current == last_seen {
                     continue;
                 }
-
-                let _ = unsafe { tx_mmap.masync() };
                 last_seen = current;
+
+                // TODO:
+                // Must not silently consume errors here!
+                let _ = unsafe { tx_mmap.msync() };
             }
         })
     }
