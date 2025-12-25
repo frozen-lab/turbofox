@@ -80,6 +80,17 @@ impl TurboMMap {
         unsafe { self.mmap.unmap() }
     }
 
+    #[inline]
+    pub(crate) fn sync(&self) -> InternalResult<()> {
+        #[cfg(not(target_os = "linux"))]
+        unimplemented!();
+
+        #[cfg(target_os = "linux")]
+        unsafe {
+            self.mmap.msync()
+        }
+    }
+
     fn spawn_tx(tx_mmap: Arc<crate::linux::MMap>, tx_state: Arc<FlushState>) -> JoinHandle<()> {
         thread::spawn(move || {
             let mut last_seen = 0u64;
