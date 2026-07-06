@@ -2,17 +2,31 @@
 name = "turbofox"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.86.0"
 description = "A persistant and embedded KV Database built for on-device caching."
-license = "Apache-2.0"
 repository = "https://github.com/frozen-lab/turbofox"
-keywords = ["key-value", "database", "persistent", "store", "simd"]
+keywords = [
+    "database",
+    "persistence",
+    "storage",
+]
+categories = [
+    "caching",
+    "database-implementations",
+]
+license = "MIT OR Apache-2.0"
+exclude = [
+    ".github/",
+    "shell.nix",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+]
 
-[dependencies]
-log = "0.4.28"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2.177"
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]
+additional-targets = ["i686-apple-darwin"]
 
 [dev-dependencies]
 tempfile = "3.20.0"
-env_logger = "0.11.8"
