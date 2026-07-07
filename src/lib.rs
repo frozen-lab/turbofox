@@ -130,6 +130,35 @@ pub struct TurboFoxCfg {
 }
 
 /// TurboFox is a persistent and efficient embedded KV database
+///
+/// ## Example
+///
+/// ```
+/// use turbofox::{TurboFox, TurboFoxCfg, BufferSize};
+/// use std::time::Duration;
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// let cfg = TurboFoxCfg {
+///     path: dir.path().to_path_buf(),
+///     buffer_size: BufferSize::S64,
+///     initial_available_buffers: 0x1000,
+///     flush_duration: Duration::from_millis(2),
+///     max_memory: 0x400 * 0x400 * 0x40, // 64 MB
+/// };
+///
+/// let db = TurboFox::new(cfg).unwrap();
+///
+/// let key = b"my_key";
+/// let value = b"hello world, fire and forget semantics!";
+///
+/// let ticket = db.write(key, value).unwrap();
+/// ticket.wait().unwrap(); // Wait for sync
+///
+/// let data = db.read(key).unwrap().unwrap();
+/// assert_eq!(value.as_slice(), data.as_slice());
+///
+/// db.delete(key).unwrap();
+/// ```
 #[derive(Debug)]
 pub struct TurboFox {
     kosa: Kosa,
@@ -138,6 +167,24 @@ pub struct TurboFox {
 
 impl TurboFox {
     /// Creates or initializes a new [`TurboFox`] db instance
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use turbofox::{TurboFox, TurboFoxCfg, BufferSize};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let cfg = TurboFoxCfg {
+    ///     path: dir.path().to_path_buf(),
+    ///     buffer_size: BufferSize::S64,
+    ///     initial_available_buffers: 0x10,
+    ///     flush_duration: Duration::from_millis(0x0A),
+    ///     max_memory: 0x400 * 0x400,
+    /// };
+    ///
+    /// let db = TurboFox::new(cfg).unwrap();
+    /// ```
     pub fn new(cfg: TurboFoxCfg) -> FrozenResult<Self> {
         let kosa_cfg = KosaCfg {
             path: cfg.path.clone(),
@@ -159,6 +206,29 @@ impl TurboFox {
     }
 
     /// Writes a key-value pair into the database
+    ///
+    /// ## Panics
+    ///
+    /// Panics in debug mode if the key length is greater than 16 bytes.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use turbofox::{TurboFox, TurboFoxCfg, BufferSize};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let db = TurboFox::new(TurboFoxCfg {
+    ///     path: dir.path().to_path_buf(),
+    ///     buffer_size: BufferSize::S64,
+    ///     initial_available_buffers: 0x10,
+    ///     flush_duration: Duration::from_millis(0x0A),
+    ///     max_memory: 0x400 * 0x400,
+    /// }).unwrap();
+    ///
+    /// let ticket = db.write(b"user_1", b"alice").unwrap();
+    /// ticket.wait().unwrap();
+    /// ```
     #[inline(always)]
     pub fn write(&self, key: &[u8], value: &[u8]) -> FrozenResult<AckTicket> {
         debug_assert!(key.len() <= 0x10, "key length must be <= 16");
@@ -172,7 +242,31 @@ impl TurboFox {
         Ok(ticket)
     }
 
-    /// Read the value assoicated w/ the key from the database
+    /// Read the value associated w/ the key from the database
+    ///
+    /// Returns `Ok(Some(Vec<u8>))` if the key exists and the payload is successfully read, or
+    /// `Ok(None)` if the key does not exist or fails validation in the storage engine.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use turbofox::{TurboFox, TurboFoxCfg, BufferSize};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let db = TurboFox::new(TurboFoxCfg {
+    ///     path: dir.path().to_path_buf(),
+    ///     buffer_size: BufferSize::S64,
+    ///     initial_available_buffers: 0x10,
+    ///     flush_duration: Duration::from_millis(0x0A),
+    ///     max_memory: 0x400 * 0x400,
+    /// }).unwrap();
+    ///
+    /// db.write(b"user_1", b"alice").unwrap().wait().unwrap();
+    ///
+    /// let data = db.read(b"user_1").unwrap().unwrap();
+    /// assert_eq!(data, b"alice");
+    /// ```
     #[inline(always)]
     pub fn read(&self, key: &[u8]) -> FrozenResult<Option<Vec<u8>>> {
         debug_assert!(key.len() <= 0x10, "key length must be <= 16");
@@ -189,6 +283,27 @@ impl TurboFox {
     }
 
     /// Delete the key-value pair from the database
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use turbofox::{TurboFox, TurboFoxCfg, BufferSize};
+    /// use std::time::Duration;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let db = TurboFox::new(TurboFoxCfg {
+    ///     path: dir.path().to_path_buf(),
+    ///     buffer_size: BufferSize::S64,
+    ///     initial_available_buffers: 0x10,
+    ///     flush_duration: Duration::from_millis(0x0A),
+    ///     max_memory: 0x400 * 0x400,
+    /// }).unwrap();
+    ///
+    /// db.write(b"temp_key", b"temporary data").unwrap().wait().unwrap();
+    /// db.delete(b"temp_key").unwrap();
+    ///
+    /// assert_eq!(db.read(b"temp_key").unwrap(), None);
+    /// ```
     #[inline(always)]
     pub fn delete(&self, key: &[u8]) -> FrozenResult<()> {
         debug_assert!(key.len() <= 0x10, "key length must be <= 16");
