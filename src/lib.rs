@@ -95,4 +95,20 @@ impl TurboFox {
 
         Ok(ticket)
     }
+
+    /// Read the value assoicated w/ the key from the database
+    #[inline(always)]
+    pub fn read(&self, key: &[u8]) -> FrozenResult<Option<Vec<u8>>> {
+        debug_assert!(key.len() <= 0x10, "key length must be <= 16");
+
+        let mut index_key = [0u8; 0x10];
+        index_key[..key.len()].copy_from_slice(key);
+
+        if let Some((id, n_buffers)) = self.index.read(index_key)? {
+            let value = self.kosa.read(id, n_buffers as usize)?;
+            return Ok(value);
+        }
+
+        Ok(None)
+    }
 }
