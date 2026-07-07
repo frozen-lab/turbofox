@@ -36,6 +36,9 @@ features = ["fmmap"]
 [dependencies.kosa]
 version = "0.0.1"
 
+[dependencies.twox-hash]
+version = "2.1.2"
+
 [dev-dependencies.tempfile]
 version = "3.20.0"
 
