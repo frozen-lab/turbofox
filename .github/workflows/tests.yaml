@@ -1,0 +1,139 @@
+name: Unit Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+
+jobs:
+  lints:
+    env:
+      RUSTFLAGS: "-D warnings"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-latest
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
+
+      - name: Cargo check (lib)
+        run: cargo check --release --all-features
+
+      - name: Cargo check (tests)
+        run: cargo check --tests --release --all-features
+
+      - name: Cargo check (benches)
+        run: cargo check --benches --release --all-features
+  
+  linux:
+    needs: lints
+    env:
+      RUSTFLAGS: "-D warnings"    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
+      - run: cargo test --all-features --release -- --nocapture
+
+  macos:
+    needs: lints
+    env:
+      RUSTFLAGS: "-D warnings"    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: aarch64
+          - os: macos-latest
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-${{ runner.os }}-${{ matrix.arch }}-stable
+      - run: cargo test --all-features --release -- --nocapture
+
+  macos_intel:
+    name: MacOs x86
+    needs: lints
+    runs-on: macos-15-intel
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-macos-x86-stable
+
+      - name: Cargo check (lib)
+        run: cargo check --release --all-features
+
+      - name: Cargo check (tests)
+        run: cargo check --tests --release --all-features
+
+  msrv:
+    name: MSRV (1.86.0)
+    needs: lints
+    runs-on: ubuntu-latest
+  
+    steps:
+      - uses: actions/checkout@v5
+  
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.86.0
+  
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-msrv-1.85.0
+  
+      - name: Check library
+        run: cargo check --all-features --release
+  
+      - name: Check tests
+        run: cargo check --tests --all-features --release
