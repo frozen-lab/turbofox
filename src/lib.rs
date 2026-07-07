@@ -3,6 +3,7 @@
 #![deny(missing_docs)]
 #![deny(unused_must_use)]
 #![allow(unsafe_op_in_unsafe_fn)]
+#![allow(unused)]
 
 use kosa::{Kosa, KosaCfg};
 use std::{path, time};

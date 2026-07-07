@@ -198,3 +198,214 @@ fn hash(key: &Key) -> u64 {
         hash => hash,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INIT_PAGES: usize = 4;
+    const FLUSH_DURATION: time::Duration = time::Duration::from_secs(1);
+
+    fn init() -> (tempfile::TempDir, Index) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("index");
+        let index = Index::new(path, INIT_PAGES, FLUSH_DURATION).expect("create index");
+
+        (dir, index)
+    }
+
+    fn key(id: u8) -> Key {
+        [id; 16]
+    }
+
+    mod write_read {
+        use super::*;
+
+        #[test]
+        fn ok_single_entry() {
+            let (_dir, index) = init();
+
+            index.write(key(1), 42).unwrap();
+
+            assert_eq!(index.read(key(1)).unwrap(), Some(42));
+        }
+
+        #[test]
+        fn ok_multiple_entries() {
+            let (_dir, index) = init();
+
+            for i in 0..200u8 {
+                index.write(key(i), i as u64).unwrap();
+            }
+
+            for i in 0..200u8 {
+                assert_eq!(index.read(key(i)).unwrap(), Some(i as u64));
+            }
+        }
+
+        #[test]
+        fn ok_missing_key() {
+            let (_dir, index) = init();
+
+            assert_eq!(index.read(key(7)).unwrap(), None);
+        }
+
+        #[test]
+        fn ok_overwrite_existing() {
+            let (_dir, index) = init();
+
+            index.write(key(1), 10).unwrap();
+            index.write(key(1), 20).unwrap();
+
+            assert_eq!(index.read(key(1)).unwrap(), Some(20));
+        }
+    }
+
+    mod delete {
+        use super::*;
+
+        #[test]
+        fn ok_delete_existing() {
+            let (_dir, index) = init();
+
+            index.write(key(1), 99).unwrap();
+
+            assert_eq!(index.read(key(1)).unwrap(), Some(99));
+
+            index.delete(key(1)).unwrap();
+
+            assert_eq!(index.read(key(1)).unwrap(), None);
+        }
+
+        #[test]
+        fn ok_delete_missing() {
+            let (_dir, index) = init();
+
+            index.delete(key(1)).unwrap();
+            index.delete(key(1)).unwrap();
+
+            assert_eq!(index.read(key(1)).unwrap(), None);
+        }
+
+        #[test]
+        fn ok_delete_one_preserves_others() {
+            let (_dir, index) = init();
+
+            for i in 0..100u8 {
+                index.write(key(i), i as u64).unwrap();
+            }
+
+            index.delete(key(50)).unwrap();
+
+            for i in 0..100u8 {
+                if i == 50 {
+                    assert_eq!(index.read(key(i)).unwrap(), None);
+                } else {
+                    assert_eq!(index.read(key(i)).unwrap(), Some(i as u64));
+                }
+            }
+        }
+    }
+
+    mod tombstones {
+        use super::*;
+
+        #[test]
+        fn ok_reinsert_deleted_key() {
+            let (_dir, index) = init();
+
+            index.write(key(1), 10).unwrap();
+            index.delete(key(1)).unwrap();
+
+            assert_eq!(index.read(key(1)).unwrap(), None);
+
+            index.write(key(1), 77).unwrap();
+
+            assert_eq!(index.read(key(1)).unwrap(), Some(77));
+        }
+
+        #[test]
+        fn ok_many_delete_reinsert() {
+            let (_dir, index) = init();
+
+            for i in 0..100u8 {
+                index.write(key(i), i as u64).unwrap();
+            }
+
+            for i in 0..100u8 {
+                index.delete(key(i)).unwrap();
+            }
+
+            for i in 0..100u8 {
+                index.write(key(i), (i as u64) + 1000).unwrap();
+            }
+
+            for i in 0..100u8 {
+                assert_eq!(index.read(key(i)).unwrap(), Some((i as u64) + 1000));
+            }
+        }
+    }
+
+    mod stress {
+        use super::*;
+
+        #[test]
+        fn ok_random_crud() {
+            let (_dir, index) = init();
+
+            let mut rng = 0xDEADBEEFCAFEBABEu64;
+
+            #[inline(always)]
+            fn rand(state: &mut u64) -> u64 {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                *state
+            }
+
+            let mut expected = std::collections::HashMap::new();
+
+            for _ in 0..10_000 {
+                let id = (rand(&mut rng) % 128) as u8;
+
+                match rand(&mut rng) % 3 {
+                    0 => {
+                        let value = rand(&mut rng);
+
+                        index.write(key(id), value).unwrap();
+                        expected.insert(id, value);
+                    }
+
+                    1 => {
+                        index.delete(key(id)).unwrap();
+                        expected.remove(&id);
+                    }
+
+                    _ => {
+                        assert_eq!(index.read(key(id)).unwrap(), expected.get(&id).copied());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity exhausted")]
+    fn err_capacity_exhausted() {
+        let (_dir, index) = init();
+
+        let capacity = INIT_PAGES * ITEMS_PER_ROW;
+
+        for i in 0..capacity {
+            let mut k = [0u8; 16];
+            k[..8].copy_from_slice(&(i as u64).to_le_bytes());
+
+            index.write(k, i as u64).unwrap();
+        }
+
+        let mut k = [0u8; 16];
+        k[..8].copy_from_slice(&(capacity as u64).to_le_bytes());
+
+        index.write(k, 0).unwrap();
+    }
+}
