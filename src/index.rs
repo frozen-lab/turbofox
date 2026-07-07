@@ -87,7 +87,11 @@ impl Index {
                             }
 
                             h if h == hash && page.meta_row[i].key == key => {
-                                page.meta_row[i].storage_id = storage_id;
+                                page.meta_row[i] = Metadata {
+                                    storage_id,
+                                    n_buffers,
+                                    key,
+                                };
                                 inserted = true;
                                 return;
                             }

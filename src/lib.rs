@@ -35,7 +35,7 @@ pub(crate) const MODULE_ID: u8 = 0x02;
 /// assert!(cfg.max_memory > 0);
 /// assert_eq!(cfg.buffer_size as usize, 0x40);
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TurboFoxCfg {
     /// The root directory path where database files (`data` and `bmap`) will be stored
     pub path: path::PathBuf,
@@ -125,5 +125,200 @@ impl TurboFox {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    const INIT_BUFFERS: usize = 0x1000;
+    const MAX_MEMORY: usize = 64 * 1024 * 1024;
+
+    fn init() -> (tempfile::TempDir, TurboFox) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        let db = TurboFox::new(TurboFoxCfg {
+            path: dir.path().to_path_buf(),
+            buffer_size: BufferSize::S64,
+            initial_available_buffers: INIT_BUFFERS,
+            flush_duration: Duration::from_millis(1),
+            max_memory: MAX_MEMORY,
+        })
+        .expect("create db");
+
+        (dir, db)
+    }
+
+    fn key(id: u8) -> Vec<u8> {
+        vec![id]
+    }
+
+    #[test]
+    fn ok_max_key_length() {
+        let (_dir, db) = init();
+        let key = [0xAA; 0x10];
+
+        let ticket = db.write(&key, b"value").unwrap();
+        ticket.wait().unwrap();
+
+        assert_eq!(db.read(&key).unwrap(), Some(b"value".to_vec()));
+
+        db.delete(&key).unwrap();
+        assert_eq!(db.read(&key).unwrap(), None);
+    }
+
+    mod write_read {
+        use super::*;
+
+        #[test]
+        fn ok_single() {
+            let (_dir, db) = init();
+
+            let ticket = db.write(&key(1), b"hello").unwrap();
+            ticket.wait().unwrap();
+
+            assert_eq!(db.read(&key(1)).unwrap(), Some(b"hello".to_vec()));
+        }
+
+        #[test]
+        fn ok_multiple() {
+            let (_dir, db) = init();
+            let mut last = None;
+
+            for i in 0..0x80u8 {
+                last = Some(db.write(&key(i), &[i]).unwrap());
+            }
+
+            last.unwrap().wait().unwrap();
+            for i in 0..0x80u8 {
+                assert_eq!(db.read(&key(i)).unwrap(), Some(vec![i]));
+            }
+        }
+
+        #[test]
+        fn ok_missing() {
+            let (_dir, db) = init();
+
+            assert_eq!(db.read(b"missing").unwrap(), None);
+        }
+
+        #[test]
+        fn ok_overwrite() {
+            let (_dir, db) = init();
+
+            db.write(b"abc", b"one").unwrap();
+            db.write(b"abc", b"two").unwrap().wait().unwrap();
+
+            assert_eq!(db.read(b"abc").unwrap(), Some(b"two".to_vec()));
+        }
+
+        #[test]
+        fn ok_variable_sizes() {
+            let (_dir, db) = init();
+
+            for len in 1..=0x10 {
+                let key = vec![0xAB; len];
+                let value = vec![0xCD; len * 0x40];
+
+                let ticket = db.write(&key, &value).unwrap();
+                ticket.wait().unwrap();
+
+                assert_eq!(db.read(&key).unwrap(), Some(value));
+            }
+        }
+    }
+
+    mod delete {
+        use super::*;
+
+        #[test]
+        fn ok_existing() {
+            let (_dir, db) = init();
+
+            db.write(b"a", b"value").unwrap().wait().unwrap();
+            db.delete(b"a").unwrap();
+
+            assert_eq!(db.read(b"a").unwrap(), None);
+        }
+
+        #[test]
+        fn ok_missing() {
+            let (_dir, db) = init();
+
+            db.delete(b"missing").unwrap();
+            db.delete(b"missing").unwrap();
+
+            assert_eq!(db.read(b"missing").unwrap(), None);
+        }
+
+        #[test]
+        fn ok_preserve_other_keys() {
+            let (_dir, db) = init();
+            let mut last = None;
+
+            for i in 0..0x40u8 {
+                last = Some(db.write(&key(i), &[i]).unwrap());
+            }
+
+            last.unwrap().wait().unwrap();
+            db.delete(&key(0x32)).unwrap();
+
+            for i in 0..0x40u8 {
+                if i == 0x32 {
+                    assert_eq!(db.read(&key(i)).unwrap(), None);
+                } else {
+                    assert_eq!(db.read(&key(i)).unwrap(), Some(vec![i]));
+                }
+            }
+        }
+    }
+
+    mod persistence {
+        use super::*;
+
+        #[test]
+        fn ok_reopen() {
+            let dir = tempfile::tempdir().expect("create tempdir");
+
+            let cfg = TurboFoxCfg {
+                path: dir.path().to_path_buf(),
+                buffer_size: BufferSize::S64,
+                initial_available_buffers: INIT_BUFFERS,
+                flush_duration: Duration::from_millis(1),
+                max_memory: MAX_MEMORY,
+            };
+
+            {
+                let db = TurboFox::new(cfg.clone()).unwrap();
+
+                db.write(b"a", b"one").unwrap();
+                db.write(b"b", b"two").unwrap();
+            }
+
+            {
+                let db = TurboFox::new(cfg).unwrap();
+
+                assert_eq!(db.read(b"a").unwrap(), Some(b"one".to_vec()));
+                assert_eq!(db.read(b"b").unwrap(), Some(b"two".to_vec()));
+            }
+        }
+    }
+
+    mod stress {
+        use super::*;
+
+        #[test]
+        fn ok_large_values() {
+            let (_dir, db) = init();
+
+            for i in 0..0x20u8 {
+                let value = vec![i; 0x40 * 0x0A];
+
+                db.write(&key(i), &value).unwrap().wait().unwrap();
+                assert_eq!(db.read(&key(i)).unwrap(), Some(value));
+            }
+        }
     }
 }
