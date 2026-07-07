@@ -21,6 +21,7 @@ struct Page {
 #[derive(Debug)]
 struct Metadata {
     storage_id: u64,
+    n_buffers: u64,
     key: [u8; 0x10],
 }
 
@@ -47,7 +48,7 @@ impl Index {
     }
 
     #[inline(always)]
-    pub(crate) fn write(&self, key: Key, storage_id: u64) -> error::FrozenResult<()> {
+    pub(crate) fn write(&self, key: Key, storage_id: u64, n_buffers: u64) -> error::FrozenResult<()> {
         let hash = hash(&key);
 
         let total = self.mmap.total_slots();
@@ -69,7 +70,11 @@ impl Index {
                                 let slot = first_tombstone.unwrap_or(i);
 
                                 page.hash_row[slot] = hash;
-                                page.meta_row[slot] = Metadata { storage_id, key };
+                                page.meta_row[slot] = Metadata {
+                                    storage_id,
+                                    key,
+                                    n_buffers,
+                                };
 
                                 inserted = true;
                                 return;
@@ -93,7 +98,11 @@ impl Index {
 
                     if let Some(slot) = first_tombstone.take() {
                         page.hash_row[slot] = hash;
-                        page.meta_row[slot] = Metadata { storage_id, key };
+                        page.meta_row[slot] = Metadata {
+                            storage_id,
+                            key,
+                            n_buffers,
+                        };
                         inserted = true;
                     }
                 })?;
@@ -108,7 +117,7 @@ impl Index {
     }
 
     #[inline(always)]
-    pub(crate) fn read(&self, key: Key) -> error::FrozenResult<Option<u64>> {
+    pub(crate) fn read(&self, key: Key) -> error::FrozenResult<Option<(u64, u64)>> {
         let hash = hash(&key);
 
         let total = self.mmap.total_slots();
@@ -129,7 +138,8 @@ impl Index {
                             TOMBSTONE => continue,
 
                             h if h == hash && page.meta_row[i].key == key => {
-                                result = Some(page.meta_row[i].storage_id);
+                                let row = &page.meta_row[i];
+                                result = Some((row.storage_id, row.n_buffers));
                                 return;
                             }
 
@@ -225,9 +235,9 @@ mod tests {
         fn ok_single_entry() {
             let (_dir, index) = init();
 
-            index.write(key(1), 42).unwrap();
+            index.write(key(1), 42, 5).unwrap();
 
-            assert_eq!(index.read(key(1)).unwrap(), Some(42));
+            assert_eq!(index.read(key(1)).unwrap(), Some((42, 5)));
         }
 
         #[test]
@@ -235,11 +245,11 @@ mod tests {
             let (_dir, index) = init();
 
             for i in 0..200u8 {
-                index.write(key(i), i as u64).unwrap();
+                index.write(key(i), i as u64, (i % 10) as u64).unwrap();
             }
 
             for i in 0..200u8 {
-                assert_eq!(index.read(key(i)).unwrap(), Some(i as u64));
+                assert_eq!(index.read(key(i)).unwrap(), Some((i as u64, (i % 10) as u64)));
             }
         }
 
@@ -254,10 +264,10 @@ mod tests {
         fn ok_overwrite_existing() {
             let (_dir, index) = init();
 
-            index.write(key(1), 10).unwrap();
-            index.write(key(1), 20).unwrap();
+            index.write(key(1), 10, 2).unwrap();
+            index.write(key(1), 20, 8).unwrap();
 
-            assert_eq!(index.read(key(1)).unwrap(), Some(20));
+            assert_eq!(index.read(key(1)).unwrap(), Some((20, 8)));
         }
     }
 
@@ -268,9 +278,9 @@ mod tests {
         fn ok_delete_existing() {
             let (_dir, index) = init();
 
-            index.write(key(1), 99).unwrap();
+            index.write(key(1), 99, 1).unwrap();
 
-            assert_eq!(index.read(key(1)).unwrap(), Some(99));
+            assert_eq!(index.read(key(1)).unwrap(), Some((99, 1)));
 
             index.delete(key(1)).unwrap();
 
@@ -292,7 +302,7 @@ mod tests {
             let (_dir, index) = init();
 
             for i in 0..100u8 {
-                index.write(key(i), i as u64).unwrap();
+                index.write(key(i), i as u64, 3).unwrap();
             }
 
             index.delete(key(50)).unwrap();
@@ -301,7 +311,7 @@ mod tests {
                 if i == 50 {
                     assert_eq!(index.read(key(i)).unwrap(), None);
                 } else {
-                    assert_eq!(index.read(key(i)).unwrap(), Some(i as u64));
+                    assert_eq!(index.read(key(i)).unwrap(), Some((i as u64, 3)));
                 }
             }
         }
@@ -314,14 +324,14 @@ mod tests {
         fn ok_reinsert_deleted_key() {
             let (_dir, index) = init();
 
-            index.write(key(1), 10).unwrap();
+            index.write(key(1), 10, 2).unwrap();
             index.delete(key(1)).unwrap();
 
             assert_eq!(index.read(key(1)).unwrap(), None);
 
-            index.write(key(1), 77).unwrap();
+            index.write(key(1), 77, 4).unwrap();
 
-            assert_eq!(index.read(key(1)).unwrap(), Some(77));
+            assert_eq!(index.read(key(1)).unwrap(), Some((77, 4)));
         }
 
         #[test]
@@ -329,7 +339,7 @@ mod tests {
             let (_dir, index) = init();
 
             for i in 0..100u8 {
-                index.write(key(i), i as u64).unwrap();
+                index.write(key(i), i as u64, 1).unwrap();
             }
 
             for i in 0..100u8 {
@@ -337,11 +347,11 @@ mod tests {
             }
 
             for i in 0..100u8 {
-                index.write(key(i), (i as u64) + 1000).unwrap();
+                index.write(key(i), (i as u64) + 1000, 5).unwrap();
             }
 
             for i in 0..100u8 {
-                assert_eq!(index.read(key(i)).unwrap(), Some((i as u64) + 1000));
+                assert_eq!(index.read(key(i)).unwrap(), Some(((i as u64) + 1000, 5)));
             }
         }
     }
@@ -371,9 +381,10 @@ mod tests {
                 match rand(&mut rng) % 3 {
                     0 => {
                         let value = rand(&mut rng);
+                        let n_bufs = rand(&mut rng) % 100; // Generate a random buffer count
 
-                        index.write(key(id), value).unwrap();
-                        expected.insert(id, value);
+                        index.write(key(id), value, n_bufs).unwrap();
+                        expected.insert(id, (value, n_bufs));
                     }
 
                     1 => {
@@ -400,12 +411,12 @@ mod tests {
             let mut k = [0u8; 16];
             k[..8].copy_from_slice(&(i as u64).to_le_bytes());
 
-            index.write(k, i as u64).unwrap();
+            index.write(k, i as u64, 1).unwrap();
         }
 
         let mut k = [0u8; 16];
         k[..8].copy_from_slice(&(capacity as u64).to_le_bytes());
 
-        index.write(k, 0).unwrap();
+        index.write(k, 0, 0).unwrap();
     }
 }

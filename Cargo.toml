@@ -34,7 +34,7 @@ default-features = false
 features = ["fmmap"]
 
 [dependencies.kosa]
-version = "0.0.1"
+version = "0.0.3"
 
 [dependencies.twox-hash]
 version = "2.1.2"

@@ -3,7 +3,6 @@
 #![deny(missing_docs)]
 #![deny(unused_must_use)]
 #![allow(unsafe_op_in_unsafe_fn)]
-#![allow(unused)]
 
 use kosa::{Kosa, KosaCfg};
 use std::{path, time};
@@ -11,10 +10,10 @@ use std::{path, time};
 mod index;
 
 pub use frozen_core::error::{FrozenError, FrozenResult};
-pub use kosa::{BufferSize, WriteRequest};
+pub use kosa::{AckTicket, BufferSize};
 
 /// Module ID used in [`frozen_core::error::FrozenError`]
-pub(crate) const MODULE_ID: u8 = 0x01;
+pub(crate) const MODULE_ID: u8 = 0x02;
 
 /// All the available configurations for [`TurboFox`]
 ///
@@ -71,7 +70,7 @@ impl TurboFox {
             max_memory: cfg.max_memory,
             flush_duration: cfg.flush_duration,
         };
-        let kosa = Kosa::new(kosa_cfg).unwrap();
+        let kosa = Kosa::new(kosa_cfg)?;
 
         let init_pages = if cfg.initial_available_buffers < index::ITEMS_PER_ROW {
             1
@@ -81,5 +80,19 @@ impl TurboFox {
         let index = index::Index::new(cfg.path.join("index"), init_pages, cfg.flush_duration)?;
 
         Ok(Self { kosa, index })
+    }
+
+    /// Writes a key-value pair into the database
+    #[inline(always)]
+    pub fn write(&self, key: &[u8], value: &[u8]) -> FrozenResult<AckTicket> {
+        debug_assert!(key.len() <= 0x10, "key length must be <= 16");
+
+        let mut index_key = [0u8; 0x10];
+        index_key[..key.len()].copy_from_slice(key);
+
+        let (ticket, storage_id, n_buffers) = self.kosa.write(value)?;
+        self.index.write(index_key, storage_id, n_buffers)?;
+
+        Ok(ticket)
     }
 }

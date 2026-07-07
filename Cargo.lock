@@ -110,17 +110,6 @@ dependencies = [
 
 [[package]]
 name = "frozen-core"
-version = "0.0.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f497695b19b67e32e02665e89f4c7a63dda0f94a84ee7d9e20cbdeaf0c8198ae"
-dependencies = [
- "event-listener",
- "futures",
- "libc",
-]
-
-[[package]]
-name = "frozen-core"
 version = "0.0.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd7d9f2c67f89d1f7b007b9b50e452b5d8d40dc36865fd25ac7a2e1f6930bd84"
@@ -246,11 +235,11 @@ dependencies = [
 
 [[package]]
 name = "kosa"
-version = "0.0.1"
+version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aff67efd65a28564dfdf9c0d7220e1486f9860fc390078231b067a7e79284395"
+checksum = "c8dee270c3a942f7a1d62a02e2be010c27f7295a21cb79e84e7736ead736b26d"
 dependencies = [
- "frozen-core 0.0.31",
+ "frozen-core",
 ]
 
 [[package]]
@@ -439,7 +428,7 @@ dependencies = [
 name = "turbofox"
 version = "0.0.1"
 dependencies = [
- "frozen-core 0.0.32",
+ "frozen-core",
  "hdrhistogram",
  "kosa",
  "tempfile",
