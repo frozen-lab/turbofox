@@ -6,7 +6,7 @@
 
 A persistant and embedded KV Database built for on-device caching
 
-> [!INFO]
+> [!IMPORTANT]
 > The `turbofox` db is still in a proof-of-concept stage of it's development. Currently use is
 > discouraged, but not prohibited, **given you assume all the risks**.
 
