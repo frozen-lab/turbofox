@@ -158,15 +158,15 @@ impl Index {
     }
 
     #[inline(always)]
-    pub(crate) fn delete(&self, key: Key) -> error::FrozenResult<()> {
+    pub(crate) fn delete(&self, key: Key) -> error::FrozenResult<Option<(u64, u64)>> {
         let hash = hash(&key);
 
         let total = self.mmap.total_slots();
         let start = (hash as usize) % total;
 
         for probe in 0..total {
+            let mut deleted_meta = None;
             let page_idx = (start + probe) % total;
-            let mut deleted = false;
 
             unsafe {
                 self.mmap.write(page_idx, |raw_page| {
@@ -180,7 +180,9 @@ impl Index {
 
                             h if h == hash && page.meta_row[i].key == key => {
                                 page.hash_row[i] = TOMBSTONE;
-                                deleted = true;
+
+                                let meta_row = &page.meta_row[i];
+                                deleted_meta = Some((meta_row.storage_id, meta_row.n_buffers));
                                 return;
                             }
 
@@ -190,12 +192,12 @@ impl Index {
                 })?;
             }
 
-            if deleted {
-                return Ok(());
+            if deleted_meta.is_some() {
+                return Ok(deleted_meta);
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 

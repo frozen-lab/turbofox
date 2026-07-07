@@ -111,4 +111,19 @@ impl TurboFox {
 
         Ok(None)
     }
+
+    /// Delete the key-value pair from the database
+    #[inline(always)]
+    pub fn delete(&self, key: &[u8]) -> FrozenResult<()> {
+        debug_assert!(key.len() <= 0x10, "key length must be <= 16");
+
+        let mut index_key = [0u8; 0x10];
+        index_key[..key.len()].copy_from_slice(key);
+
+        if let Some((id, n_bufs)) = self.index.delete(index_key)? {
+            self.kosa.delete(id, n_bufs as usize)?;
+        }
+
+        Ok(())
+    }
 }
