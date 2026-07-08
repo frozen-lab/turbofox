@@ -1,6 +1,6 @@
 [package]
 name = "turbofox"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.86.0"
 description = "A persistant and embedded KV Database built for on-device caching."

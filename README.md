@@ -16,7 +16,7 @@ Add following to your `Cargo.toml`,
 
 ```toml
 [dependencies]
-turbofox = { version = "0.0.1" }
+turbofox = { version = "0.0.2" }
 
 ```
 
