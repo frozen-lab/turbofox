@@ -23,6 +23,19 @@ turbofox = { version = "0.0.1" }
 > [!NOTE]
 > Current version of `turbofox` requires Rust 1.86 or later.
 
+## Target Platforms
+
+TurboFox is currently available on the following platforms,
+
+| Platform                              | Support |
+|---------------------------------------|:-------:|
+| `aarch64-unknown-linux-gnu`           | ✅      |
+| `x86_64-unknown-linux-gnu`            | ✅      |
+| `aarch64-pc-windows-msvc`             | ❌      |
+| `x86_64-pc-windows-msvc`              | ❌      |
+| `aarch64-apple-darwin`                | ✅      |
+| `x86_64-apple-darwin`                 | ✅      |
+
 ## Benchmarks
 
 Environment used for benching:
